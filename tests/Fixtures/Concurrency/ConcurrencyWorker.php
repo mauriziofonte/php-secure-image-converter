@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Mfonte\SecureImageConverter\Tests\Fixtures\Concurrency;
 
+use Mfonte\SecureImageConverter\Concurrency\Backoff;
 use Mfonte\SecureImageConverter\Concurrency\KeyedLock;
 use Mfonte\SecureImageConverter\Concurrency\LeaseInterface;
 use Mfonte\SecureImageConverter\Concurrency\LockDirectory;
@@ -18,15 +19,19 @@ use Mfonte\SecureImageConverter\Contract\Exception\ConcurrencyLimitException;
  * - mode: "semaphore" acquires a Semaphore slot, "keyed" the KeyedLock of "key", "unlocked" nothing (the negative
  *   control of the log analysis); each then logs "start", holds for holdMs, logs "end" and releases.
  *   "hold-semaphore" and "hold-keyed" acquire, print their outcome and sleep until killed. "directory" only opens
- *   the lock directory.
+ *   the lock directory. "keyed-stress" and "semaphore-stress" acquire and release "iterations" times in a row as
+ *   fast as possible, with the exact overlap detector described at stress().
  * - id, lockDir, name, slots, key, timeout (seconds), holdMs: as their names say.
+ * - stress modes: iterations, markerDir, holdUs (microseconds inside the marker, default 0), backoffInitial and
+ *   backoffMax (Backoff delays in seconds).
  * - log: the shared event log, appended under an exclusive flock() of the log file itself, independent of the
  *   classes under test.
  * - ready, go: start barrier; the worker creates "ready" once loaded, then waits until "go" exists.
  *
- * The worker prints one JSON line: {"outcome": "acquired"} (exit status 0), or {"outcome": "limit", "retryAfter":
- * <int>, "waited": <seconds>} after a ConcurrencyLimitException (exit status 3). Any other failure is written to
- * STDERR with exit status 1.
+ * The worker prints one JSON line: {"outcome": "acquired"} (exit status 0), {"outcome": "stress", "iterations":
+ * <int>, "violations": <int>} after a stress run (exit status 0), or {"outcome": "limit", "retryAfter": <int>,
+ * "waited": <seconds>} after a ConcurrencyLimitException (exit status 3). Any other failure is written to STDERR with
+ * exit status 1.
  */
 final class ConcurrencyWorker
 {
@@ -83,6 +88,11 @@ final class ConcurrencyWorker
 
             return self::EXIT_ACQUIRED;
         }
+        if ($mode === 'keyed-stress' || $mode === 'semaphore-stress') {
+            $this->waitForStartSignal();
+
+            return $this->stress($mode, $directory);
+        }
 
         $this->waitForStartSignal();
         $started = microtime(true);
@@ -113,6 +123,64 @@ final class ConcurrencyWorker
             $lease->release();
         }
         self::report(['outcome' => 'acquired']);
+
+        return self::EXIT_ACQUIRED;
+    }
+
+    /**
+     * Acquires and releases "iterations" times in a row. While it holds the lease, the worker claims a marker
+     * directory in markerDir with mkdir(), which is atomic and fails when the marker already exists, and removes the
+     * marker before it releases. keyed-stress uses one marker, semaphore-stress one per slot, tried in order.
+     *
+     * A holder that finds every marker claimed counts a violation, and that can only happen when more holders than
+     * slots are inside at the same time: each marker it found claimed belonged to a holder that was inside together
+     * with it (markers are removed before release), and a holder claims a later marker only after finding the
+     * earlier ones claimed by holders inside with it. The detector therefore has no false positives, and it misses
+     * only overlaps shorter than one mkdir().
+     */
+    private function stress(string $mode, LockDirectory $directory): int
+    {
+        $backoff = new Backoff($this->number('backoffInitial'), $this->number('backoffMax'));
+        $timeout = $this->number('timeout');
+        if ($mode === 'keyed-stress') {
+            $markers = 1;
+            $lock = new KeyedLock($directory, $this->string('name'), $backoff);
+            $key = $this->string('key');
+            $acquire = static function () use ($lock, $key, $timeout): LeaseInterface {
+                return $lock->acquire($key, $timeout);
+            };
+        } else {
+            $markers = (int) $this->number('slots');
+            $semaphore = new Semaphore($directory, $this->string('name'), $markers, $backoff);
+            $acquire = static function () use ($semaphore, $timeout): LeaseInterface {
+                return $semaphore->acquire($timeout);
+            };
+        }
+        $markerDirectory = $this->string('markerDir');
+        $holdUs = isset($this->options['holdUs']) ? (int) $this->number('holdUs') : 0;
+        $iterations = (int) $this->number('iterations');
+
+        $violations = 0;
+        for ($iteration = 0; $iteration < $iterations; ++$iteration) {
+            $lease = $acquire();
+            $claimed = null;
+            for ($marker = 0; $marker < $markers && $claimed === null; ++$marker) {
+                $path = sprintf('%s/marker-%d', $markerDirectory, $marker);
+                if (@mkdir($path)) {
+                    $claimed = $path;
+                }
+            }
+            if ($claimed === null) {
+                ++$violations;
+            } else {
+                if ($holdUs > 0) {
+                    usleep($holdUs);
+                }
+                rmdir($claimed);
+            }
+            $lease->release();
+        }
+        self::report(['outcome' => 'stress', 'iterations' => $iterations, 'violations' => $violations]);
 
         return self::EXIT_ACQUIRED;
     }

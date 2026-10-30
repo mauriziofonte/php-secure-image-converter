@@ -38,6 +38,10 @@ final class KeyedLockProcessesTest extends TestCase
 
     private const WORKERS_PER_KEY = 10;
 
+    private const STRESS_WORKERS = 8;
+
+    private const STRESS_ITERATIONS = 250;
+
     /**
      * @var string
      */
@@ -96,6 +100,53 @@ final class KeyedLockProcessesTest extends TestCase
         self::assertGreaterThanOrEqual(2, $log->getMaxConcurrency(), 'holders of different keys never ran in parallel');
         // Every holder deleted its file on release.
         self::assertSame(['.', '..'], scandir($this->root . '/locks'));
+    }
+
+    /**
+     * Exact overlap detection under maximal contention on one key. The workers acquire and release in a tight loop,
+     * with no hold time and a Backoff of 10 to 500 microseconds, so waiters constantly lock files that their previous
+     * holder deleted on release a moment earlier: the race that the path re-check of KeyedLock and the
+     * delete-before-unlock order of Lease must win. Every holder claims a marker directory with mkdir() while it
+     * holds the key (ConcurrencyWorker::stress()), so two simultaneous holders are counted as a violation.
+     */
+    public function testNoTwoHoldersOfOneKeyUnderHighContention(): void
+    {
+        self::assertNotNull($this->pool);
+        $markers = $this->root . '/markers';
+        mkdir($markers, 0700);
+        for ($id = 0; $id < self::STRESS_WORKERS; ++$id) {
+            $this->pool->start([
+                'mode' => 'keyed-stress',
+                'id' => $id,
+                'lockDir' => $this->root . '/locks',
+                'name' => 'outputs',
+                'key' => 'hot.webp',
+                'timeout' => 60.0,
+                'iterations' => self::STRESS_ITERATIONS,
+                'markerDir' => $markers,
+                'backoffInitial' => 0.00001,
+                'backoffMax' => 0.0005,
+            ], true);
+        }
+        $this->pool->releaseBarrier(self::STRESS_WORKERS);
+        $this->pool->waitForAll();
+
+        $iterations = 0;
+        $violations = 0;
+        for ($index = 0; $index < self::STRESS_WORKERS; ++$index) {
+            self::assertSame(ConcurrencyWorker::EXIT_ACQUIRED, $this->pool->exitCode($index), $this->pool->errorOutput($index));
+            $outcome = $this->pool->outcome($index);
+            self::assertNotNull($outcome);
+            self::assertSame('stress', $outcome['outcome']);
+            self::assertIsInt($outcome['iterations']);
+            self::assertIsInt($outcome['violations']);
+            $iterations += $outcome['iterations'];
+            $violations += $outcome['violations'];
+        }
+        self::assertSame(self::STRESS_WORKERS * self::STRESS_ITERATIONS, $iterations);
+        self::assertSame(0, $violations, 'two processes held the same key at the same time');
+        self::assertSame(['.', '..'], scandir($markers));
+        self::assertSame(['.', '..'], scandir($this->root . '/locks'), 'a released key left its lock file behind');
     }
 
     public function testKilledHolderReleasesItsKeyAndOtherKeysStayFree(): void
