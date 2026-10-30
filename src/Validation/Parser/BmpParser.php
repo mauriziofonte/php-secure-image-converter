@@ -26,15 +26,40 @@ use Mfonte\SecureImageConverter\Validation\Limits;
  *   by file name are variants this library does not process: they are refused as unsupported formats. An embedded
  *   colour profile (V5 PROFILE_EMBEDDED) must lie inside the file.
  *
+ * - ImageMagick reads one more image, of any size, when the two bytes where it stops reading the image are the magic
+ *   number of a BMP or OS/2 bitmap ("BA", "BM", "IC", "PI", "PT", "CI" or "CP", in any case): after the pixel data, or
+ *   after the colour profile, which it reads last. Such a file is refused as unsupported. Run-length encoded data ends
+ *   at its end-of-bitmap escape, its last row or its last pixel, wherever its declared size says: it is walked as
+ *   ImageMagick walks it, without producing pixels, up to MAX_RUNS runs (an escape or the first of consecutive runs
+ *   counting as ESCAPE_COST runs); longer data is refused as unsupported.
+ *
  * BMP carries no metadata besides the colour profile. The bit depth is 16 for 64-bit images and 8 otherwise. Decoders
  * read the headers and bit masks, the palette of an image of 8 bits or less (images of more bits have none to read,
- * whatever the colours-used field says), the pixel data and the colour profile: any other byte of the file, before,
- * between or after them, is trailing data.
+ * whatever the colours-used field says), the pixel data (as far as its declared size for run-length encoded data) and
+ * the colour profile: any other byte of the file, before, between or after them, is trailing data.
  *
  * @internal
  */
 final class BmpParser implements ParserInterface
 {
+    /**
+     * Largest number of runs walked in run-length encoded data, an escape or the first of consecutive runs counting as
+     * ESCAPE_COST runs. A run covers up to 255 pixels, so real images stay far below it; ImageMagick codes a noisy
+     * image in runs of one pixel, which reach it from about 390,000 pixels.
+     */
+    public const MAX_RUNS = 393216;
+
+    /**
+     * Runs that an escape (end of line, end of bitmap, delta or absolute run) or the first of consecutive runs counts
+     * for: walking one costs about as much as walking three runs in a row.
+     */
+    public const ESCAPE_COST = 3;
+
+    /**
+     * Bytes of run-length encoded data read at once.
+     */
+    private const RUN_CHUNK_SIZE = 65536;
+
     private const FILE_HEADER_SIZE = 14;
 
     private const CORE_HEADER_SIZE = 12;
@@ -159,6 +184,18 @@ final class BmpParser implements ParserInterface
         }
 
         list($profileStart, $profileEnd) = $headerSize === 124 ? self::embeddedProfile($reader, $size) : [0, 0];
+        $stops = $compression === self::BI_RLE8 || $compression === self::BI_RLE4
+            ? self::runLengthStops($reader, $dataOffset, $width, $height, $compression === self::BI_RLE4)
+            : [$end];
+        if ($profileEnd > 0) {
+            $stops[] = $profileEnd;
+        }
+        foreach ($stops as $stop) {
+            $reader->seek(min($stop, $size));
+            if (preg_match('~^(?:B[AM]|IC|P[IT]|C[IP])$~i', $reader->read(min(2, $size - $reader->getPosition()))) === 1) {
+                throw new UnsupportedFormatException('BMP files that hold more than one image are not supported.');
+            }
+        }
         $paletteEnd = $headersEnd;
         if ($bitCount <= 8) {
             $paletteEnd = min($dataOffset, $headersEnd + ($colours === 0 ? 1 << $bitCount : $colours) * $paletteEntrySize);
@@ -193,6 +230,99 @@ final class BmpParser implements ParserInterface
         } while ($covered > $previous && $covered < $size);
 
         return $covered >= $size;
+    }
+
+    /**
+     * Offsets where ImageMagick may stop reading run-length encoded data: after the escape or run that ends it, and two
+     * bytes further, which ImageMagick 6.9.12 and later read before they stop. The end of the file when the data runs
+     * out first.
+     *
+     * @throws UnsupportedFormatException when walking the data takes more than MAX_RUNS runs
+     *
+     * @return list<int>
+     */
+    private static function runLengthStops(ByteReader $reader, int $dataOffset, int $width, int $height, bool $rle4): array
+    {
+        $size = $reader->getSize();
+        $pixels = $width * $height;
+        $pixel = 0;
+        $column = 0;
+        $row = 0;
+        $position = $dataOffset;
+        $buffer = '';
+        $bufferStart = $dataOffset;
+        $bufferLength = 0;
+        $runs = 0;
+        $series = false;
+        while ($row < $height && $pixel < $pixels) {
+            // A run or escape takes 2 bytes, a delta 4: the buffer is refilled when fewer remain.
+            $at = $position - $bufferStart;
+            if ($at + 4 > $bufferLength) {
+                $reader->seek($position);
+                $buffer = $reader->read(min(self::RUN_CHUNK_SIZE, $size - $position));
+                $bufferStart = $position;
+                $bufferLength = strlen($buffer);
+                $at = 0;
+            }
+            if ($at + 2 > $bufferLength) {
+                return [$size];
+            }
+            $count = ord($buffer[$at]);
+            if ($runs + ($count > 0 && $series ? 1 : self::ESCAPE_COST) > self::MAX_RUNS) {
+                throw self::tooManyRuns();
+            }
+            if ($count > 0) {
+                // Encoded runs of $count pixels of one value, most of the data: walked in a tight loop up to the next
+                // escape, the end of the buffer, the last pixel or the last run allowed. The last pixel stops a run.
+                $first = $at;
+                $runs += $series ? 0 : self::ESCAPE_COST - 1;
+                $series = true;
+                $last = min($bufferLength - 2, $at + 2 * (self::MAX_RUNS - 1 - $runs));
+                $previous = $pixel;
+                do {
+                    $pixel += $count;
+                    $at += 2;
+                } while ($at <= $last && $pixel < $pixels && ($count = ord($buffer[$at])) > 0);
+                $pixel = min($pixel, $pixels);
+                $column += $pixel - $previous;
+                $runs += intdiv($at - $first, 2);
+                $position = $bufferStart + $at;
+                continue;
+            }
+            $runs += self::ESCAPE_COST;
+            $series = false;
+            $value = ord($buffer[$at + 1]);
+            $position += 2;
+            if ($value === 0) {
+                // End of line.
+                $column = 0;
+                ++$row;
+                $pixel = $row * $width;
+            } elseif ($value === 1) {
+                // End of bitmap.
+                break;
+            } elseif ($value === 2) {
+                // Delta: moves right and down by the next two bytes; ImageMagick fails when they are missing.
+                if ($at + 4 > $bufferLength) {
+                    return [$size];
+                }
+                $column += ord($buffer[$at + 2]);
+                $row += ord($buffer[$at + 3]);
+                $pixel = $row * $width + $column;
+                $position += 2;
+            } else {
+                // Absolute run: $value pixels in the next bytes, padded to 2 bytes; RLE4 packs two pixels a byte.
+                $count = min($value, $pixels - $pixel);
+                $position += $rle4 ? intdiv($count + 1, 2) + (($count & 3) === 1 || ($count & 3) === 2 ? 1 : 0) : $count + ($count & 1);
+                $pixel += $count;
+                $column += $count;
+                if ($position > $size) {
+                    return [$size];
+                }
+            }
+        }
+
+        return [$position, min($size, $position + 2)];
     }
 
     /**
@@ -253,6 +383,11 @@ final class BmpParser implements ParserInterface
     private static function signed(int $value): int
     {
         return $value >= 0x80000000 ? $value - 0x100000000 : $value;
+    }
+
+    private static function tooManyRuns(): UnsupportedFormatException
+    {
+        return new UnsupportedFormatException(sprintf('Run-length encoded BMP files of more than %d runs are not supported.', self::MAX_RUNS));
     }
 
     private static function invalid(string $problem): InvalidImageException

@@ -8,6 +8,7 @@ use Mfonte\SecureImageConverter\Contract\Exception\ErrorCode;
 use Mfonte\SecureImageConverter\Contract\ImageFormat;
 use Mfonte\SecureImageConverter\Validation\Parser\Av1SequenceHeader;
 use Mfonte\SecureImageConverter\Validation\Parser\AvifParser;
+use Mfonte\SecureImageConverter\Validation\Parser\BmpParser;
 use Mfonte\SecureImageConverter\Validation\Parser\GifParser;
 use Mfonte\SecureImageConverter\Validation\Parser\PngParser;
 use Mfonte\SecureImageConverter\Validation\Parser\TiffParser;
@@ -302,6 +303,35 @@ final class ImageCorpus
             'bmp/valid-zip-before-icc.bmp' => self::committed(
                 self::bmpGapBeforeProfile("PK\x05\x06" . ImageBuilder::repeat("\0", 18)),
                 self::accept(ImageFormat::BMP, 4, 4, 1, ['icc_profile' => true, 'trailing_data' => true])
+            ),
+            // ImageMagick reads one more image, of any size, when the two bytes where it stops reading are a BMP magic.
+            'bmp/unsupported-second-image.bmp' => self::committed($valid . ImageBuilder::bmp(8, 8), self::reject(ErrorCode::UNSUPPORTED_FORMAT)),
+            'bmp/unsupported-second-icon.bmp' => self::committed($valid . 'ic' . ImageBuilder::repeat("\0", 30), self::reject(ErrorCode::UNSUPPORTED_FORMAT)),
+            'bmp/unsupported-image-after-icc.bmp' => self::committed(
+                ImageBuilder::bmp(4, 4, 32, 3, 124, false, 'MBED', ImageBuilder::iccProfile()) . ImageBuilder::bmp(8, 8),
+                self::reject(ErrorCode::UNSUPPORTED_FORMAT)
+            ),
+            // Run-length encoded data ends at its end of bitmap whatever its declared size, and ImageMagick reads two more bytes.
+            'bmp/unsupported-image-after-rle-end.bmp' => self::committed(
+                self::bmpOfRuns(8, 8, ImageBuilder::repeat("\x07\x01\0\0", 7) . "\0\1\0\0" . ImageBuilder::bmp(8, 8)),
+                self::reject(ErrorCode::UNSUPPORTED_FORMAT)
+            ),
+            // An absolute run of 5 pixels takes 3 bytes and a pad byte.
+            'bmp/unsupported-image-after-rle4-end.bmp' => self::committed(
+                self::bmpOfRuns(8, 2, "\0\x05\x12\x34\x50\0\0\0\0\1\0\0" . ImageBuilder::bmp(8, 8), true),
+                self::reject(ErrorCode::UNSUPPORTED_FORMAT)
+            ),
+            // A run of 66 pixels of colour 77 reads "BM": only the bytes where the data ends count.
+            'bmp/valid-magic-in-rle-data.bmp' => self::committed(self::bmpOfRuns(66, 2, "BM\0\0BM\0\0\0\1"), self::accept(ImageFormat::BMP, 66, 2)),
+            // The most runs ImageMagick's walk may take (the first run of a series and the end of bitmap count as
+            // three), then one too many.
+            'bmp/valid-most-runs.bmp' => self::generated(
+                self::bmpOfRuns(1024, 1024, ImageBuilder::repeat("\x01\0", BmpParser::MAX_RUNS - 2 * BmpParser::ESCAPE_COST + 1) . "\0\1"),
+                self::accept(ImageFormat::BMP, 1024, 1024)
+            ),
+            'bmp/unsupported-too-many-runs.bmp' => self::generated(
+                self::bmpOfRuns(1024, 1024, ImageBuilder::repeat("\x01\0", BmpParser::MAX_RUNS - 2 * BmpParser::ESCAPE_COST + 2) . "\0\1"),
+                self::reject(ErrorCode::UNSUPPORTED_FORMAT)
             ),
             'bmp/bomb-100000x100000.bmp' => self::committed(ImageBuilder::patch($valid, 18, pack('VV', 100000, 100000)), self::reject(ErrorCode::IMAGE_TOO_LARGE, true)),
             'bmp/spoof-planes.bmp' => self::committed(ImageBuilder::patch($valid, 26, pack('v', 2)), self::reject(ErrorCode::INVALID_IMAGE)),
@@ -920,6 +950,19 @@ final class ImageCorpus
         list($bytes) = self::avifWithBox('iloc', $payload, ['meta']);
 
         return ImageBuilder::patch($bytes, ImageBuilder::find($bytes, 'iloc') + 4 + $extentOffset, pack('J', ImageBuilder::find($bytes, 'mdat') + 4));
+    }
+
+    /**
+     * An 8-bit (or with $rle4 4-bit) run-length encoded BMP whose pixel data is $data, which its compressed size
+     * covers.
+     */
+    private static function bmpOfRuns(int $width, int $height, string $data, bool $rle4 = false): string
+    {
+        $bmp = $rle4 ? ImageBuilder::bmp($width, $height, 4, 2) : ImageBuilder::bmp($width, $height, 8, 1);
+        $bytes = substr($bmp, 0, ImageBuilder::readUint32($bmp, 10, false)) . $data;
+
+        // The file size (at 2) and the compressed size of the info header (at 34) grow with the data.
+        return ImageBuilder::patch(ImageBuilder::patch($bytes, 2, pack('V', strlen($bytes))), 34, pack('V', strlen($data)));
     }
 
     /**
