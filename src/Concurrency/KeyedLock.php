@@ -21,7 +21,9 @@ use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
  * acquire() repeats non-blocking attempts with Backoff pauses until its timeout and then throws
  * ConcurrencyLimitException; tryAcquire() makes one attempt. The returned Lease is released explicitly, on
  * destruction, or by the operating system when the holder dies. The lock is not reentrant: a process that holds a
- * key and asks for it again waits for itself until the timeout.
+ * key and asks for it again waits for itself until the timeout. Waiters are not served in arrival order (see
+ * Backoff): a process that releases a key and takes it again at once can starve the others, so release a key only
+ * when its work is done.
  *
  * The limitations of LockDirectory apply: local filesystems only (flock() on NFS is unreliable), POSIX systems only,
  * one host, and the lock files must not be deleted by anything else while in use.

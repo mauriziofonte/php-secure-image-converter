@@ -12,8 +12,13 @@ use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
  *
  * flock() cannot wait with a timeout, so a waiting caller polls with LOCK_NB instead. The n-th pause (from 0) is drawn
  * uniformly from [d / 2, d] where d = min(maxDelay, initialDelay * 2^n): pauses grow quickly while a slot is busy,
- * never exceed maxDelay, and the jitter keeps waiting processes from polling in lockstep. maxDelay is also the longest
- * time a waiter can stay unaware that the lock was released, so it bounds the extra latency of a waiter.
+ * never exceed maxDelay, and the jitter keeps waiting processes from polling in lockstep.
+ *
+ * Waiting is not fair. No queue orders the waiters: whoever polls first after a release wins, so a waiter can lose
+ * every race, against later arrivals or against a holder that acquires again right after releasing, and time out
+ * while others are served (starvation). A waiter that is asleep when a lock is released, and loses no race, notices
+ * the release within maxDelay; nothing bounds how long it waits overall except its timeout. Callers should therefore
+ * keep their leases short and take one lease per request rather than releasing and acquiring again in a loop.
  *
  * Time is measured with the monotonic clock (hrtime()) on PHP 7.3 and later, with microtime() on PHP 7.2.
  */

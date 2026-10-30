@@ -20,6 +20,12 @@ use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
  * configured with fewer slots uses a subset of the files, one with more slots adds files the others ignore. The
  * semaphore is not reentrant: each acquire() call takes its own slot, also inside one process.
  *
+ * Slots are not handed out in arrival order (see Backoff): a waiter can time out while later callers, or a holder that
+ * acquires again right after releasing, take every freed slot. Take one lease per request and hold it for the whole
+ * request: a request that converts several images, such as a batch of the API's v1 endpoint, acquires once and
+ * converts them all under that lease, instead of releasing and acquiring again for each image, which would let it
+ * starve the requests that are waiting.
+ *
  * The limitations of LockDirectory apply: local filesystems only (flock() on NFS is unreliable), POSIX systems only,
  * one host, and the lock files must not be deleted while in use.
  */
