@@ -734,7 +734,9 @@ final class ImageCorpus
                 ImageBuilder::patch($sequence, $trackHeader + 4 + 4 + 32 + 52, pack('NN', 16000 << 16, 16000 << 16)),
                 self::reject(ErrorCode::INVALID_IMAGE)
             ),
-            'avif/unsupported-second-sample-entry.avif' => self::committed(self::avifSecondSampleEntry(), self::reject(ErrorCode::UNSUPPORTED_FORMAT)),
+            'avif/unsupported-second-sample-entry.avif' => self::committed(self::avifWithOtherSampleEntries(1), self::reject(ErrorCode::UNSUPPORTED_FORMAT)),
+            // The sample description table may not hold more entries than allowed, whatever they are.
+            'avif/spoof-too-many-sample-entries.avif' => self::committed(self::avifWithOtherSampleEntries(AvifParser::MAX_ENTRIES), self::reject(ErrorCode::INVALID_IMAGE)),
             // libavif writes the sequence header in av1C too; libheif feeds those configuration OBUs to the decoder
             // before the data of the item, so they may not hold a larger sequence header or frame.
             'avif/valid-av1c-sequence-header.avif' => self::committed(self::avifWithConfiguration(self::avifSequenceHeaderObu($still)), self::accept(ImageFormat::AVIF, 8, 8, 1, ['trailing_data' => false])),
@@ -755,6 +757,17 @@ final class ImageCorpus
             'avif/spoof-too-many-associations.avif' => self::generated(self::avifOfAssociations(AvifParser::MAX_ASSOCIATIONS + 1), self::reject(ErrorCode::INVALID_IMAGE)),
             'avif/valid-most-extents.avif' => self::generated(self::avifOfExtents(AvifParser::MAX_ASSOCIATIONS), self::accept(ImageFormat::AVIF, 8, 8)),
             'avif/spoof-too-many-extents.avif' => self::generated(self::avifOfExtents(AvifParser::MAX_ASSOCIATIONS + 1), self::reject(ErrorCode::INVALID_IMAGE)),
+            // Each table over its own cap alone: entries of ipma and iloc for more items than allowed, properties.
+            'avif/spoof-too-many-association-entries.avif' => self::committed(
+                self::avifOfAssociations(AvifParser::MAX_ITEMS + 4, AvifParser::MAX_ITEMS + 1),
+                self::reject(ErrorCode::INVALID_IMAGE)
+            ),
+            'avif/spoof-too-many-location-entries.avif' => self::committed(
+                self::avifOfExtents(AvifParser::MAX_ITEMS + 1, AvifParser::MAX_ITEMS + 1),
+                self::reject(ErrorCode::INVALID_IMAGE)
+            ),
+            'avif/valid-most-properties.avif' => self::committed(self::avifOfProperties(AvifParser::MAX_ENTRIES), self::accept(ImageFormat::AVIF, 8, 8)),
+            'avif/spoof-too-many-properties.avif' => self::committed(self::avifOfProperties(AvifParser::MAX_ENTRIES + 1), self::reject(ErrorCode::INVALID_IMAGE)),
             'avif/unsupported-heic-brand.avif' => self::committed(str_replace('avif', 'heic', (string) substr($still, 0, 32)) . (string) substr($still, 32), self::reject(ErrorCode::UNSUPPORTED_FORMAT)),
             'avif/spoof-no-ispe.avif' => self::committed(ImageBuilder::patch($still, $ispe, 'xspe'), self::reject(ErrorCode::INVALID_IMAGE)),
             'avif/spoof-ftyp-only.avif' => self::committed((string) substr($still, 0, 32), self::reject(ErrorCode::INVALID_IMAGE)),
@@ -1021,17 +1034,17 @@ final class ImageCorpus
     }
 
     /**
-     * The 3-frame sequence sample whose stsd box holds an empty "mp4v" sample entry before its av01 entry: decoders
-     * look for the AV1 entry, so it must not hide behind another.
+     * The 3-frame sequence sample whose stsd box holds $count empty "mp4v" sample entries before its av01 entry:
+     * decoders look for the AV1 entry, so it must not hide behind another.
      */
-    private static function avifSecondSampleEntry(): string
+    private static function avifWithOtherSampleEntries(int $count): string
     {
         $sequence = ImageBuilder::avifSequence();
-        $entry = pack('N', 16) . 'mp4v' . ImageBuilder::repeat("\0", 6) . pack('n', 1);
+        $entry = ImageBuilder::repeat(pack('N', 16) . 'mp4v' . ImageBuilder::repeat("\0", 6) . pack('n', 1), $count);
         // The entries follow the type, the version and flags, and the entry count of stsd.
         $stsd = ImageBuilder::find($sequence, 'stsd');
         $bytes = substr($sequence, 0, $stsd + 12) . $entry . substr($sequence, $stsd + 12);
-        $bytes = ImageBuilder::patch($bytes, $stsd + 8, pack('N', 2));
+        $bytes = ImageBuilder::patch($bytes, $stsd + 8, pack('N', $count + 1));
         $at = 0;
         foreach (['moov', 'trak', 'mdia', 'minf', 'stbl', 'stsd'] as $type) {
             $at = ImageBuilder::find($bytes, $type, $at);
@@ -1044,12 +1057,12 @@ final class ImageCorpus
     }
 
     /**
-     * The 8 x 8 still sample whose ipma box (wide indices) has the most entries allowed and $total associations in
-     * all: the image item keeps its four properties, the other items share the rest, all numbered 0 (no property).
+     * The 8 x 8 still sample whose ipma box (wide indices) has $items entries, the most allowed by default, and $total
+     * associations in all: the image item keeps its four properties, the other items share the rest, all numbered 0
+     * (no property).
      */
-    private static function avifOfAssociations(int $total): string
+    private static function avifOfAssociations(int $total, int $items = AvifParser::MAX_ITEMS): string
     {
-        $items = AvifParser::MAX_ITEMS;
         $payload = pack('NN', 1, $items) . pack('nC', 1, 4) . pack('nnnn', 1, 2, 0x8003, 4);
         for ($item = 2; $item <= $items; ++$item) {
             $count = intdiv($total - 4, $items - 1) + ($item - 2 < ($total - 4) % ($items - 1) ? 1 : 0);
@@ -1062,12 +1075,11 @@ final class ImageCorpus
     }
 
     /**
-     * The 8 x 8 still sample whose iloc box (version 1, every field 64 bits) has the most entries allowed and $total
-     * extents in all: the image item keeps its single extent, the other items share the rest.
+     * The 8 x 8 still sample whose iloc box (version 1, every field 64 bits) has $items entries, the most allowed by
+     * default, and $total extents in all: the image item keeps its single extent, the other items share the rest.
      */
-    private static function avifOfExtents(int $total): string
+    private static function avifOfExtents(int $total, int $items = AvifParser::MAX_ITEMS): string
     {
-        $items = AvifParser::MAX_ITEMS;
         $payload = pack('NCCn', 0x01000000, 0x88, 0x88, $items);
         // Item ID, construction method, data reference, base offset, extent count, then extent index, offset, length.
         $extentOffset = strlen($payload) + 2 + 2 + 2 + 8 + 2 + 8;
@@ -1079,6 +1091,24 @@ final class ImageCorpus
         list($bytes) = self::avifWithBox('iloc', $payload, ['meta']);
 
         return ImageBuilder::patch($bytes, ImageBuilder::find($bytes, 'iloc') + 4 + $extentOffset, pack('J', ImageBuilder::find($bytes, 'mdat') + 4));
+    }
+
+    /**
+     * The 8 x 8 still sample whose ipco box holds $count properties: its own, then empty free boxes.
+     */
+    private static function avifOfProperties(int $count): string
+    {
+        $still = ImageBuilder::avifStill();
+        $box = ImageBuilder::find($still, 'ipco') - 4;
+        $payload = (string) substr($still, $box + 8, ImageBuilder::readUint32($still, $box) - 8);
+        $own = 0;
+        for ($at = 0; $at < strlen($payload); $at += ImageBuilder::readUint32($payload, $at)) {
+            ++$own;
+        }
+        list($bytes, $delta) = self::avifWithBox('ipco', $payload . ImageBuilder::repeat(pack('N', 8) . 'free', $count - $own), ['meta', 'iprp']);
+
+        // iloc precedes iprp: the extent offset of the image item is where the still sample has it.
+        return ImageBuilder::addToUint32($bytes, ImageBuilder::find($bytes, 'iloc') + 4 + 14, $delta);
     }
 
     /**
