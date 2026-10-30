@@ -18,23 +18,30 @@ use Mfonte\SecureImageConverter\Validation\Limits;
  *   decoders accept).
  * - The frame count is checked against the limits each time it exceeds Limits::maxFramesFor(), so a GIF with
  *   thousands of tiny frames is refused as soon as the limit is passed, without reading the rest of the file.
- * - Only extension, image and trailer blocks may appear; a missing trailer means a truncated file. At most
- *   MAX_BLOCKS length bytes (sub-block lengths and block introducers) are consumed, which bounds the work on a file
- *   made of tiny sub-blocks.
+ * - Only extension, image and trailer blocks may appear; a missing trailer means a truncated file. The work is bounded
+ *   by MAX_BLOCKS units: each sub-block length byte consumed counts one unit, each block introducer BLOCK_COST units,
+ *   so that neither a file made of tiny sub-blocks nor one made of tiny blocks takes long to walk.
  *
- * Metadata: an ICCRGBG1 application extension is the colour profile; comments, XMP and unknown application
- * extensions are other metadata. NETSCAPE2.0 and ANIMEXTS1.0 loop extensions, graphic control and plain text
- * extensions are not metadata. Bytes after the trailer (the archive of a GIFAR) are trailing data.
+ * Metadata: an ICCRGBG1 application extension is the colour profile; comments, XMP, unknown application extensions,
+ * plain text extensions (which decoders do not render) and extensions of unknown label are other metadata.
+ * NETSCAPE2.0 and ANIMEXTS1.0 loop extensions and graphic control extensions are not metadata. Bytes after the
+ * trailer (the archive of a GIFAR) are trailing data.
  *
  * @internal
  */
 final class GifParser implements ParserInterface
 {
     /**
-     * Largest number of blocks and sub-blocks walked. Encoders write image data in sub-blocks of 255 bytes, so a real
-     * file reaches this only beyond 64 MB.
+     * Largest number of units of work: blocks and sub-blocks walked. Encoders write image data in sub-blocks of 255
+     * bytes, so a real file reaches this only beyond 64 MB.
      */
     public const MAX_BLOCKS = 262144;
+
+    /**
+     * Units of MAX_BLOCKS that a block introducer takes: reading a block costs about as much as skipping eight
+     * sub-blocks.
+     */
+    public const BLOCK_COST = 8;
 
     /**
      * Application identifiers (8 bytes) and authentication codes (3 bytes) of the extensions that are not metadata.
@@ -49,7 +56,7 @@ final class GifParser implements ParserInterface
     private const INTRODUCER_IMAGE = 0x2C;
     private const TRAILER = 0x3B;
 
-    private const LABEL_COMMENT = 0xFE;
+    private const LABEL_GRAPHIC_CONTROL = 0xF9;
     private const LABEL_APPLICATION = 0xFF;
 
     public function parse(ByteReader $reader, Limits $limits): ImageInfo
@@ -72,7 +79,8 @@ final class GifParser implements ParserInterface
         $otherMetadata = false;
 
         while (true) {
-            if (++$blocks > self::MAX_BLOCKS) {
+            $blocks += self::BLOCK_COST;
+            if ($blocks > self::MAX_BLOCKS) {
                 throw self::tooManyBlocks();
             }
             $introducer = $reader->readUint8();
@@ -94,7 +102,8 @@ final class GifParser implements ParserInterface
                     } elseif (!in_array($identifier, self::ANIMATION_APPLICATIONS, true)) {
                         $otherMetadata = true;
                     }
-                } elseif ($label === self::LABEL_COMMENT) {
+                } elseif ($label !== self::LABEL_GRAPHIC_CONTROL) {
+                    // Comments, plain text and unknown extensions: decoders skip them.
                     $otherMetadata = true;
                 }
             } elseif ($introducer === self::INTRODUCER_IMAGE) {
@@ -164,7 +173,7 @@ final class GifParser implements ParserInterface
 
     private static function tooManyBlocks(): InvalidImageException
     {
-        return self::invalid(sprintf('the file has more than %d blocks', self::MAX_BLOCKS));
+        return self::invalid('the file has too many blocks and sub-blocks');
     }
 
     private static function invalid(string $problem): InvalidImageException

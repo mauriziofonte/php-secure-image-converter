@@ -218,9 +218,29 @@ final class ImageCorpus
                 $valid . "PK\x03\x04" . ImageBuilder::repeat("\0", 26) . "PK\x05\x06" . ImageBuilder::repeat("\0", 18),
                 self::accept(ImageFormat::GIF, 16, 8, 1, ['trailing_data' => true])
             ),
-            // The most blocks a file may have (one-byte comment sub-blocks), then one too many.
-            'gif/valid-most-blocks.gif' => self::generated(self::gifOfSubBlocks(GifParser::MAX_BLOCKS - 6), self::accept(ImageFormat::GIF, 8, 8, 1, ['metadata' => true])),
-            'gif/spoof-too-many-blocks.gif' => self::generated(self::gifOfSubBlocks(GifParser::MAX_BLOCKS - 5), self::reject(ErrorCode::INVALID_IMAGE)),
+            // The most blocks a file may have (one-byte comment sub-blocks), then one too many: the comment, image and
+            // trailer introducers take BLOCK_COST units each, the image data and the two terminators three more.
+            'gif/valid-most-blocks.gif' => self::generated(self::gifOfSubBlocks(GifParser::MAX_BLOCKS - 3 * GifParser::BLOCK_COST - 3), self::accept(ImageFormat::GIF, 8, 8, 1, ['metadata' => true])),
+            'gif/spoof-too-many-blocks.gif' => self::generated(self::gifOfSubBlocks(GifParser::MAX_BLOCKS - 3 * GifParser::BLOCK_COST - 2), self::reject(ErrorCode::INVALID_IMAGE)),
+            // The most empty comment extensions a file may have, then one too many: each takes BLOCK_COST units and its
+            // terminator one; the image and trailer take 2 x BLOCK_COST + 2.
+            'gif/valid-most-extensions.gif' => self::generated(
+                self::gifOfExtensions(intdiv(GifParser::MAX_BLOCKS - 2 * GifParser::BLOCK_COST - 2, GifParser::BLOCK_COST + 1)),
+                self::accept(ImageFormat::GIF, 8, 8, 1, ['metadata' => true])
+            ),
+            'gif/spoof-too-many-extensions.gif' => self::generated(
+                self::gifOfExtensions(intdiv(GifParser::MAX_BLOCKS - 2 * GifParser::BLOCK_COST - 2, GifParser::BLOCK_COST + 1) + 1),
+                self::reject(ErrorCode::INVALID_IMAGE)
+            ),
+            // Decoders skip plain text extensions and extensions of unknown label, which can carry anything.
+            'gif/valid-zip-in-unknown-extension.gif' => self::committed(
+                ImageBuilder::gif(8, 8, 1, "\x21\x99" . ImageBuilder::gifSubBlocks("PK\x05\x06" . ImageBuilder::repeat("\0", 18))),
+                self::accept(ImageFormat::GIF, 8, 8, 1, ['metadata' => true, 'trailing_data' => false])
+            ),
+            'gif/valid-plain-text.gif' => self::committed(
+                ImageBuilder::gif(8, 8, 1, "\x21\x01\x0C" . pack('vvvvCCCC', 0, 0, 8, 8, 8, 8, 1, 0) . ImageBuilder::gifSubBlocks('corpus')),
+                self::accept(ImageFormat::GIF, 8, 8, 1, ['metadata' => true])
+            ),
             'gif/bomb-65535x65535.gif' => self::committed(
                 ImageBuilder::gifScreen(65535, 65535) . ImageBuilder::gifImage(0, 0, 1, 1) . "\x3B",
                 self::reject(ErrorCode::IMAGE_TOO_LARGE, true)
@@ -634,6 +654,14 @@ final class ImageCorpus
     {
         return ImageBuilder::gifScreen(8, 8) . "\x21\xFE" . ImageBuilder::repeat("\x01A", $count) . "\x00"
             . ImageBuilder::gifImage(0, 0, 8, 8) . "\x3B";
+    }
+
+    /**
+     * An 8 x 8 GIF whose image follows $count empty comment extensions.
+     */
+    private static function gifOfExtensions(int $count): string
+    {
+        return ImageBuilder::gifScreen(8, 8) . ImageBuilder::repeat("\x21\xFE\x00", $count) . ImageBuilder::gifImage(0, 0, 8, 8) . "\x3B";
     }
 
     /**
