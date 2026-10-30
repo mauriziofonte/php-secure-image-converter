@@ -51,20 +51,19 @@ use Mfonte\SecureImageConverter\Contract\IsolationLevel;
  * cannot be polled, because PHP holds 1024 or more descriptors open (FD_SETSIZE), the run fails with
  * ConversionFailedException: a run whose output was not read is never reported as successful.
  *
- * proc_open() lets the child inherit every descriptor PHP holds open without close-on-exec: in PHP-FPM that can be
- * the FastCGI connection, database and cache sockets or open files, which would give a compromised decoder a way
- * around the sandbox's network isolation. proc_open() cannot close a descriptor in the child, so every descriptor
- * above 2 that is open in PHP without close-on-exec when the run starts (read from /proc/self/fdinfo; without it,
- * every listed descriptor) is replaced with /dev/null in the child instead. When neither /proc/self/fd nor /dev/fd can
- * be listed (for example under an open_basedir that excludes them, or with scandir() disabled), the open descriptors
- * are unknown: at the process
- * level and above the run fails with ConversionFailedException before anything starts; at the none level, which
- * promises no isolation, they are inherited. These replacements occupy descriptor numbers in the child, and at the
- * rlimit and sandbox levels the open files limit (ResourceLimits::getOpenFiles()) caps those numbers: the run fails
- * with ConversionFailedException, before anything starts, when the standard streams and the replacements below the
- * limit would leave the program fewer than MIN_FREE_DESCRIPTORS free (half the limit, for a limit below 32), instead
- * of letting it fail to load its libraries. Raise the limit with ResourceLimits::withOpenFiles() if PHP keeps many
- * descriptors open.
+ * proc_open() lets the child inherit every descriptor PHP holds open without close-on-exec: in PHP-FPM that can be the
+ * FastCGI connection, database and cache sockets or open files, which would give a compromised decoder a way around the
+ * sandbox's network isolation. proc_open() cannot close a descriptor in the child, so every descriptor above 2 that is
+ * open in PHP without close-on-exec when the run starts (read from /proc/self/fdinfo; without it, every listed
+ * descriptor) is replaced with /dev/null in the child instead. When neither /proc/self/fd nor /dev/fd can be listed
+ * (for example under an open_basedir that excludes them, or with scandir() disabled), the open descriptors are unknown:
+ * at the process level and above the run fails with ConversionFailedException before anything starts; at the none
+ * level, which promises no isolation, they are inherited. These replacements occupy descriptor numbers in the child,
+ * and at the rlimit and sandbox levels the open files limit (ResourceLimits::getOpenFiles()) caps those numbers: the
+ * run fails with ConversionFailedException, before anything starts, when the standard streams and the replacements
+ * below the limit would leave the program fewer than MIN_FREE_DESCRIPTORS free (half the limit, for a limit below 32),
+ * instead of letting it fail to load its libraries. Raise the limit with ResourceLimits::withOpenFiles() if PHP keeps
+ * many descriptors open.
  *
  * Usage, for a backend:
  *
