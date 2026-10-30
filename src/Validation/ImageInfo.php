@@ -29,17 +29,19 @@ use Mfonte\SecureImageConverter\Contract\ValidatedSerializationTrait;
  *   verification must expect either size.
  * - hasTrailingData() reports bytes that the decoder of the image does not read: data after the end of the image
  *   (an appended archive, script or second file, such as the ZIP of a GIFAR or of a JPEG polyglot); in a WEBP file,
- *   bytes after the bitstream of a simple file or of an animation frame, unknown chunks, and bytes of ANIM beyond its
- *   fields; in a BMP file, any byte outside the headers, the palette of an image of 8 bits or less, the pixel data and
- *   the colour profile; top-level AVIF boxes that are not part of the image; for TIFF, further pages or bytes beyond
- *   every structure of the first page. Where it is computed, the flag errs towards true. Such a file must be
+ *   bytes after the bitstream of a simple file, unknown chunks, and bytes of ANIM beyond its fields; in a BMP file,
+ *   any byte outside the headers, the palette of an image of 8 bits or less, the pixel data (as far as its declared
+ *   size when run-length encoded) and the colour profile; top-level AVIF boxes that are not part of the image; for
+ *   TIFF, further pages or bytes beyond every structure of the first page. Where it is computed, the flag errs towards true. Such a file must be
  *   re-encoded, never passed through unconverted. Not detected: bytes inside the AVIF mdat box that no item or sample
  *   uses, unused bytes inside other structures that decoders skip, and data inside the colour profile or the metadata
  *   (which hasIccProfile(), hasExif() and hasMetadata() report). A consumer that must never return bytes it has not
  *   decoded re-encodes every image, and strips or rebuilds the colour profile, whatever the flag.
  *
- * Only what a decoder of the first image produces is described: for TIFF, the first page (IFD0) alone is read and
- * checked against the limits, later pages are neither counted nor checked, so backends must decode page 0 only.
+ * Only the first image is described, and backends must decode it alone (page, scene or item 0): for TIFF, the first
+ * page (IFD0) is read and checked against the limits, later pages are neither counted nor checked. A BMP file from
+ * which ImageMagick would read a second image, and a still AVIF holding an image item that libheif would decode
+ * besides its primary item, thumbnails and auxiliary images, are refused; other decoders may still find more.
  *
  * Immutable value object. Every property has a default, and the defaults form a valid instance (a one-pixel JPEG of
  * one byte without metadata); an unserialized instance is validated again, see ValidatedSerializationTrait.

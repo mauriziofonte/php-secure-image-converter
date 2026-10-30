@@ -46,7 +46,8 @@ use Mfonte\SecureImageConverter\Validation\Parser\WebpParser;
  * decodes. The ImageInfo flags give the rest of what a consumer needs: hasTrailingData() reports bytes that decoders
  * skip (an appended archive or script, and the places listed in ImageInfo), so a consumer must re-encode the image
  * rather than pass the original bytes through; getOrientation() reports the EXIF or AVIF orientation the decoder will
- * not apply by itself. For TIFF only the first page is inspected: a backend must decode page 0 alone.
+ * not apply by itself. Only the first image is inspected (the first page of a TIFF, the first image of a BMP, the
+ * primary item of a still AVIF): a backend must decode it alone.
  *
  * Errors (see Contract\Exception\ErrorCode): the file is above max_bytes, LimitExceededException (file_too_large);
  * its format cannot be identified, is not enabled, is SVG or is an unsupported variant, UnsupportedFormatException
