@@ -268,6 +268,11 @@ final class ImageCorpus
                 $withPalette(ImageBuilder::pngChunk('hIST', pack('nn', 16, 0))),
                 self::accept(ImageFormat::PNG, 4, 4, 1, ['metadata' => true])
             ),
+            // Decoders read the first copy of a colour chunk and skip the others.
+            'png/valid-repeated-gama.png' => self::committed(
+                ImageBuilder::png(4, 4, 8, 2, ImageBuilder::repeat(ImageBuilder::pngChunk('gAMA', pack('N', 45455)), 2)),
+                self::accept(ImageFormat::PNG, 4, 4, 1, ['metadata' => true])
+            ),
             'png/valid-exif-orientation.png' => self::committed(
                 ImageBuilder::png(8, 4, 8, 2, ImageBuilder::pngChunk('eXIf', ImageBuilder::exifOrientation(3, true))),
                 self::accept(ImageFormat::PNG, 8, 4, 1, ['exif' => true, 'orientation' => 3])

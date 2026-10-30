@@ -29,8 +29,8 @@ use Mfonte\SecureImageConverter\Validation\Limits;
  * hIST (a suggested palette of any length and a histogram, which decoders do not render), animation chunks outside an
  * animated PNG and every unknown ancillary chunk are other metadata. Colour, transparency and animation chunks are
  * not metadata, unless a colour or transparency chunk is longer than its fields for the colour type of the image (and,
- * for the transparency of a palette image, its number of palette entries), which decoders do not read beyond. Bytes
- * after IEND are trailing data.
+ * for the transparency of a palette image, its number of palette entries), which decoders do not read beyond, or
+ * repeats a chunk of its type, which decoders skip. Bytes after IEND are trailing data.
  *
  * @internal
  */
@@ -99,6 +99,7 @@ final class PngParser implements ParserInterface
         $frameControls = 0;
         $palette = false;
         $paletteEntries = 0;
+        $ancillaryTypes = [];
         $imageData = 0;
         $imageDataEnded = false;
         $iccProfile = false;
@@ -188,9 +189,10 @@ final class PngParser implements ParserInterface
                     if ((ord($type[0]) & 0x20) === 0) {
                         throw self::invalid('the file has an unknown critical chunk');
                     }
-                    if ($length > self::fieldsLength($type, $colourType, $paletteEntries)) {
+                    if ($length > self::fieldsLength($type, $colourType, $paletteEntries) || isset($ancillaryTypes[$type])) {
                         $otherMetadata = true;
                     }
+                    $ancillaryTypes[$type] = true;
             }
             $reader->skip($length + 4);
         }
