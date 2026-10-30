@@ -329,6 +329,23 @@ final class LockDirectoryTest extends TestCase
         new LockDirectory($this->root . '/loop/locks');
     }
 
+    public function testFortySymbolicLinksAreFollowedAndTheFortyFirstIsRefused(): void
+    {
+        mkdir($this->root . '/target', 0700);
+        $previous = $this->root . '/target';
+        for ($link = 1; $link <= 41; ++$link) {
+            symlink($previous, $this->root . '/link' . $link);
+            $previous = $this->root . '/link' . $link;
+        }
+
+        self::assertSame($this->root . '/target', (new LockDirectory($this->root . '/link40'))->getPath());
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('The path to the lock directory has too many levels of symbolic links.');
+
+        new LockDirectory($this->root . '/link41');
+    }
+
     public function testOpenBasedirThatHidesADirectoryOnTheWayIsNamed(): void
     {
         $project = \dirname(__DIR__, 3);
