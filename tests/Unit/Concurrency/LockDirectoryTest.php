@@ -126,6 +126,88 @@ final class LockDirectoryTest extends TestCase
     }
 
     /**
+     * @return array<string, array{int, string|null}>
+     */
+    public static function parentModes(): array
+    {
+        return [
+            'private parent' => [0700, null],
+            'parent readable by all' => [0755, null],
+            'sticky world-writable parent, as /tmp' => [01777, null],
+            'sticky group-writable parent' => [01770, null],
+            'world-writable parent without sticky bit' => [0777, 'writable by its group or by other users without the sticky bit (mode 0777)'],
+            'group-writable parent without sticky bit' => [0770, 'writable by its group or by other users without the sticky bit (mode 0770)'],
+            'other-writable parent without sticky bit' => [0703, 'writable by its group or by other users without the sticky bit (mode 0703)'],
+        ];
+    }
+
+    /**
+     * @dataProvider parentModes
+     */
+    #[DataProvider('parentModes')]
+    public function testParentThatLetsOthersReplaceTheDirectoryIsRefused(int $mode, ?string $message): void
+    {
+        mkdir($this->root . '/parent', 0700);
+        chmod($this->root . '/parent', $mode);
+
+        if ($message !== null) {
+            $this->expectException(InvalidArgumentException::class);
+            $this->expectExceptionMessage('A parent directory of the lock directory (1 level(s) up) is ' . $message);
+        }
+
+        $directory = new LockDirectory($this->root . '/parent/locks');
+
+        self::assertSame($this->root . '/parent/locks', $directory->getPath());
+    }
+
+    public function testEveryAncestorIsChecked(): void
+    {
+        mkdir($this->root . '/shared/private', 0700, true);
+        chmod($this->root . '/shared', 0777);
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('A parent directory of the lock directory (2 level(s) up) is writable by its group or by other users without the sticky bit (mode 0777)');
+
+        new LockDirectory($this->root . '/shared/private/locks');
+    }
+
+    public function testParentOwnedByAnotherUserIsRefused(): void
+    {
+        if (TemporaryDirectory::effectiveUserId() !== 0) {
+            self::markTestSkipped('Only root can give a directory to another user.');
+        }
+        mkdir($this->root . '/foreign', 0755);
+        chown($this->root . '/foreign', 65534);
+        mkdir($this->root . '/foreign/locks', 0700);
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('A parent directory of the lock directory (1 level(s) up) is owned by user 65534, who could replace the lock directory.');
+
+        new LockDirectory($this->root . '/foreign/locks');
+    }
+
+    /**
+     * Another user creates a world-writable directory in a sticky shared directory (as /tmp), and the victim nests its
+     * lock directory in it: the other user could swap the lock directory for their own and hold every key forever.
+     */
+    public function testLockDirectoryNestedInAnotherUsersDirectoryUnderASharedTmpIsRefused(): void
+    {
+        if (TemporaryDirectory::effectiveUserId() !== 0) {
+            self::markTestSkipped('Only root can give a directory to another user.');
+        }
+        mkdir($this->root . '/shared', 0700);
+        chmod($this->root . '/shared', 01777);
+        mkdir($this->root . '/shared/sic', 0700);
+        chmod($this->root . '/shared/sic', 0777);
+        chown($this->root . '/shared/sic', 65534);
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('A parent directory of the lock directory (1 level(s) up) is owned by user 65534');
+
+        new LockDirectory($this->root . '/shared/sic/locks');
+    }
+
+    /**
      * @return array<string, array{string}>
      */
     public static function invalidPaths(): array

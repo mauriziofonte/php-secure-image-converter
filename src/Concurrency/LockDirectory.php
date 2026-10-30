@@ -9,13 +9,21 @@ use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
 /**
  * The private directory that holds the lock files of Semaphore and KeyedLock.
  *
- * A missing directory is created, with its missing parents, and set to mode 0700. An existing directory is accepted
- * only when it is owned by the effective user of this process, is readable, writable and searchable by that user, and
- * is not writable by its group or by other users. A user who can create, replace or delete lock files could hold
+ * A missing directory is created, with its missing parents, and set to mode 0700. The directory is then accepted
+ * only when it is owned by the effective user of this process, is readable, writable and searchable by that user,
+ * and is not writable by its group or by other users: a user who can create, replace or delete lock files could hold
  * every slot forever, or break mutual exclusion by deleting a held lock file so that the next process locks a new
- * one. The checks run once, in the constructor, on the resolved path (symbolic links followed). Parent directories
- * are not checked: they must not let other users rename or replace the lock directory either (a world-writable
- * parent such as /tmp is fine only because its sticky bit prevents that).
+ * one. Every ancestor of the directory, up to "/", must in turn be owned by root or by the effective user, and must
+ * not be writable by its group or by other users unless its sticky bit is set: otherwise another user could rename
+ * the lock directory away and put a directory of their own in its place. The checks run once, in the constructor,
+ * on the resolved path (symbolic links followed).
+ *
+ * Safe locations are directories reserved for the application and its user: /run/<app> (tmpfs, created for example
+ * by systemd's RuntimeDirectory=), /var/lib/<app>/locks, or a directory that the application creates itself directly
+ * in the system temporary directory, whose sticky bit stops other users from renaming it (another user who creates
+ * that name first makes the constructor refuse it, so /run or /var/lib are preferable). Never nest the directory
+ * deeper under a shared temporary path such as /tmp/shared/<app>: other users may own or write to the intermediate
+ * directories, and the ancestor check refuses them.
  *
  * Limitations, shared by everything built on this class:
  * - Local filesystems only. flock() on NFS is emulated with byte-range locks (Linux) or not supported at all, and
@@ -48,7 +56,9 @@ final class LockDirectory
      *
      * @throws InvalidArgumentException when the path is not absolute, cannot be created or resolved, is not a
      *                                  directory, is not owned by the effective user, lacks owner permissions, or is
-     *                                  writable by its group or by other users; or on Windows
+     *                                  writable by its group or by other users; when an ancestor is owned by another
+     *                                  user than root or the effective user, or is writable by its group or by other
+     *                                  users without the sticky bit; or on Windows
      */
     public function __construct(string $path)
     {
@@ -109,6 +119,8 @@ final class LockDirectory
             ));
         }
 
+        self::assertAncestorsAreSafe($resolved, $effectiveUser);
+
         $this->path = $resolved;
     }
 
@@ -156,6 +168,46 @@ final class LockDirectory
         }
 
         return new LockFile($path, $handle);
+    }
+
+    /**
+     * Checks every ancestor of the resolved lock directory, up to "/": none may let a user other than root or the
+     * effective user rename or replace its entries.
+     *
+     * @throws InvalidArgumentException when an ancestor cannot be inspected, is owned by another user than root or the
+     *                                  effective user, or is writable by its group or by other users without the
+     *                                  sticky bit
+     */
+    private static function assertAncestorsAreSafe(string $resolved, int $effectiveUser): void
+    {
+        $ancestor = $resolved;
+        for ($level = 1; $ancestor !== '/'; ++$level) {
+            $ancestor = \dirname($ancestor);
+            clearstatcache(true, $ancestor);
+            $stat = @stat($ancestor);
+            if ($stat === false) {
+                throw new InvalidArgumentException(sprintf(
+                    'A parent directory of the lock directory (%d level(s) up) cannot be inspected.',
+                    $level
+                ));
+            }
+            $owner = $stat['uid'];
+            if ($owner !== 0 && $owner !== $effectiveUser) {
+                throw new InvalidArgumentException(sprintf(
+                    'A parent directory of the lock directory (%d level(s) up) is owned by user %d, who could replace the lock directory.',
+                    $level,
+                    $owner
+                ));
+            }
+            $mode = $stat['mode'] & 07777;
+            if (($mode & 0022) !== 0 && ($mode & 01000) === 0) {
+                throw new InvalidArgumentException(sprintf(
+                    'A parent directory of the lock directory (%d level(s) up) is writable by its group or by other users without the sticky bit (mode %04o), so they could replace the lock directory.',
+                    $level,
+                    $mode
+                ));
+            }
+        }
     }
 
     /**
