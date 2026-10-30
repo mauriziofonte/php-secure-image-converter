@@ -12,7 +12,8 @@ use Mfonte\SecureImageConverter\Contract\Capabilities;
  * Input limits are checked on the file size and on header data before any decoder runs. The resolved output (its
  * size after resize, fit and enlargement, and its frame count after the animation policy) is checked against the
  * same dimension, pixel and frame limits before any encoder runs; the byte size limit applies to the input only.
- * Capabilities::assertFileSizeWithinLimits() and Capabilities::assertImageWithinLimits() perform these checks.
+ * Capabilities::assertFileSizeWithinLimits(), assertInputWithinLimits() and assertOutputWithinLimits() perform these
+ * checks.
  *
  * Error code and expected HTTP status in the API:
  * - ErrorCode::FILE_TOO_LARGE, 413 Content Too Large, for Capabilities::LIMIT_MAX_BYTES;
@@ -34,6 +35,7 @@ final class LimitExceededException extends \RangeException implements ExceptionI
         Capabilities::LIMIT_MAX_HEIGHT => ['height', 'px'],
         Capabilities::LIMIT_MAX_MEGAPIXELS => ['area', 'pixels'],
         Capabilities::LIMIT_MAX_FRAMES => ['frame count', 'frames'],
+        Capabilities::LIMIT_MAX_TOTAL_MEGAPIXELS => ['area of all frames', 'pixels'],
     ];
 
     /**

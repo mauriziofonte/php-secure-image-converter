@@ -5,7 +5,10 @@ declare(strict_types=1);
 namespace Mfonte\SecureImageConverter\Tests\Unit\Contract;
 
 use Mfonte\SecureImageConverter\Contract\Capabilities;
+use Mfonte\SecureImageConverter\Contract\ConversionRequest;
+use Mfonte\SecureImageConverter\Contract\Exception\ErrorCode;
 use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
+use Mfonte\SecureImageConverter\Contract\Exception\LimitExceededException;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
@@ -16,6 +19,8 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 #[CoversClass(Capabilities::class)]
 final class CapabilitiesTest extends TestCase
 {
+    use SerializedStateTrait;
+
     /**
      * @return array{schema: int, input_formats: list<string>, output_formats: list<string>, animated_output_formats: list<string>, backends: list<string>, isolation_level: string, limits: array<string, int>}
      */
@@ -34,6 +39,7 @@ final class CapabilitiesTest extends TestCase
                 'max_height' => 8192,
                 'max_megapixels' => 40,
                 'max_frames' => 300,
+                'max_total_megapixels' => 400,
             ],
         ];
     }
@@ -65,7 +71,7 @@ final class CapabilitiesTest extends TestCase
         self::assertSame(8192, $capabilities->getLimit(Capabilities::LIMIT_MAX_WIDTH));
         self::assertSame(20971520, $capabilities->getLimit(Capabilities::LIMIT_MAX_BYTES));
         self::assertSame(
-            ['max_bytes', 'max_width', 'max_height', 'max_megapixels', 'max_frames'],
+            ['max_bytes', 'max_width', 'max_height', 'max_megapixels', 'max_frames', 'max_total_megapixels'],
             Capabilities::limitNames()
         );
     }
@@ -92,14 +98,14 @@ final class CapabilitiesTest extends TestCase
             ['webp'],
             ['gd', 'vips'],
             'none',
-            ['max_frames' => 5, 'max_megapixels' => 4, 'max_height' => 3, 'max_width' => 2, 'max_bytes' => 1]
+            ['max_total_megapixels' => 6, 'max_frames' => 5, 'max_megapixels' => 4, 'max_height' => 3, 'max_width' => 2, 'max_bytes' => 1]
         );
 
         self::assertSame(['jpeg', 'gif'], $capabilities->getInputFormats());
         self::assertSame(['jpeg', 'webp', 'avif'], $capabilities->getOutputFormats());
         self::assertSame(['gd', 'vips'], $capabilities->getBackends());
         self::assertSame(
-            ['max_bytes' => 1, 'max_width' => 2, 'max_height' => 3, 'max_megapixels' => 4, 'max_frames' => 5],
+            ['max_bytes' => 1, 'max_width' => 2, 'max_height' => 3, 'max_megapixels' => 4, 'max_frames' => 5, 'max_total_megapixels' => 6],
             $capabilities->getLimits()
         );
     }
@@ -236,6 +242,21 @@ final class CapabilitiesTest extends TestCase
 
                 return $d;
             }],
+            'animated format that cannot hold an animation' => [static function (array $d): array {
+                $d['animated_output_formats'] = ['jpeg', 'gif'];
+
+                return $d;
+            }],
+            'animated bmp' => [static function (array $d): array {
+                $d['animated_output_formats'] = ['bmp'];
+
+                return $d;
+            }],
+            'backend name reserved for passthrough' => [static function (array $d): array {
+                $d['backends'] = ['vips', 'none'];
+
+                return $d;
+            }],
             'backend name in uppercase' => [static function (array $d): array {
                 $d['backends'] = ['Vips'];
 
@@ -329,6 +350,18 @@ final class CapabilitiesTest extends TestCase
 
                 return $d;
             }],
+            'limit above LIMIT_VALUE_MAX' => [static function (array $d): array {
+                self::assertIsArray($d['limits']);
+                $d['limits']['max_bytes'] = Capabilities::LIMIT_VALUE_MAX + 1;
+
+                return $d;
+            }],
+            'total megapixels limit missing (schema 1 has six limits)' => [static function (array $d): array {
+                self::assertIsArray($d['limits']);
+                unset($d['limits']['max_total_megapixels']);
+
+                return $d;
+            }],
         ];
     }
 
@@ -401,6 +434,8 @@ final class CapabilitiesTest extends TestCase
             'dot' => ['vips.cli', false],
             'slash' => ['../vips', false],
             'trailing newline' => ["vips\n", false],
+            'reserved for passthrough' => ['none', false],
+            'longer name containing none' => ['nonevips', true],
         ];
     }
 
@@ -411,5 +446,279 @@ final class CapabilitiesTest extends TestCase
     public function testBackendNameValidation(string $name, bool $valid): void
     {
         self::assertSame($valid, Capabilities::isValidBackendName($name));
+    }
+
+    public function testAnimatedOutputMayUseEveryAnimatableFormat(): void
+    {
+        $capabilities = new Capabilities(
+            ['gif'],
+            ['png', 'gif', 'webp', 'avif'],
+            ['png', 'gif', 'webp', 'avif'],
+            ['vips'],
+            'rlimit',
+            self::validArray()['limits']
+        );
+
+        self::assertSame(['png', 'gif', 'webp', 'avif'], $capabilities->getAnimatedOutputFormats());
+    }
+
+    public function testLimitValueMaxIsAccepted(): void
+    {
+        $limits = array_fill_keys(Capabilities::limitNames(), Capabilities::LIMIT_VALUE_MAX);
+        $capabilities = new Capabilities([], [], [], [], 'none', $limits);
+
+        self::assertSame($limits, $capabilities->getLimits());
+        self::assertSame(2147483647, Capabilities::LIMIT_VALUE_MAX);
+    }
+
+    public function testFileSizeWithinTheLimitIsAccepted(): void
+    {
+        $capabilities = self::create();
+        $capabilities->assertFileSizeWithinLimits(0);
+        $capabilities->assertFileSizeWithinLimits(20971520);
+
+        $this->expectNotToPerformAssertions();
+    }
+
+    public function testFileSizeAboveTheLimitIsFileTooLarge(): void
+    {
+        $exception = self::catchLimitExceeded(static function (): void {
+            self::create()->assertFileSizeWithinLimits(20971521);
+        });
+
+        self::assertSame(ErrorCode::FILE_TOO_LARGE, $exception->getErrorCode());
+        self::assertSame('max_bytes', $exception->getLimit());
+        self::assertFalse($exception->isOutputLimit());
+    }
+
+    public function testNegativeFileSizeIsAProgrammingError(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        self::create()->assertFileSizeWithinLimits(-1);
+    }
+
+    /**
+     * Images at the limits of self::create(): 8192 x 8192 px, 40 megapixels per frame, 300 frames, 400 megapixels in
+     * total.
+     *
+     * @return array<string, array{int, int, int}>
+     */
+    public static function imagesWithinLimits(): array
+    {
+        return [
+            'still image' => [800, 600, 1],
+            'widest' => [8192, 1, 1],
+            'highest' => [1, 8192, 1],
+            'exactly 40 megapixels' => [8000, 5000, 1],
+            'most frames' => [10, 10, 300],
+            'exactly 400 megapixels in total' => [4000, 1000, 100],
+        ];
+    }
+
+    /**
+     * @dataProvider imagesWithinLimits
+     */
+    #[DataProvider('imagesWithinLimits')]
+    public function testImageWithinTheLimitsIsAccepted(int $width, int $height, int $frames): void
+    {
+        self::create()->assertInputWithinLimits($width, $height, $frames);
+        self::create()->assertOutputWithinLimits($width, $height, $frames);
+
+        $this->expectNotToPerformAssertions();
+    }
+
+    /**
+     * Images just above one limit of self::create(), with the limit reported and its maximum and actual values.
+     *
+     * @return array<string, array{int, int, int, string, int, int}>
+     */
+    public static function imagesAboveLimits(): array
+    {
+        return [
+            'too wide' => [8193, 1, 1, 'max_width', 8192, 8193],
+            'too high' => [1, 8193, 1, 'max_height', 8192, 8193],
+            'one pixel above 40 megapixels' => [8000, 5000 + 1, 1, 'max_megapixels', 40000000, 40008000],
+            'too many frames' => [1, 1, 301, 'max_frames', 300, 301],
+            'above 400 megapixels in total' => [4000, 1000, 101, 'max_total_megapixels', 400000000, 404000000],
+            'width is checked before the area' => [20000, 20000, 1, 'max_width', 8192, 20000],
+            'decompression bomb with huge header values' => [PHP_INT_MAX, PHP_INT_MAX, PHP_INT_MAX, 'max_width', 8192, PHP_INT_MAX],
+        ];
+    }
+
+    /**
+     * @dataProvider imagesAboveLimits
+     */
+    #[DataProvider('imagesAboveLimits')]
+    public function testInputAboveALimitIsImageTooLarge(int $width, int $height, int $frames, string $limit, int $maximum, int $actual): void
+    {
+        $exception = self::catchLimitExceeded(static function () use ($width, $height, $frames): void {
+            self::create()->assertInputWithinLimits($width, $height, $frames);
+        });
+
+        self::assertSame(ErrorCode::IMAGE_TOO_LARGE, $exception->getErrorCode());
+        self::assertSame([$limit, $maximum, $actual, false], [
+            $exception->getLimit(),
+            $exception->getMaximum(),
+            $exception->getActual(),
+            $exception->isOutputLimit(),
+        ]);
+    }
+
+    /**
+     * @dataProvider imagesAboveLimits
+     */
+    #[DataProvider('imagesAboveLimits')]
+    public function testOutputAboveALimitIsImageTooLarge(int $width, int $height, int $frames, string $limit, int $maximum, int $actual): void
+    {
+        $exception = self::catchLimitExceeded(static function () use ($width, $height, $frames): void {
+            self::create()->assertOutputWithinLimits($width, $height, $frames);
+        });
+
+        self::assertSame(ErrorCode::IMAGE_TOO_LARGE, $exception->getErrorCode());
+        self::assertSame([$limit, $maximum, $actual, true], [
+            $exception->getLimit(),
+            $exception->getMaximum(),
+            $exception->getActual(),
+            $exception->isOutputLimit(),
+        ]);
+    }
+
+    public function testTotalPixelsSaturateInsteadOfOverflowing(): void
+    {
+        $limits = array_fill_keys(Capabilities::limitNames(), Capabilities::LIMIT_VALUE_MAX);
+        $limits['max_total_megapixels'] = 1;
+        $capabilities = new Capabilities([], [], [], [], 'none', $limits);
+
+        $exception = self::catchLimitExceeded(static function () use ($capabilities): void {
+            // 2 * 10^12 pixels per frame fit max_megapixels; times 2^31 - 1 frames, they do not fit an int.
+            $capabilities->assertInputWithinLimits(2000000, 1000000, Capabilities::LIMIT_VALUE_MAX);
+        });
+
+        self::assertSame('max_total_megapixels', $exception->getLimit());
+        self::assertSame(PHP_INT_MAX, $exception->getActual());
+    }
+
+    /**
+     * @return array<string, array{int, int, int}>
+     */
+    public static function invalidImageValues(): array
+    {
+        return ['zero width' => [0, 1, 1], 'zero height' => [1, 0, 1], 'zero frames' => [1, 1, 0], 'negative' => [-1, -1, -1]];
+    }
+
+    /**
+     * @dataProvider invalidImageValues
+     */
+    #[DataProvider('invalidImageValues')]
+    public function testImageValuesBelowOneAreAProgrammingError(int $width, int $height, int $frames): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        self::create()->assertOutputWithinLimits($width, $height, $frames);
+    }
+
+    /**
+     * width=16383, height=16383, fit=fill and enlarge=1 is a valid request; enlarging a 10 x 10 input to it is
+     * refused before any encoder runs, because the resolved output exceeds the dimension and pixel limits.
+     */
+    public function testEnlargingASmallInputBeyondTheLimitsIsRefused(): void
+    {
+        $request = ConversionRequest::fromParameters(['width' => '16383', 'height' => '16383', 'fit' => 'fill', 'enlarge' => '1']);
+        list($width, $height) = $request->resolveOutputSize(10, 10);
+        $frames = $request->resolveOutputFrameCount(1, false);
+        self::create()->assertInputWithinLimits(10, 10, 1);
+
+        $exception = self::catchLimitExceeded(static function () use ($width, $height, $frames): void {
+            self::create()->assertOutputWithinLimits($width, $height, $frames);
+        });
+
+        self::assertSame(ErrorCode::IMAGE_TOO_LARGE, $exception->getErrorCode());
+        self::assertTrue($exception->isOutputLimit());
+        self::assertSame('Resolved output width is 16383 px, above the limit of 8192 px (max_width).', $exception->getMessage());
+
+        $limits = ['max_width' => 16383, 'max_height' => 16383] + self::validArray()['limits'];
+        $wide = new Capabilities([], [], [], [], 'none', $limits);
+        $exception = self::catchLimitExceeded(static function () use ($wide, $width, $height, $frames): void {
+            $wide->assertOutputWithinLimits($width, $height, $frames);
+        });
+        self::assertSame('max_megapixels', $exception->getLimit());
+        self::assertSame(16383 * 16383, $exception->getActual());
+    }
+
+    /**
+     * An animated output that fits every per-frame limit can still exceed the budget of all frames together.
+     */
+    public function testAnimatedOutputIsBoundByTheTotalPixelBudget(): void
+    {
+        $request = (new ConversionRequest())->withWidth(4000)->withEnlargementAllowed(true);
+        list($width, $height) = $request->resolveOutputSize(400, 300);
+        $frames = $request->resolveOutputFrameCount(200, true);
+        self::assertSame([4000, 3000, 200], [$width, $height, $frames]);
+
+        $exception = self::catchLimitExceeded(static function () use ($width, $height, $frames): void {
+            self::create()->assertOutputWithinLimits($width, $height, $frames);
+        });
+        self::assertSame('max_total_megapixels', $exception->getLimit());
+        self::assertSame(2400000000, $exception->getActual());
+
+        $firstFrameOnly = $request->withAnimationPolicy('first_frame')->resolveOutputFrameCount(200, true);
+        self::create()->assertOutputWithinLimits($width, $height, $firstFrameOnly);
+    }
+
+    public function testSerializationRoundTrip(): void
+    {
+        $capabilities = self::create();
+
+        self::assertEquals($capabilities, unserialize(serialize($capabilities), ['allowed_classes' => [Capabilities::class]]));
+    }
+
+    /**
+     * @return array<string, array{string, mixed}>
+     */
+    public static function tamperedStates(): array
+    {
+        return [
+            'unknown input format' => ['inputFormats', ['heic']],
+            'formats out of canonical order' => ['outputFormats', ['webp', 'jpeg', 'png', 'gif', 'bmp', 'avif']],
+            'animated jpeg' => ['animatedOutputFormats', ['jpeg']],
+            'reserved backend name' => ['backends', ['none']],
+            'isolation level as an integer' => ['isolationLevel', 3],
+            'limit missing' => ['limits', ['max_bytes' => 1]],
+            'limit as a string' => ['limits', ['max_bytes' => '1'] + self::validArray()['limits']],
+        ];
+    }
+
+    /**
+     * @param mixed $value
+     *
+     * @dataProvider tamperedStates
+     */
+    #[DataProvider('tamperedStates')]
+    public function testUnserializeRejectsATamperedState(string $property, $value): void
+    {
+        $state = self::stateOf(self::create());
+        self::assertArrayHasKey($property, $state);
+        $state[$property] = $value;
+
+        $this->expectException(InvalidArgumentException::class);
+
+        unserialize(self::serializedWithState(Capabilities::class, $state), ['allowed_classes' => [Capabilities::class]]);
+    }
+
+    /**
+     * Runs the callback and returns the LimitExceededException it throws, failing the test when it throws nothing.
+     *
+     * @param \Closure(): void $callback
+     */
+    private static function catchLimitExceeded(\Closure $callback): LimitExceededException
+    {
+        try {
+            $callback();
+        } catch (LimitExceededException $exception) {
+            return $exception;
+        }
+
+        self::fail('LimitExceededException was not thrown');
     }
 }

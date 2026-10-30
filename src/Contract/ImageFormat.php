@@ -58,6 +58,14 @@ final class ImageFormat
     ];
 
     /**
+     * Formats whose files can hold several frames played as an animation: GIF, PNG (APNG), WEBP and AVIF (image
+     * sequences), in canonical order. TIFF pages are not frames of an animation.
+     *
+     * @var list<string>
+     */
+    private const ANIMATABLE = [self::PNG, self::GIF, self::WEBP, self::AVIF];
+
+    /**
      * Non-canonical MIME types still produced by libmagic, older browsers and servers.
      *
      * @var array<string, string>
@@ -91,6 +99,24 @@ final class ImageFormat
     public static function isValid(string $format): bool
     {
         return isset(self::MIME_TYPES[$format]);
+    }
+
+    /**
+     * Formats that can hold an animation: png (APNG), gif, webp and avif, in canonical order.
+     *
+     * @return list<string>
+     */
+    public static function animatable(): array
+    {
+        return self::ANIMATABLE;
+    }
+
+    /**
+     * Whether files of this format can hold an animation. False for unknown names.
+     */
+    public static function supportsAnimation(string $format): bool
+    {
+        return in_array($format, self::ANIMATABLE, true);
     }
 
     /**

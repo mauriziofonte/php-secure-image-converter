@@ -5,10 +5,17 @@ declare(strict_types=1);
 namespace Mfonte\SecureImageConverter\Contract;
 
 use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
+use Mfonte\SecureImageConverter\Contract\Exception\LimitExceededException;
 
 /**
  * What a converter can do on this host: accepted input formats, producible output formats (with and without
- * animation), available backends, the isolation level it enforces and the input limits it applies.
+ * animation), available backends, the isolation level it enforces and the limits it applies.
+ *
+ * Limits bound both sides of a conversion. max_bytes bounds the input file. The dimension, pixel and frame limits
+ * bound the input, checked on header data before any decoder runs (assertInputWithinLimits()), and the output
+ * resolved from the request, checked before any encoder runs (assertOutputWithinLimits() on
+ * ConversionRequest::resolveOutputSize() and resolveOutputFrameCount()). A violation throws LimitExceededException:
+ * error code file_too_large (413) for max_bytes, image_too_large (422) for every other limit.
  *
  * Immutable value object. Format lists are normalised to the canonical order of ImageFormat::all(); backends keep
  * their order, which is the order of preference. The conversion API publishes toArray() as JSON on /healthz and the
@@ -22,7 +29,14 @@ use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
  *       "animated_output_formats": ["gif", "webp"],
  *       "backends": ["vips", "cwebp", "gif2webp"],
  *       "isolation_level": "rlimit",
- *       "limits": {"max_bytes": 20971520, "max_width": 8192, "max_height": 8192, "max_megapixels": 40, "max_frames": 300}
+ *       "limits": {
+ *         "max_bytes": 20971520,
+ *         "max_width": 8192,
+ *         "max_height": 8192,
+ *         "max_megapixels": 40,
+ *         "max_frames": 300,
+ *         "max_total_megapixels": 400
+ *       }
  *     }
  */
 final class Capabilities
@@ -33,29 +47,42 @@ final class Capabilities
     public const SCHEMA_VERSION = 1;
 
     /**
-     * Maximum input file size in bytes.
+     * Maximum input file size in bytes. It does not apply to the output.
      */
     public const LIMIT_MAX_BYTES = 'max_bytes';
 
     /**
-     * Maximum input width in pixels.
+     * Maximum width in pixels of the input and of the resolved output.
      */
     public const LIMIT_MAX_WIDTH = 'max_width';
 
     /**
-     * Maximum input height in pixels.
+     * Maximum height in pixels of the input and of the resolved output.
      */
     public const LIMIT_MAX_HEIGHT = 'max_height';
 
     /**
-     * Maximum input area in millions of pixels (width x height / 1,000,000), per frame.
+     * Maximum area of one frame in millions of pixels (width x height must not exceed this value x 1,000,000), for
+     * the input and the resolved output.
      */
     public const LIMIT_MAX_MEGAPIXELS = 'max_megapixels';
 
     /**
-     * Maximum number of frames of an animated input.
+     * Maximum number of frames of the input and of the resolved output.
      */
     public const LIMIT_MAX_FRAMES = 'max_frames';
+
+    /**
+     * Maximum area of all frames together in millions of pixels (frames x width x height must not exceed this value x
+     * 1,000,000), for the input and the resolved output: the decoding and encoding budget of an animation.
+     */
+    public const LIMIT_MAX_TOTAL_MEGAPIXELS = 'max_total_megapixels';
+
+    /**
+     * Largest value of any limit, 2^31 - 1, so that limits read exactly in any JSON consumer and that pixel
+     * arithmetic on values within the limits cannot overflow.
+     */
+    public const LIMIT_VALUE_MAX = 2147483647;
 
     /**
      * @var list<string>
@@ -66,6 +93,7 @@ final class Capabilities
         self::LIMIT_MAX_HEIGHT,
         self::LIMIT_MAX_MEGAPIXELS,
         self::LIMIT_MAX_FRAMES,
+        self::LIMIT_MAX_TOTAL_MEGAPIXELS,
     ];
 
     /**
@@ -115,14 +143,15 @@ final class Capabilities
      * @param list<string>       $inputFormats          ImageFormat values accepted as input
      * @param list<string>       $outputFormats         ImageFormat values that can be produced
      * @param list<string>       $animatedOutputFormats subset of $outputFormats that can be produced with several
-     *                                                  frames
-     * @param list<string>       $backends              names of the available backends, in order of preference
-     *                                                  (lowercase letters, digits, "_" or "-", at most 32 characters)
+     *                                                  frames; only ImageFormat::animatable() formats qualify
+     * @param list<string>       $backends              names of the available backends, in order of preference (see
+     *                                                  isValidBackendName())
      * @param string             $isolationLevel        IsolationLevel value enforced for conversions on this host
-     * @param array<string, int> $limits                exactly the five LIMIT_* keys, each value at least 1
+     * @param array<string, int> $limits                exactly the six LIMIT_* keys, each value from 1 to
+     *                                                  LIMIT_VALUE_MAX
      *
      * @throws InvalidArgumentException when a value is outside its documented domain, a list contains duplicates,
-     *                                  or an animated output format is not an output format
+     *                                  or an animated output format is not an animatable output format
      */
     public function __construct(
         array $inputFormats,
@@ -135,8 +164,11 @@ final class Capabilities
         $this->inputFormats = self::checkFormats('input_formats', $inputFormats);
         $this->outputFormats = self::checkFormats('output_formats', $outputFormats);
         $this->animatedOutputFormats = self::checkFormats('animated_output_formats', $animatedOutputFormats);
-        if (array_diff($this->animatedOutputFormats, $this->outputFormats) !== []) {
-            throw new InvalidArgumentException('Capabilities: every animated output format must also be an output format.');
+        if (array_diff($this->animatedOutputFormats, array_intersect($this->outputFormats, ImageFormat::animatable())) !== []) {
+            throw new InvalidArgumentException(sprintf(
+                'Capabilities: every animated output format must be an output format among: %s.',
+                implode(', ', ImageFormat::animatable())
+            ));
         }
         $this->backends = self::checkBackends($backends);
         $this->isolationLevel = self::checkIsolationLevel($isolationLevel);
@@ -184,12 +216,33 @@ final class Capabilities
     }
 
     /**
+     * Validates an unserialized instance as fromArray() would, so that a tampered or outdated serialized string
+     * cannot produce capabilities outside the documented domain.
+     *
+     * @throws InvalidArgumentException when the unserialized state is not valid
+     */
+    public function __wakeup(): void
+    {
+        $state = get_object_vars($this);
+
+        try {
+            // toArray() copies the properties without converting them, so fromArray() sees the state as it is.
+            $valid = get_object_vars(self::fromArray($this->toArray())) === $state;
+        } catch (InvalidArgumentException $exception) {
+            $valid = false;
+        }
+        if (!$valid) {
+            throw new InvalidArgumentException('The serialized Capabilities are not valid.');
+        }
+    }
+
+    /**
      * Whether a string is a valid backend name: 1 to 32 lowercase letters, digits, "_" or "-", starting with a
-     * letter or digit.
+     * letter or digit, and not "none", which is reserved for ConversionResult::BACKEND_NONE.
      */
     public static function isValidBackendName(string $name): bool
     {
-        return preg_match('/\A[a-z0-9][a-z0-9_-]{0,31}\z/', $name) === 1;
+        return $name !== ConversionResult::BACKEND_NONE && preg_match('/\A[a-z0-9][a-z0-9_-]{0,31}\z/', $name) === 1;
     }
 
     /**
@@ -251,7 +304,7 @@ final class Capabilities
     }
 
     /**
-     * Input limits keyed by LIMIT_* name, in canonical order.
+     * Limits keyed by LIMIT_* name, in canonical order.
      *
      * @return array<string, int>
      */
@@ -261,7 +314,7 @@ final class Capabilities
     }
 
     /**
-     * Value of one input limit.
+     * Value of one limit.
      *
      * @param string $name one of the LIMIT_* constants
      *
@@ -304,6 +357,57 @@ final class Capabilities
     }
 
     /**
+     * Checks the size of an input file against max_bytes.
+     *
+     * @param int $bytes size of the input file, at least 0
+     *
+     * @throws LimitExceededException   with error code file_too_large when the file is larger than max_bytes
+     * @throws InvalidArgumentException when the size is negative (a programming error)
+     */
+    public function assertFileSizeWithinLimits(int $bytes): void
+    {
+        if ($bytes < 0) {
+            throw new InvalidArgumentException(sprintf('The file size must be at least 0, got %d.', $bytes));
+        }
+        if ($bytes > $this->limits[self::LIMIT_MAX_BYTES]) {
+            throw LimitExceededException::forInput(self::LIMIT_MAX_BYTES, $this->limits[self::LIMIT_MAX_BYTES], $bytes);
+        }
+    }
+
+    /**
+     * Checks an input, as described by its header, against the dimension, pixel and frame limits. Limits are
+     * checked in the order of limitNames() and the first one exceeded is reported.
+     *
+     * @param int $width      input width in pixels, at least 1
+     * @param int $height     input height in pixels, at least 1
+     * @param int $frameCount number of frames of the input, at least 1
+     *
+     * @throws LimitExceededException   with error code image_too_large when a limit is exceeded
+     * @throws InvalidArgumentException when a value is below 1 (a programming error)
+     */
+    public function assertInputWithinLimits(int $width, int $height, int $frameCount): void
+    {
+        $this->assertImageWithinLimits($width, $height, $frameCount, false);
+    }
+
+    /**
+     * Checks the output resolved from a request (ConversionRequest::resolveOutputSize() and
+     * resolveOutputFrameCount()) against the dimension, pixel and frame limits, before any encoder runs. Limits are
+     * checked in the order of limitNames() and the first one exceeded is reported.
+     *
+     * @param int $width      resolved output width in pixels, at least 1
+     * @param int $height     resolved output height in pixels, at least 1
+     * @param int $frameCount resolved number of output frames, at least 1
+     *
+     * @throws LimitExceededException   with error code image_too_large when a limit is exceeded
+     * @throws InvalidArgumentException when a value is below 1 (a programming error)
+     */
+    public function assertOutputWithinLimits(int $width, int $height, int $frameCount): void
+    {
+        $this->assertImageWithinLimits($width, $height, $frameCount, true);
+    }
+
+    /**
      * Versioned array representation, ready for JSON encoding. fromArray() turns it back into equal capabilities.
      *
      * @return array{schema: int, input_formats: list<string>, output_formats: list<string>, animated_output_formats: list<string>, backends: list<string>, isolation_level: string, limits: array<string, int>}
@@ -319,6 +423,55 @@ final class Capabilities
             'isolation_level' => $this->isolationLevel,
             'limits' => $this->limits,
         ];
+    }
+
+    /**
+     * @throws LimitExceededException
+     * @throws InvalidArgumentException
+     */
+    private function assertImageWithinLimits(int $width, int $height, int $frameCount, bool $output): void
+    {
+        if ($width < 1 || $height < 1 || $frameCount < 1) {
+            throw new InvalidArgumentException(sprintf(
+                'The width, height and frame count must be at least 1, got %d x %d and %d frames.',
+                $width,
+                $height,
+                $frameCount
+            ));
+        }
+
+        self::assertAtMost(self::LIMIT_MAX_WIDTH, $this->limits[self::LIMIT_MAX_WIDTH], $width, $output);
+        self::assertAtMost(self::LIMIT_MAX_HEIGHT, $this->limits[self::LIMIT_MAX_HEIGHT], $height, $output);
+
+        // Width and height are now at most LIMIT_VALUE_MAX, and so is every limit: none of these products overflows.
+        $pixels = $width * $height;
+        self::assertAtMost(self::LIMIT_MAX_MEGAPIXELS, $this->limits[self::LIMIT_MAX_MEGAPIXELS] * 1000000, $pixels, $output);
+        self::assertAtMost(self::LIMIT_MAX_FRAMES, $this->limits[self::LIMIT_MAX_FRAMES], $frameCount, $output);
+
+        // frames x pixels can overflow: compare by division, and report the product saturated at PHP_INT_MAX.
+        $maxTotalPixels = $this->limits[self::LIMIT_MAX_TOTAL_MEGAPIXELS] * 1000000;
+        if ($frameCount > intdiv($maxTotalPixels, $pixels)) {
+            $totalPixels = $frameCount > intdiv(PHP_INT_MAX, $pixels) ? PHP_INT_MAX : $frameCount * $pixels;
+
+            throw self::limitExceeded(self::LIMIT_MAX_TOTAL_MEGAPIXELS, $maxTotalPixels, $totalPixels, $output);
+        }
+    }
+
+    /**
+     * @throws LimitExceededException
+     */
+    private static function assertAtMost(string $limit, int $maximum, int $actual, bool $output): void
+    {
+        if ($actual > $maximum) {
+            throw self::limitExceeded($limit, $maximum, $actual, $output);
+        }
+    }
+
+    private static function limitExceeded(string $limit, int $maximum, int $actual, bool $output): LimitExceededException
+    {
+        return $output
+            ? LimitExceededException::forOutput($limit, $maximum, $actual)
+            : LimitExceededException::forInput($limit, $maximum, $actual);
     }
 
     /**
@@ -358,7 +511,7 @@ final class Capabilities
         foreach ($backends as $backend) {
             if (!self::isValidBackendName($backend)) {
                 throw new InvalidArgumentException(
-                    'Capabilities: backend names must be 1 to 32 lowercase letters, digits, "_" or "-", starting with a letter or digit.'
+                    'Capabilities: backend names must be 1 to 32 lowercase letters, digits, "_" or "-", starting with a letter or digit, and not "none".'
                 );
             }
         }
@@ -396,8 +549,12 @@ final class Capabilities
         $checked = [];
         foreach (self::LIMIT_NAMES as $name) {
             $value = $limits[$name];
-            if (!is_int($value) || $value < 1) {
-                throw new InvalidArgumentException(sprintf('Capabilities: limit "%s" must be an integer of at least 1.', $name));
+            if (!is_int($value) || $value < 1 || $value > self::LIMIT_VALUE_MAX) {
+                throw new InvalidArgumentException(sprintf(
+                    'Capabilities: limit "%s" must be an integer from 1 to %d.',
+                    $name,
+                    self::LIMIT_VALUE_MAX
+                ));
             }
             $checked[$name] = $value;
         }

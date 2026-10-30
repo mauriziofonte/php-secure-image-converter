@@ -155,4 +155,16 @@ final class ImageFormatTest extends TestCase
         $this->expectException(UnsupportedFormatException::class);
         ImageFormat::fromMimeType($mimeType);
     }
+
+    public function testAnimatableFormats(): void
+    {
+        self::assertSame(['png', 'gif', 'webp', 'avif'], ImageFormat::animatable());
+        self::assertSame(array_values(array_intersect(ImageFormat::all(), ImageFormat::animatable())), ImageFormat::animatable());
+
+        foreach (ImageFormat::all() as $format) {
+            self::assertSame(in_array($format, ['png', 'gif', 'webp', 'avif'], true), ImageFormat::supportsAnimation($format), $format);
+        }
+        self::assertFalse(ImageFormat::supportsAnimation('GIF'));
+        self::assertFalse(ImageFormat::supportsAnimation('apng'));
+    }
 }

@@ -25,13 +25,27 @@ interface ConverterInterface
     /**
      * Converts the image at $inputPath as described by $request and writes the result to $outputPath.
      *
-     * - The input is untrusted. Its format is detected from its content, never from its name; it is checked against
-     *   the enabled input formats and the limits of getCapabilities() before any decoder runs.
-     * - The output format is $request->resolveOutputFormat() of the input format; when that format cannot be produced
-     *   the converter falls back (AVIF to WEBP to the input format) and reports it in the result's warnings.
-     * - The output is verified before it is returned: its sniffed format, dimensions and frame count must match what
-     *   was produced. When it is not smaller than the input and the request does not resize the image, the input
-     *   bytes are kept instead (passthrough).
+     * - The input is untrusted. Its format is detected from its content, never from its name. Before any decoder runs
+     *   it is checked against the enabled input formats and, on its file size and header data, against the limits
+     *   of getCapabilities() (Capabilities::assertFileSizeWithinLimits() and assertInputWithinLimits()).
+     * - The output is resolved from the request before any encoder runs: its format with
+     *   $request->resolveOutputFormat(), its size with resolveOutputSize() and its frame count with
+     *   resolveOutputFrameCount(). The resolved output is checked against the same dimension, pixel and frame limits
+     *   (Capabilities::assertOutputWithinLimits()), so a request that would enlarge a small input to a huge output is
+     *   refused with LimitExceededException (image_too_large, 422) and never reaches an encoder.
+     * - When the resolved format cannot be produced, including when the resolved size exceeds what the format can
+     *   encode (WEBP holds at most 16383 x 16383 pixels), the converter falls back from AVIF to WEBP to the input
+     *   format and reports the fallback in the result's warnings; that is never a ConversionFailedException while a
+     *   fallback format remains.
+     * - The output is verified before it is returned: its sniffed format, dimensions and frame count must match the
+     *   resolved ones.
+     * - Passthrough (returning the input bytes unchanged) is allowed only when the input already satisfies the whole
+     *   request: its size and frame count equal the resolved ones (no resize, and no animation to drop under
+     *   ANIMATION_FIRST_FRAME), and, when $request->shouldStripMetadata() is true, it carries no metadata other than
+     *   an ICC profile kept by shouldKeepIccProfile(). Such an input is passed through when the converted output is
+     *   not smaller ("keep the smaller file"). An input that does not satisfy the request is never passed through,
+     *   even when the converted output is larger: the converter returns the smallest output it can produce that
+     *   satisfies the request (for example metadata stripped without re-encoding, in the input format).
      * - On success the output is at $outputPath, passthrough included, and any previous file there is replaced. On
      *   failure an exception implementing Exception\ExceptionInterface is thrown and no partial output is left at
      *   $outputPath.

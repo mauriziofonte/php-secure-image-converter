@@ -11,15 +11,22 @@ use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
  *
  * Immutable value object. Format, dimensions and frame count describe the output file as verified after encoding
  * (sniffed from its content), not as requested. A passthrough result means that the output file holds the input
- * bytes unchanged, either because the converted file was not smaller than the input (the "keep the smaller file"
- * rule) or because no conversion was needed.
+ * bytes unchanged, which a converter does only when the input already satisfies the request (see
+ * ConverterInterface::convert()). An unserialized instance is validated again, see __wakeup().
+ *
+ * toArray() is safe for untrusted clients; toInternalArray() adds the output path and is meant for server logs.
  */
 final class ConversionResult
 {
     /**
-     * Backend name of a passthrough for which no backend ran.
+     * Backend name of a passthrough for which no backend ran. Reserved: no backend may use this name.
      */
     public const BACKEND_NONE = 'none';
+
+    /**
+     * Maximum length of one warning, in characters.
+     */
+    public const WARNING_MAX_LENGTH = 256;
 
     /**
      * @var string
@@ -82,14 +89,19 @@ final class ConversionResult
      * @param int          $width          output width in pixels, at least 1
      * @param int          $height         output height in pixels, at least 1
      * @param int          $byteSize       output size in bytes, at least 1
-     * @param int          $frameCount     number of frames in the output, 1 for a still image
-     * @param string       $backend        name of the backend that produced the output (lowercase letters, digits,
-     *                                     "_" or "-", at most 32 characters), or BACKEND_NONE
+     * @param int          $frameCount     number of frames in the output: 1 for a still image, more only for a
+     *                                     format of ImageFormat::animatable()
+     * @param string       $backend        name of the backend that produced the output (see
+     *                                     Capabilities::isValidBackendName()), or BACKEND_NONE for a passthrough for
+     *                                     which no backend ran
      * @param int          $durationMs     wall-clock duration of the whole conversion in milliseconds, at least 0
      * @param string       $isolationLevel IsolationLevel value the conversion actually ran under
      * @param bool         $passthrough    whether the output holds the input bytes unchanged
      * @param list<string> $warnings       non-fatal events worth reporting, e.g. a fallback to another format or
-     *                                     a weaker isolation level under a best_effort policy
+     *                                     a weaker isolation level under a best_effort policy: each 1 to
+     *                                     WARNING_MAX_LENGTH printable ASCII characters (no control characters,
+     *                                     so a warning is safe in a log line or a header), never a path, a secret or
+     *                                     raw input
      *
      * @throws InvalidArgumentException when a value is outside its documented domain
      */
@@ -119,8 +131,18 @@ final class ConversionResult
         self::assertAtLeast('height', $height, 1);
         self::assertAtLeast('byte size', $byteSize, 1);
         self::assertAtLeast('frame count', $frameCount, 1);
+        if ($frameCount > 1 && !ImageFormat::supportsAnimation($outputFormat)) {
+            throw new InvalidArgumentException(sprintf(
+                'Only animatable formats (%s) can have more than one frame.',
+                implode(', ', ImageFormat::animatable())
+            ));
+        }
         self::assertAtLeast('duration', $durationMs, 0);
-        if ($backend !== self::BACKEND_NONE && !Capabilities::isValidBackendName($backend)) {
+        if ($backend === self::BACKEND_NONE) {
+            if (!$passthrough) {
+                throw new InvalidArgumentException('The backend "none" is reserved for a passthrough.');
+            }
+        } elseif (!Capabilities::isValidBackendName($backend)) {
             throw new InvalidArgumentException(
                 'The backend name must be 1 to 32 lowercase letters, digits, "_" or "-", starting with a letter or digit.'
             );
@@ -253,15 +275,13 @@ final class ConversionResult
     }
 
     /**
-     * All values with snake_case keys, for logs and JSON responses. It includes output_path, which must not be sent
-     * to untrusted clients.
+     * Every value except the output path, with snake_case keys: safe to return to untrusted clients, e.g. as JSON.
      *
-     * @return array{output_path: string, output_format: string, mime_type: string, width: int, height: int, byte_size: int, frame_count: int, backend: string, duration_ms: int, isolation_level: string, passthrough: bool, warnings: list<string>}
+     * @return array{output_format: string, mime_type: string, width: int, height: int, byte_size: int, frame_count: int, backend: string, duration_ms: int, isolation_level: string, passthrough: bool, warnings: list<string>}
      */
     public function toArray(): array
     {
         return [
-            'output_path' => $this->outputPath,
             'output_format' => $this->outputFormat,
             'mime_type' => $this->getMimeType(),
             'width' => $this->width,
@@ -274,6 +294,53 @@ final class ConversionResult
             'passthrough' => $this->passthrough,
             'warnings' => $this->warnings,
         ];
+    }
+
+    /**
+     * toArray() plus output_path, for server-side logs only: the path reveals the server's file layout and must never
+     * reach untrusted clients.
+     *
+     * @return array{output_path: string, output_format: string, mime_type: string, width: int, height: int, byte_size: int, frame_count: int, backend: string, duration_ms: int, isolation_level: string, passthrough: bool, warnings: list<string>}
+     */
+    public function toInternalArray(): array
+    {
+        return ['output_path' => $this->outputPath] + $this->toArray();
+    }
+
+    /**
+     * Validates an unserialized instance as the constructor would, so that a tampered or outdated serialized string
+     * cannot produce a result outside the documented domain.
+     *
+     * @throws InvalidArgumentException when the unserialized state is not valid
+     */
+    public function __wakeup(): void
+    {
+        $state = get_object_vars($this);
+
+        try {
+            // strict_types makes a property of the wrong type a TypeError instead of a silent conversion.
+            $copy = new self(
+                $this->outputPath,
+                $this->outputFormat,
+                $this->width,
+                $this->height,
+                $this->byteSize,
+                $this->frameCount,
+                $this->backend,
+                $this->durationMs,
+                $this->isolationLevel,
+                $this->passthrough,
+                $this->warnings
+            );
+            $valid = get_object_vars($copy) === $state;
+        } catch (\TypeError $exception) {
+            $valid = false;
+        } catch (InvalidArgumentException $exception) {
+            $valid = false;
+        }
+        if (!$valid) {
+            throw new InvalidArgumentException('The serialized ConversionResult is not valid.');
+        }
     }
 
     /**
@@ -298,8 +365,11 @@ final class ConversionResult
         $checked = [];
         $expectedKey = 0;
         foreach ($warnings as $key => $warning) {
-            if ($key !== $expectedKey || !is_string($warning) || $warning === '') {
-                throw new InvalidArgumentException('The warnings must be a list of non-empty strings.');
+            if ($key !== $expectedKey || !is_string($warning) || preg_match('/\A[\x20-\x7E]{1,' . self::WARNING_MAX_LENGTH . '}\z/', $warning) !== 1) {
+                throw new InvalidArgumentException(sprintf(
+                    'The warnings must be a list of strings of 1 to %d printable ASCII characters.',
+                    self::WARNING_MAX_LENGTH
+                ));
             }
             $checked[] = $warning;
             ++$expectedKey;

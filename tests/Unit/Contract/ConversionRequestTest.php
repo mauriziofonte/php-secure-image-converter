@@ -4,8 +4,11 @@ declare(strict_types=1);
 
 namespace Mfonte\SecureImageConverter\Tests\Unit\Contract;
 
+use Mfonte\SecureImageConverter\Contract\Capabilities;
 use Mfonte\SecureImageConverter\Contract\ConversionRequest;
+use Mfonte\SecureImageConverter\Contract\Exception\ErrorCode;
 use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
+use Mfonte\SecureImageConverter\Contract\Exception\InvalidImageException;
 use Mfonte\SecureImageConverter\Contract\Exception\InvalidRequestException;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -19,6 +22,8 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 #[CoversClass(InvalidRequestException::class)]
 final class ConversionRequestTest extends TestCase
 {
+    use SerializedStateTrait;
+
     /**
      * Fingerprint of a default request. Pinned so that any change of the canonical form is deliberate: changing it
      * invalidates every cache entry keyed by fingerprint(). It is the first 32 hex digits of the SHA-256 of these
@@ -56,7 +61,7 @@ final class ConversionRequestTest extends TestCase
         self::assertSame(85, ConversionRequest::DEFAULT_QUALITY_JPEG);
         self::assertSame([1, 100], [ConversionRequest::QUALITY_MIN, ConversionRequest::QUALITY_MAX]);
         self::assertSame([0, 9, 4], [ConversionRequest::EFFORT_MIN, ConversionRequest::EFFORT_MAX, ConversionRequest::DEFAULT_EFFORT]);
-        self::assertSame([1, 16384], [ConversionRequest::DIMENSION_MIN, ConversionRequest::DIMENSION_MAX]);
+        self::assertSame([1, 16383], [ConversionRequest::DIMENSION_MIN, ConversionRequest::DIMENSION_MAX]);
     }
 
     public function testListsOfAcceptedValues(): void
@@ -166,10 +171,10 @@ final class ConversionRequestTest extends TestCase
             'effort max' => ['effort', 9],
             'width min' => ['width', 1],
             'width inside' => ['width', 1200],
-            'width max' => ['width', 16384],
+            'width max' => ['width', 16383],
             'height min' => ['height', 1],
             'height inside' => ['height', 900],
-            'height max' => ['height', 16384],
+            'height max' => ['height', 16383],
         ];
     }
 
@@ -200,10 +205,10 @@ final class ConversionRequestTest extends TestCase
             'effort below min' => ['effort', -1],
             'effort above max' => ['effort', 10],
             'width below min' => ['width', 0],
-            'width above max' => ['width', 16385],
+            'width above max (WEBP limit)' => ['width', 16384],
             'width negative' => ['width', -1],
             'height below min' => ['height', 0],
-            'height above max' => ['height', 16385],
+            'height above max (WEBP limit)' => ['height', 16384],
             'height negative' => ['height', -1],
         ];
     }
@@ -564,8 +569,8 @@ final class ConversionRequestTest extends TestCase
             'upper boundaries' => [(new ConversionRequest('avif'))
                 ->withQuality(100)
                 ->withEffort(9)
-                ->withWidth(16384)
-                ->withHeight(16384)
+                ->withWidth(16383)
+                ->withHeight(16383)
                 ->withFit('fill')
                 ->withAnimationPolicy('reject')],
             'lower boundaries' => [(new ConversionRequest())->withEffort(0)->withWidth(1)->withHeight(1)],
@@ -602,7 +607,7 @@ final class ConversionRequestTest extends TestCase
         self::assertEquals($request, ConversionRequest::fromParameters($decoded));
     }
 
-    public function testFromParametersAcceptsNativeTypesAndBothBooleanSpellings(): void
+    public function testFromParametersAcceptsEveryDocumentedSpelling(): void
     {
         $fromStrings = ConversionRequest::fromParameters([
             'format' => 'avif',
@@ -625,7 +630,21 @@ final class ConversionRequestTest extends TestCase
             'keep_icc' => false,
         ]);
 
+        $fromIntegerBooleans = ConversionRequest::fromParameters([
+            'format' => 'avif',
+            'quality' => 55,
+            'effort' => 0,
+            'lossless' => 1,
+            'width' => 800,
+            'enlarge' => 1,
+            'strip' => 0,
+            'keep_icc' => 0,
+        ]);
+
         self::assertEquals($fromStrings, $fromNative);
+        self::assertEquals($fromStrings, $fromIntegerBooleans);
+        self::assertSame($fromStrings->toParameters(), $fromIntegerBooleans->toParameters());
+        self::assertSame($fromStrings->fingerprint(), $fromIntegerBooleans->fingerprint());
         self::assertSame(55, $fromNative->getQuality());
         self::assertSame(0, $fromNative->getEffort());
         self::assertTrue($fromNative->isLossless());
@@ -691,20 +710,21 @@ final class ConversionRequestTest extends TestCase
             'effort negative' => [['effort' => '-1'], 'effort'],
             'effort decimal' => [['effort' => '4.5'], 'effort'],
             'width zero' => [['width' => '0'], 'width'],
-            'width above max' => [['width' => '16385'], 'width'],
+            'width above max' => [['width' => '16384'], 'width'],
             'width huge' => [['width' => '99999999999999999999'], 'width'],
             'width null' => [['width' => null], 'width'],
             'height zero' => [['height' => '0'], 'height'],
-            'height above max' => [['height' => '16385'], 'height'],
-            'height above max as integer' => [['height' => 16385], 'height'],
+            'height above max' => [['height' => '16384'], 'height'],
+            'height above max as integer' => [['height' => 16384], 'height'],
             'lossless yes' => [['lossless' => 'yes'], 'lossless'],
             'lossless uppercase TRUE' => [['lossless' => 'TRUE'], 'lossless'],
             'lossless capitalised True' => [['lossless' => 'True'], 'lossless'],
             'lossless on' => [['lossless' => 'on'], 'lossless'],
             'lossless empty' => [['lossless' => ''], 'lossless'],
             'lossless two' => [['lossless' => '2'], 'lossless'],
-            'lossless integer 1' => [['lossless' => 1], 'lossless'],
-            'lossless integer 0' => [['lossless' => 0], 'lossless'],
+            'lossless integer 2' => [['lossless' => 2], 'lossless'],
+            'lossless integer -1' => [['lossless' => -1], 'lossless'],
+            'lossless float 1.0' => [['lossless' => 1.0], 'lossless'],
             'lossless null' => [['lossless' => null], 'lossless'],
             'enlarge no' => [['enlarge' => 'no'], 'enlarge'],
             'strip off' => [['strip' => 'off'], 'strip'],
@@ -778,6 +798,296 @@ final class ConversionRequestTest extends TestCase
             'Invalid parameter "format": expected one of webp, avif, original, got "jpeg".',
             $exception->getMessage()
         );
+    }
+
+    /**
+     * @return array<string, array{array<mixed>, string}>
+     */
+    public static function errorMessages(): array
+    {
+        return [
+            'ten digits are out of range, not malformed' => [
+                ['quality' => '1000000000'],
+                'Invalid parameter "quality": expected an integer from 1 to 100, got "1000000000".',
+            ],
+            'twenty digits' => [
+                ['width' => '99999999999999999999'],
+                'Invalid parameter "width": expected an integer from 1 to 16383, got "99999999999999999999".',
+            ],
+            'nine digits' => [
+                ['width' => '999999999'],
+                'Invalid parameter "width": expected an integer from 1 to 16383, got 999999999.',
+            ],
+            'leading zero' => [
+                ['quality' => '080'],
+                'Invalid parameter "quality": expected an integer written in decimal digits without sign, spaces or leading zeros, got "080".',
+            ],
+            'integer for a boolean' => [
+                ['strip' => 2],
+                'Invalid parameter "strip": expected 1, 0, true or false, got 2.',
+            ],
+            'float for a boolean' => [
+                ['strip' => 1.0],
+                'Invalid parameter "strip": expected 1, 0, true or false, got a float.',
+            ],
+        ];
+    }
+
+    /**
+     * @param array<mixed> $parameters
+     *
+     * @dataProvider errorMessages
+     */
+    #[DataProvider('errorMessages')]
+    public function testErrorMessageNamesTheActualProblem(array $parameters, string $message): void
+    {
+        $exception = self::catchInvalidRequest(static function () use ($parameters): void {
+            ConversionRequest::fromParameters($parameters);
+        });
+
+        self::assertSame($message, $exception->getMessage());
+        self::assertSame(ErrorCode::INVALID_REQUEST, $exception->getErrorCode());
+    }
+
+    /**
+     * Requests built from the default one, input size and expected output size.
+     *
+     * @return array<string, array{\Closure(ConversionRequest): ConversionRequest, int, int, int, int}>
+     */
+    public static function outputSizes(): array
+    {
+        $same = static function (ConversionRequest $r): ConversionRequest {
+            return $r;
+        };
+
+        return [
+            'no resize' => [$same, 640, 480, 640, 480],
+            'width only' => [static function (ConversionRequest $r): ConversionRequest {
+                return $r->withWidth(320);
+            }, 640, 480, 320, 240],
+            'width only rounds half up' => [static function (ConversionRequest $r): ConversionRequest {
+                return $r->withWidth(100);
+            }, 200, 101, 100, 51],
+            'width only rounds down below half' => [static function (ConversionRequest $r): ConversionRequest {
+                return $r->withWidth(100);
+            }, 300, 199, 100, 66],
+            'width only never below 1 px' => [static function (ConversionRequest $r): ConversionRequest {
+                return $r->withWidth(100);
+            }, 10000, 1, 100, 1],
+            'width only larger than the input' => [static function (ConversionRequest $r): ConversionRequest {
+                return $r->withWidth(1280);
+            }, 640, 480, 640, 480],
+            'width only larger than the input, enlarged' => [static function (ConversionRequest $r): ConversionRequest {
+                return $r->withWidth(1280)->withEnlargementAllowed(true);
+            }, 640, 480, 1280, 960],
+            'width only ignores fit' => [static function (ConversionRequest $r): ConversionRequest {
+                return $r->withWidth(400)->withFit('fill');
+            }, 800, 600, 400, 300],
+            'height only' => [static function (ConversionRequest $r): ConversionRequest {
+                return $r->withHeight(240);
+            }, 640, 480, 320, 240],
+            'height only larger than the input' => [static function (ConversionRequest $r): ConversionRequest {
+                return $r->withHeight(960);
+            }, 640, 480, 640, 480],
+            'height only larger than the input, enlarged' => [static function (ConversionRequest $r): ConversionRequest {
+                return $r->withHeight(960)->withEnlargementAllowed(true);
+            }, 640, 480, 1280, 960],
+            'contain, bound by width' => [static function (ConversionRequest $r): ConversionRequest {
+                return $r->withWidth(400)->withHeight(400);
+            }, 800, 600, 400, 300],
+            'contain, bound by height' => [static function (ConversionRequest $r): ConversionRequest {
+                return $r->withWidth(400)->withHeight(400);
+            }, 600, 800, 300, 400],
+            'contain, box larger than the input' => [static function (ConversionRequest $r): ConversionRequest {
+                return $r->withWidth(1000)->withHeight(1000);
+            }, 800, 600, 800, 600],
+            'contain, box larger on one axis only' => [static function (ConversionRequest $r): ConversionRequest {
+                return $r->withWidth(1000)->withHeight(300);
+            }, 800, 600, 400, 300],
+            'contain, enlarged' => [static function (ConversionRequest $r): ConversionRequest {
+                return $r->withWidth(1600)->withHeight(1600)->withEnlargementAllowed(true);
+            }, 800, 600, 1600, 1200],
+            'cover, box inside the input' => [static function (ConversionRequest $r): ConversionRequest {
+                return $r->withWidth(400)->withHeight(400)->withFit('cover');
+            }, 800, 600, 400, 400],
+            'cover, box larger than the input' => [static function (ConversionRequest $r): ConversionRequest {
+                return $r->withWidth(1600)->withHeight(1600)->withFit('cover');
+            }, 800, 600, 600, 600],
+            'cover, box higher than the input' => [static function (ConversionRequest $r): ConversionRequest {
+                return $r->withWidth(200)->withHeight(800)->withFit('cover');
+            }, 800, 600, 150, 600],
+            'cover, box wider than the input' => [static function (ConversionRequest $r): ConversionRequest {
+                return $r->withWidth(1000)->withHeight(500)->withFit('cover');
+            }, 800, 600, 800, 400],
+            'cover, enlarged' => [static function (ConversionRequest $r): ConversionRequest {
+                return $r->withWidth(1600)->withHeight(1600)->withFit('cover')->withEnlargementAllowed(true);
+            }, 800, 600, 1600, 1600],
+            'fill' => [static function (ConversionRequest $r): ConversionRequest {
+                return $r->withWidth(400)->withHeight(100)->withFit('fill');
+            }, 800, 600, 400, 100],
+            'fill, clamped to the input' => [static function (ConversionRequest $r): ConversionRequest {
+                return $r->withWidth(1000)->withHeight(100)->withFit('fill');
+            }, 800, 600, 800, 100],
+            'fill, enlarged to the largest box' => [static function (ConversionRequest $r): ConversionRequest {
+                return $r->withWidth(16383)->withHeight(16383)->withFit('fill')->withEnlargementAllowed(true);
+            }, 10, 10, 16383, 16383],
+            'width only, enlarged, follows an extreme aspect ratio' => [static function (ConversionRequest $r): ConversionRequest {
+                return $r->withWidth(16383)->withEnlargementAllowed(true);
+            }, 1, 100000, 16383, 1638300000],
+            'largest input' => [static function (ConversionRequest $r): ConversionRequest {
+                return $r->withWidth(16383);
+            }, Capabilities::LIMIT_VALUE_MAX, Capabilities::LIMIT_VALUE_MAX, 16383, 16383],
+        ];
+    }
+
+    /**
+     * @param \Closure(ConversionRequest): ConversionRequest $build
+     *
+     * @dataProvider outputSizes
+     */
+    #[DataProvider('outputSizes')]
+    public function testResolveOutputSize(\Closure $build, int $inputWidth, int $inputHeight, int $width, int $height): void
+    {
+        self::assertSame([$width, $height], $build(new ConversionRequest())->resolveOutputSize($inputWidth, $inputHeight));
+    }
+
+    /**
+     * @return array<string, array{int, int}>
+     */
+    public static function invalidInputSizes(): array
+    {
+        return [
+            'zero width' => [0, 10],
+            'zero height' => [10, 0],
+            'negative width' => [-1, 10],
+            'width above LIMIT_VALUE_MAX' => [Capabilities::LIMIT_VALUE_MAX + 1, 10],
+            'height above LIMIT_VALUE_MAX' => [10, Capabilities::LIMIT_VALUE_MAX + 1],
+        ];
+    }
+
+    /**
+     * @dataProvider invalidInputSizes
+     */
+    #[DataProvider('invalidInputSizes')]
+    public function testResolveOutputSizeRejectsAnInvalidInputSize(int $inputWidth, int $inputHeight): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        (new ConversionRequest())->withWidth(100)->resolveOutputSize($inputWidth, $inputHeight);
+    }
+
+    /**
+     * @return array<string, array{string, int, bool, int}>
+     */
+    public static function outputFrameCounts(): array
+    {
+        return [
+            'still input, preserve' => ['preserve', 1, true, 1],
+            'still input, first_frame' => ['first_frame', 1, true, 1],
+            'still input, reject' => ['reject', 1, false, 1],
+            'animated input, preserve, animated output supported' => ['preserve', 24, true, 24],
+            'animated input, preserve, animated output unsupported' => ['preserve', 24, false, 1],
+            'animated input, first_frame' => ['first_frame', 24, true, 1],
+        ];
+    }
+
+    /**
+     * @dataProvider outputFrameCounts
+     */
+    #[DataProvider('outputFrameCounts')]
+    public function testResolveOutputFrameCount(string $policy, int $inputFrames, bool $animatedOutputSupported, int $expected): void
+    {
+        $request = (new ConversionRequest())->withAnimationPolicy($policy);
+
+        self::assertSame($expected, $request->resolveOutputFrameCount($inputFrames, $animatedOutputSupported));
+    }
+
+    public function testResolveOutputFrameCountRejectsAnimatedInputUnderReject(): void
+    {
+        try {
+            (new ConversionRequest())->withAnimationPolicy('reject')->resolveOutputFrameCount(2, true);
+        } catch (InvalidImageException $exception) {
+            self::assertSame(ErrorCode::ANIMATION_REJECTED, $exception->getErrorCode());
+
+            return;
+        }
+
+        self::fail('InvalidImageException was not thrown');
+    }
+
+    public function testResolveOutputFrameCountRejectsAFrameCountBelowOne(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        (new ConversionRequest())->resolveOutputFrameCount(0, true);
+    }
+
+    /**
+     * @dataProvider requests
+     */
+    #[DataProvider('requests')]
+    public function testSerializationRoundTrip(ConversionRequest $request): void
+    {
+        $restored = unserialize(serialize($request), ['allowed_classes' => [ConversionRequest::class]]);
+
+        self::assertEquals($request, $restored);
+    }
+
+    /**
+     * Private states that no public method can produce.
+     *
+     * @return array<string, array{string, mixed}>
+     */
+    public static function tamperedStates(): array
+    {
+        return [
+            'format not a target format' => ['format', 'gif'],
+            'format null' => ['format', null],
+            'quality out of range' => ['quality', 0],
+            'quality as a string' => ['quality', '80'],
+            'effort as a float' => ['effort', 4.0],
+            'width above DIMENSION_MAX' => ['width', 16384],
+            'height negative' => ['height', -1],
+            'lossless as an integer' => ['lossless', 1],
+            'fit unknown' => ['fit', 'inside'],
+            'strip as a string' => ['stripMetadata', 'true'],
+            'animation policy unknown' => ['animationPolicy', 'all'],
+            'animation policy as an array' => ['animationPolicy', ['preserve']],
+        ];
+    }
+
+    /**
+     * @param mixed $value
+     *
+     * @dataProvider tamperedStates
+     */
+    #[DataProvider('tamperedStates')]
+    public function testUnserializeRejectsATamperedState(string $property, $value): void
+    {
+        $state = self::stateOf(new ConversionRequest());
+        self::assertArrayHasKey($property, $state);
+        $state[$property] = $value;
+
+        $this->expectException(InvalidArgumentException::class);
+
+        unserialize(self::serializedWithState(ConversionRequest::class, $state), ['allowed_classes' => [ConversionRequest::class]]);
+    }
+
+    public function testUnserializeRejectsAMissingOrUnknownProperty(): void
+    {
+        $state = self::stateOf(new ConversionRequest());
+        unset($state['format']);
+        try {
+            unserialize(self::serializedWithState(ConversionRequest::class, $state), ['allowed_classes' => [ConversionRequest::class]]);
+            self::fail('A state without format was accepted');
+        } catch (InvalidArgumentException $exception) {
+            self::assertSame(ErrorCode::INTERNAL_ERROR, $exception->getErrorCode());
+        }
+
+        $state = self::stateOf(new ConversionRequest()) + ['injected' => 'value'];
+        $this->expectException(InvalidArgumentException::class);
+        // @ silences the PHP 8.2+ deprecation for the dynamic property, so that __wakeup() is reached.
+        @unserialize(self::serializedWithState(ConversionRequest::class, $state), ['allowed_classes' => [ConversionRequest::class]]);
     }
 
     public function testFingerprintIsShortLowercaseHex(): void

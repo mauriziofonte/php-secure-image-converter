@@ -16,6 +16,8 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 #[CoversClass(ConversionResult::class)]
 final class ConversionResultTest extends TestCase
 {
+    use SerializedStateTrait;
+
     /**
      * Valid constructor arguments, keyed by constructor parameter name.
      *
@@ -91,11 +93,10 @@ final class ConversionResultTest extends TestCase
         self::assertSame(['avif encoder unavailable, fell back to webp'], $result->getWarnings());
     }
 
-    public function testToArray(): void
+    public function testToArrayIsSafeForClientsAndLeavesOutTheOutputPath(): void
     {
         self::assertSame(
             [
-                'output_path' => '/tmp/out/photo.webp',
                 'output_format' => 'webp',
                 'mime_type' => 'image/webp',
                 'width' => 800,
@@ -110,6 +111,38 @@ final class ConversionResultTest extends TestCase
             ],
             self::create()->toArray()
         );
+    }
+
+    public function testToInternalArrayAddsTheOutputPath(): void
+    {
+        $result = self::create();
+
+        self::assertSame(['output_path' => '/tmp/out/photo.webp'] + $result->toArray(), $result->toInternalArray());
+        self::assertSame('output_path', array_keys($result->toInternalArray())[0]);
+    }
+
+    /**
+     * @return array<string, array{string}>
+     */
+    public static function animatableFormats(): array
+    {
+        return ['png' => ['png'], 'gif' => ['gif'], 'webp' => ['webp'], 'avif' => ['avif']];
+    }
+
+    /**
+     * @dataProvider animatableFormats
+     */
+    #[DataProvider('animatableFormats')]
+    public function testAnimatableFormatsCanHaveSeveralFrames(string $format): void
+    {
+        self::assertTrue(self::create(['outputFormat' => $format, 'frameCount' => 2])->isAnimated());
+    }
+
+    public function testWarningsOfPrintableAsciiUpToTheMaximumLengthAreAccepted(): void
+    {
+        $warnings = [' !"#$%&\'()*+,-./0123456789:;<=>?@AZ[\\]^_`az{|}~', str_repeat('w', ConversionResult::WARNING_MAX_LENGTH)];
+
+        self::assertSame($warnings, self::create(['warnings' => $warnings])->getWarnings());
     }
 
     public function testPassthroughWithoutBackendAndAnimatedOutput(): void
@@ -161,15 +194,26 @@ final class ConversionResultTest extends TestCase
             'negative width' => [['width' => -1]],
             'byte size zero' => [['byteSize' => 0]],
             'frame count zero' => [['frameCount' => 0]],
+            'several frames of jpeg' => [['outputFormat' => 'jpeg', 'frameCount' => 2]],
+            'several frames of bmp' => [['outputFormat' => 'bmp', 'frameCount' => 2]],
+            'several frames of tiff' => [['outputFormat' => 'tiff', 'frameCount' => 2]],
             'negative duration' => [['durationMs' => -1]],
             'empty backend' => [['backend' => '']],
             'uppercase backend' => [['backend' => 'Vips']],
             'backend with space' => [['backend' => 'vips cli']],
             'backend too long' => [['backend' => str_repeat('a', 33)]],
+            'backend none for a converted output' => [['backend' => 'none', 'passthrough' => false]],
             'unknown isolation level' => [['isolationLevel' => 'bwrap']],
             'warnings not a list' => [['warnings' => ['first' => 'fell back']]],
             'warning not a string' => [['warnings' => [42]]],
             'empty warning' => [['warnings' => ['']]],
+            'warning with LF (log or header injection)' => [['warnings' => ["fell back\nX-Injected: 1"]]],
+            'warning with CR' => [['warnings' => ["fell back\r"]]],
+            'warning with tab' => [['warnings' => ["fell\tback"]]],
+            'warning with NUL' => [['warnings' => ["fell back\0"]]],
+            'warning with DEL' => [['warnings' => ["fell back\x7F"]]],
+            'warning with non-ASCII' => [['warnings' => ["fell back \u{2192} webp"]]],
+            'warning too long' => [['warnings' => [str_repeat('w', ConversionResult::WARNING_MAX_LENGTH + 1)]]],
         ];
     }
 
@@ -184,5 +228,48 @@ final class ConversionResultTest extends TestCase
         $this->expectException(InvalidArgumentException::class);
 
         self::create($overrides);
+    }
+
+    public function testSerializationRoundTrip(): void
+    {
+        $result = self::create();
+
+        self::assertEquals($result, unserialize(serialize($result), ['allowed_classes' => [ConversionResult::class]]));
+    }
+
+    /**
+     * Private states that the constructor refuses.
+     *
+     * @return array<string, array{string, mixed}>
+     */
+    public static function tamperedStates(): array
+    {
+        return [
+            'unknown output format' => ['outputFormat', 'heic'],
+            'width as a string' => ['width', '800'],
+            'height zero' => ['height', 0],
+            'frames of a still format' => ['frameCount', 3],
+            'passthrough as an integer' => ['passthrough', 1],
+            'warning with LF' => ['warnings', ["a\nb"]],
+            'warnings not an array' => ['warnings', 'fell back'],
+            'output path null' => ['outputPath', null],
+        ];
+    }
+
+    /**
+     * @param mixed $value
+     *
+     * @dataProvider tamperedStates
+     */
+    #[DataProvider('tamperedStates')]
+    public function testUnserializeRejectsATamperedState(string $property, $value): void
+    {
+        $state = self::stateOf(self::create(['outputFormat' => 'jpeg']));
+        self::assertArrayHasKey($property, $state);
+        $state[$property] = $value;
+
+        $this->expectException(InvalidArgumentException::class);
+
+        unserialize(self::serializedWithState(ConversionResult::class, $state), ['allowed_classes' => [ConversionResult::class]]);
     }
 }

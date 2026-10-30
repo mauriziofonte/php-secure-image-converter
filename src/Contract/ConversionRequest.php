@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Mfonte\SecureImageConverter\Contract;
 
 use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
+use Mfonte\SecureImageConverter\Contract\Exception\InvalidImageException;
 use Mfonte\SecureImageConverter\Contract\Exception\InvalidRequestException;
 
 /**
@@ -13,11 +14,11 @@ use Mfonte\SecureImageConverter\Contract\Exception\InvalidRequestException;
  * Immutable value object: every with*() method validates its argument and returns a modified copy, leaving the
  * original untouched; an invalid argument throws InvalidRequestException and creates nothing. A new instance holds
  * the defaults (webp, default quality, effort 4, no resize, metadata stripped but ICC profile kept, animation
- * preserved).
+ * preserved). An unserialized instance is validated again, see __wakeup().
  *
  * This class is the single source of truth for conversion parameters across the library, the conversion API and the
  * proxy: the API maps HTTP parameters with fromParameters(), the proxy sends toParameters() to the API, and caches
- * key their entries with fingerprint(). Canonical parameter names and value syntax (fromParameters() is strict):
+ * key their entries with fingerprint(). Canonical parameter names and values:
  *
  * | Name        | Values                                            | Default    |
  * | ----------- | ------------------------------------------------- | ---------- |
@@ -25,16 +26,26 @@ use Mfonte\SecureImageConverter\Contract\Exception\InvalidRequestException;
  * | `quality`   | integer 1-100; omitted for the per-format default | (omitted)  |
  * | `effort`    | integer 0-9 (0 fastest, 9 smallest output)        | `4`        |
  * | `lossless`  | boolean                                           | `0`        |
- * | `width`     | integer 1-16384; omitted for no constraint        | (omitted)  |
- * | `height`    | integer 1-16384; omitted for no constraint        | (omitted)  |
+ * | `width`     | integer 1-16383; omitted for no constraint        | (omitted)  |
+ * | `height`    | integer 1-16383; omitted for no constraint        | (omitted)  |
  * | `fit`       | `contain`, `cover`, `fill`                        | `contain`  |
  * | `enlarge`   | boolean                                           | `0`        |
  * | `strip`     | boolean                                           | `1`        |
  * | `keep_icc`  | boolean                                           | `1`        |
  * | `animation` | `preserve`, `first_frame`, `reject`               | `preserve` |
  *
- * Integers are written in decimal digits without sign, spaces or leading zeros; booleans as `1`, `0`, `true` or
- * `false`.
+ * These ranges are static: they are the same on every host, they are checked here, and a value outside them is a
+ * bad request (InvalidRequestException, error code invalid_request, 400). Whether the output resolved from a valid
+ * request (resolveOutputSize(), resolveOutputFrameCount()) fits a converter's dimension, pixel and frame limits
+ * depends on the host and on the input; it is checked at conversion time with Capabilities::assertOutputWithinLimits()
+ * (LimitExceededException, error code image_too_large, 422). For example width=16383, height=16383, fit=fill and
+ * enlarge=1 is a valid request, and its 268-megapixel output is refused by any converter with a lower limit.
+ *
+ * Spelling: toParameters() writes integers in decimal digits without sign, spaces or leading zeros, and booleans as
+ * `1` or `0`. fromParameters() accepts that canonical spelling plus a closed set of alternatives, and rejects
+ * everything else: PHP ints for integers; PHP bools, the PHP ints 0 and 1, and the strings `true` and `false` for
+ * booleans. Every accepted spelling of a value parses to the same value, so equivalent requests have equal
+ * toParameters() and fingerprint().
  */
 final class ConversionRequest
 {
@@ -101,7 +112,12 @@ final class ConversionRequest
     public const DEFAULT_EFFORT = 4;
 
     public const DIMENSION_MIN = 1;
-    public const DIMENSION_MAX = 16384;
+
+    /**
+     * Largest width or height that can be requested: 16383 px, the largest dimension WEBP can encode and the smallest
+     * maximum among the target formats, so that a valid request never asks for a size its target format cannot hold.
+     */
+    public const DIMENSION_MAX = 16383;
 
     public const DEFAULT_FORMAT = ImageFormat::WEBP;
 
@@ -138,6 +154,25 @@ final class ConversionRequest
         self::PARAM_STRIP,
         self::PARAM_KEEP_ICC,
         self::PARAM_ANIMATION,
+    ];
+
+    /**
+     * Parameter name of each property, used to validate an unserialized instance.
+     *
+     * @var array<string, string>
+     */
+    private const PROPERTY_PARAMETERS = [
+        'format' => self::PARAM_FORMAT,
+        'quality' => self::PARAM_QUALITY,
+        'effort' => self::PARAM_EFFORT,
+        'lossless' => self::PARAM_LOSSLESS,
+        'width' => self::PARAM_WIDTH,
+        'height' => self::PARAM_HEIGHT,
+        'fit' => self::PARAM_FIT,
+        'enlargementAllowed' => self::PARAM_ENLARGE,
+        'stripMetadata' => self::PARAM_STRIP,
+        'keepIccProfile' => self::PARAM_KEEP_ICC,
+        'animationPolicy' => self::PARAM_ANIMATION,
     ];
 
     /**
@@ -232,6 +267,32 @@ final class ConversionRequest
     }
 
     /**
+     * Validates an unserialized instance as fromParameters() would, so that a tampered or outdated serialized string
+     * cannot produce a request outside the documented domain (for example the format "gif").
+     *
+     * @throws InvalidArgumentException when the unserialized state is not a valid request
+     */
+    public function __wakeup(): void
+    {
+        $state = get_object_vars($this);
+        $parameters = [];
+        foreach (self::PROPERTY_PARAMETERS as $property => $parameter) {
+            if (isset($state[$property])) {
+                $parameters[$parameter] = $state[$property];
+            }
+        }
+
+        try {
+            $valid = get_object_vars(self::fromParameters($parameters)) === $state;
+        } catch (InvalidRequestException $exception) {
+            $valid = false;
+        }
+        if (!$valid) {
+            throw new InvalidArgumentException('The serialized ConversionRequest is not a valid request.');
+        }
+    }
+
+    /**
      * Canonical parameter names, in canonical order (the order used by toParameters()).
      *
      * @return list<string>
@@ -274,11 +335,13 @@ final class ConversionRequest
     /**
      * Builds a request from canonical parameters, as received over HTTP or produced by toParameters().
      *
-     * Parsing is strict so that one request has one spelling: keys must be canonical names (case-sensitive);
-     * integers must be PHP ints or strings of decimal digits without sign, spaces or leading zeros; booleans must be
-     * PHP bools or the strings "1", "0", "true", "false"; other values must be strings among the documented choices.
-     * Null, floats, arrays and objects are rejected; a missing key keeps its default (to obtain the per-format
-     * default quality or no resize, omit quality, width or height).
+     * Parsing is strict and accepts exactly these spellings (see the class documentation):
+     * - keys: canonical names, case-sensitive;
+     * - integers: PHP ints, or strings of decimal digits without sign, spaces or leading zeros;
+     * - booleans: PHP bools, the PHP ints 1 and 0, or the strings "1", "0", "true" and "false";
+     * - choices (format, fit, animation): strings among the documented values, case-sensitive.
+     * Anything else is rejected, including null, floats, arrays, objects, "yes", "TRUE", " 1" and "08". A missing key
+     * keeps its default: to obtain the per-format default quality or no resize, omit quality, width or height.
      *
      * @param array<mixed> $parameters parameter name => value
      *
@@ -305,19 +368,19 @@ final class ConversionRequest
                     $request = $request->withFormat(self::parseString(self::PARAM_FORMAT, $value));
                     break;
                 case self::PARAM_QUALITY:
-                    $request = $request->withQuality(self::parseInt(self::PARAM_QUALITY, $value));
+                    $request = $request->withQuality(self::parseInt(self::PARAM_QUALITY, $value, self::QUALITY_MIN, self::QUALITY_MAX));
                     break;
                 case self::PARAM_EFFORT:
-                    $request = $request->withEffort(self::parseInt(self::PARAM_EFFORT, $value));
+                    $request = $request->withEffort(self::parseInt(self::PARAM_EFFORT, $value, self::EFFORT_MIN, self::EFFORT_MAX));
                     break;
                 case self::PARAM_LOSSLESS:
                     $request = $request->withLossless(self::parseBool(self::PARAM_LOSSLESS, $value));
                     break;
                 case self::PARAM_WIDTH:
-                    $request = $request->withWidth(self::parseInt(self::PARAM_WIDTH, $value));
+                    $request = $request->withWidth(self::parseInt(self::PARAM_WIDTH, $value, self::DIMENSION_MIN, self::DIMENSION_MAX));
                     break;
                 case self::PARAM_HEIGHT:
-                    $request = $request->withHeight(self::parseInt(self::PARAM_HEIGHT, $value));
+                    $request = $request->withHeight(self::parseInt(self::PARAM_HEIGHT, $value, self::DIMENSION_MIN, self::DIMENSION_MAX));
                     break;
                 case self::PARAM_FIT:
                     $request = $request->withFit(self::parseString(self::PARAM_FIT, $value));
@@ -557,7 +620,7 @@ final class ConversionRequest
     }
 
     /**
-     * Requested output width in pixels (1 to 16384), or null for no width constraint.
+     * Requested output width in pixels (1 to 16383), or null for no width constraint.
      *
      * With only width or only height set, the other dimension follows the input's aspect ratio and fit has no
      * effect. With both set, fit decides how the image is mapped onto the box. With neither, the image is not
@@ -569,7 +632,7 @@ final class ConversionRequest
     }
 
     /**
-     * @param int|null $width 1 to 16384 pixels, or null for no width constraint
+     * @param int|null $width 1 to 16383 pixels, or null for no width constraint
      *
      * @throws InvalidRequestException when the width is out of range
      */
@@ -585,7 +648,7 @@ final class ConversionRequest
     }
 
     /**
-     * Requested output height in pixels (1 to 16384), or null for no height constraint. See getWidth().
+     * Requested output height in pixels (1 to 16383), or null for no height constraint. See getWidth().
      */
     public function getHeight(): ?int
     {
@@ -593,7 +656,7 @@ final class ConversionRequest
     }
 
     /**
-     * @param int|null $height 1 to 16384 pixels, or null for no height constraint
+     * @param int|null $height 1 to 16383 pixels, or null for no height constraint
      *
      * @throws InvalidRequestException when the height is out of range
      */
@@ -614,6 +677,118 @@ final class ConversionRequest
     public function hasResize(): bool
     {
         return $this->width !== null || $this->height !== null;
+    }
+
+    /**
+     * Size of the output for an input of the given size, after resize, fit and enlargement, as [width, height].
+     *
+     * - Neither width nor height: the input size.
+     * - Only width (only height): that width (height), the other dimension following the input's aspect ratio.
+     * - Both, FIT_CONTAIN: the largest size with the input's aspect ratio that fits inside the box.
+     * - Both, FIT_COVER or FIT_FILL: the box (cover crops the overflow around the centre, fill stretches).
+     * - Without enlargement no output dimension exceeds the corresponding input dimension: an input smaller than the
+     *   requested size keeps its size (width only, height only, contain), a cover box larger than the input on
+     *   either axis is scaled down with its own aspect ratio until it fits inside the input, and a fill box is
+     *   clamped to the input on each axis.
+     *
+     * Computed dimensions are rounded half up and are never below 1. Only integer arithmetic is used, so the result is
+     * the same on every platform: the pipeline resizes to exactly this size and the output verification expects it.
+     * The result is not bounded by DIMENSION_MAX (only one side up to 16383 is requested; the other follows the input)
+     * and must be checked with Capabilities::assertOutputWithinLimits() before any encoder runs.
+     *
+     * @param int $inputWidth  input width in pixels, 1 to Capabilities::LIMIT_VALUE_MAX
+     * @param int $inputHeight input height in pixels, 1 to Capabilities::LIMIT_VALUE_MAX
+     *
+     * @throws InvalidArgumentException when an input dimension is out of range (a programming error: the input is
+     *                                  checked against the converter's limits first)
+     *
+     * @return array{0: int, 1: int}
+     */
+    public function resolveOutputSize(int $inputWidth, int $inputHeight): array
+    {
+        if ($inputWidth < 1 || $inputHeight < 1 || $inputWidth > Capabilities::LIMIT_VALUE_MAX || $inputHeight > Capabilities::LIMIT_VALUE_MAX) {
+            throw new InvalidArgumentException(sprintf(
+                'The input width and height must be from 1 to %d, got %d x %d.',
+                Capabilities::LIMIT_VALUE_MAX,
+                $inputWidth,
+                $inputHeight
+            ));
+        }
+
+        $boxWidth = $this->width;
+        $boxHeight = $this->height;
+        $enlarge = $this->enlargementAllowed;
+
+        if ($boxWidth === null && $boxHeight === null) {
+            return [$inputWidth, $inputHeight];
+        }
+        if ($boxHeight === null) {
+            return !$enlarge && $boxWidth >= $inputWidth
+                ? [$inputWidth, $inputHeight]
+                : [$boxWidth, self::scale($inputHeight, $boxWidth, $inputWidth)];
+        }
+        if ($boxWidth === null) {
+            return !$enlarge && $boxHeight >= $inputHeight
+                ? [$inputWidth, $inputHeight]
+                : [self::scale($inputWidth, $boxHeight, $inputHeight), $boxHeight];
+        }
+
+        if ($this->fit === self::FIT_FILL) {
+            return $enlarge
+                ? [$boxWidth, $boxHeight]
+                : [min($boxWidth, $inputWidth), min($boxHeight, $inputHeight)];
+        }
+
+        if ($this->fit === self::FIT_COVER) {
+            if ($enlarge || ($boxWidth <= $inputWidth && $boxHeight <= $inputHeight)) {
+                return [$boxWidth, $boxHeight];
+            }
+
+            // inputWidth / boxWidth <= inputHeight / boxHeight: the box is scaled to the input width.
+            return $inputWidth * $boxHeight <= $inputHeight * $boxWidth
+                ? [$inputWidth, self::scale($boxHeight, $inputWidth, $boxWidth)]
+                : [self::scale($boxWidth, $inputHeight, $boxHeight), $inputHeight];
+        }
+
+        if (!$enlarge && $boxWidth >= $inputWidth && $boxHeight >= $inputHeight) {
+            return [$inputWidth, $inputHeight];
+        }
+
+        // boxWidth / inputWidth <= boxHeight / inputHeight: the input is scaled to the box width.
+        return $boxWidth * $inputHeight <= $boxHeight * $inputWidth
+            ? [$boxWidth, self::scale($inputHeight, $boxWidth, $inputWidth)]
+            : [self::scale($inputWidth, $boxHeight, $inputHeight), $boxHeight];
+    }
+
+    /**
+     * Number of frames of the output for an input with the given number of frames, after the animation policy.
+     *
+     * A still input gives 1. An animated input is refused under ANIMATION_REJECT, gives 1 under
+     * ANIMATION_FIRST_FRAME, and keeps every frame under ANIMATION_PRESERVE when the output format can be produced
+     * with several frames (1 otherwise). Like resolveOutputSize(), the result must be checked with
+     * Capabilities::assertOutputWithinLimits() before any encoder runs.
+     *
+     * @param int  $inputFrameCount         number of frames of the input, at least 1
+     * @param bool $animatedOutputSupported whether the converter can produce the output format with several frames
+     *                                      (Capabilities::supportsAnimatedOutput() of that format)
+     *
+     * @throws InvalidImageException    with error code animation_rejected, when the input is animated and the policy
+     *                                  is ANIMATION_REJECT
+     * @throws InvalidArgumentException when the frame count is below 1 (a programming error)
+     */
+    public function resolveOutputFrameCount(int $inputFrameCount, bool $animatedOutputSupported): int
+    {
+        if ($inputFrameCount < 1) {
+            throw new InvalidArgumentException(sprintf('The input frame count must be at least 1, got %d.', $inputFrameCount));
+        }
+        if ($inputFrameCount === 1) {
+            return 1;
+        }
+        if ($this->animationPolicy === self::ANIMATION_REJECT) {
+            throw InvalidImageException::animationRejected($inputFrameCount);
+        }
+
+        return $this->animationPolicy === self::ANIMATION_PRESERVE && $animatedOutputSupported ? $inputFrameCount : 1;
     }
 
     /**
@@ -776,18 +951,26 @@ final class ConversionRequest
      *
      * @throws InvalidRequestException
      */
-    private static function parseInt(string $name, $value): int
+    private static function parseInt(string $name, $value, int $min, int $max): int
     {
         if (is_int($value)) {
-            return $value;
+            return self::checkRange($name, $value, $min, $max);
         }
-        if (is_string($value) && preg_match('/\A(?:0|[1-9][0-9]{0,8})\z/', $value) === 1) {
-            return (int) $value;
+        if (is_string($value) && preg_match('/\A(?:0|[1-9][0-9]*)\z/', $value) === 1) {
+            // Every bound has at most 9 digits: a longer value is out of range and may not even fit in an int.
+            if (strlen($value) > 9) {
+                throw InvalidRequestException::forParameter(
+                    $name,
+                    sprintf('expected an integer from %d to %d, got %s', $min, $max, self::describe($value))
+                );
+            }
+
+            return self::checkRange($name, (int) $value, $min, $max);
         }
 
         throw InvalidRequestException::forParameter($name, sprintf(
             'expected an integer written in decimal digits without sign, spaces or leading zeros, got %s',
-            is_string($value) ? self::describe($value) : self::describeType($value)
+            self::describeValue($value)
         ));
     }
 
@@ -801,17 +984,26 @@ final class ConversionRequest
         if (is_bool($value)) {
             return $value;
         }
-        if ($value === '1' || $value === 'true') {
+        if ($value === 1 || $value === '1' || $value === 'true') {
             return true;
         }
-        if ($value === '0' || $value === 'false') {
+        if ($value === 0 || $value === '0' || $value === 'false') {
             return false;
         }
 
-        throw InvalidRequestException::forParameter($name, sprintf(
-            'expected 1, 0, true or false, got %s',
-            is_string($value) ? self::describe($value) : self::describeType($value)
-        ));
+        throw InvalidRequestException::forParameter(
+            $name,
+            sprintf('expected 1, 0, true or false, got %s', self::describeValue($value))
+        );
+    }
+
+    /**
+     * Rounds $value * $numerator / $denominator half up, with a minimum of 1. Callers keep one factor of the product
+     * at most DIMENSION_MAX and the other at most Capabilities::LIMIT_VALUE_MAX, so it cannot overflow.
+     */
+    private static function scale(int $value, int $numerator, int $denominator): int
+    {
+        return max(1, intdiv(2 * $value * $numerator + $denominator, 2 * $denominator));
     }
 
     private static function formatBool(bool $value): string
@@ -838,6 +1030,20 @@ final class ConversionRequest
     private static function isDisplayable(string $value): bool
     {
         return preg_match('/\A[A-Za-z0-9_.+-]{1,32}\z/', $value) === 1;
+    }
+
+    /**
+     * Describes a user-supplied value of any type for an error message, see describe().
+     *
+     * @param mixed $value
+     */
+    private static function describeValue($value): string
+    {
+        if (is_string($value)) {
+            return self::describe($value);
+        }
+
+        return is_int($value) ? (string) $value : self::describeType($value);
     }
 
     /**
