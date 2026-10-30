@@ -32,7 +32,7 @@ final class WebpParser implements ParserInterface
     /**
      * Largest number of chunks walked in an extended file. Frames are bounded earlier by the frame limits.
      */
-    public const MAX_CHUNKS = 65536;
+    public const MAX_CHUNKS = 16384;
 
     /**
      * Product of the canvas width and height allowed by the specification.

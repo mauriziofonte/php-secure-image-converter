@@ -6,6 +6,9 @@ namespace Mfonte\SecureImageConverter\Tests\Fixtures;
 
 use Mfonte\SecureImageConverter\Contract\Exception\ErrorCode;
 use Mfonte\SecureImageConverter\Contract\ImageFormat;
+use Mfonte\SecureImageConverter\Validation\Parser\GifParser;
+use Mfonte\SecureImageConverter\Validation\Parser\PngParser;
+use Mfonte\SecureImageConverter\Validation\Parser\WebpParser;
 
 /**
  * The input validation corpus: every case with the bytes ImageBuilder computes for it and what ImageInspector must
@@ -14,8 +17,9 @@ use Mfonte\SecureImageConverter\Contract\ImageFormat;
  * Cases are keyed by their path under tests/Fixtures/corpus/, where generate-corpus.php writes them; the name says
  * what the file is: valid-* (accepted), bomb-* (a dimension, decompression or frame bomb), spoof-* (malformed,
  * inconsistent or forged header), truncated-*, unsupported-* (an identified variant this library does not process),
- * polyglot-* (another file type dressed as an image, or the reverse). One case is not committed: a GIF of 10,000
- * frames cannot be smaller than 100 KB, so the tests generate it in memory.
+ * polyglot-* (another file type dressed as an image, or the reverse). Cases larger than 100 KB are not committed and
+ * the tests generate them in memory: a GIF of 10,000 frames, and the files that reach a walk cap of a parser (the
+ * most chunks or blocks allowed, then one too many), which bound the time a hostile file costs.
  *
  * An accepted case expects a subset of ImageInfo::toArray(); a refused case expects an error code. "max_bytes_read"
  * bounds the bytes the inspector may read from the file: bombs are refused from their header, whatever their size.
@@ -132,6 +136,15 @@ final class ImageCorpus
             ),
             'png/valid-animated.png' => self::committed(ImageBuilder::apng(12, 6, 4), self::accept(ImageFormat::PNG, 12, 6, 4)),
             'png/valid-trailing-zip.png' => self::committed($valid . "PK\x05\x06" . ImageBuilder::repeat("\0", 18), self::accept(ImageFormat::PNG, 16, 8)),
+            // The most chunks a file may have, then one too many: the walk stays far below 50 ms.
+            'png/valid-most-chunks.png' => self::generated(
+                ImageBuilder::png(8, 8, 8, 2, ImageBuilder::repeat(ImageBuilder::pngChunk('tEXt', "k\0"), PngParser::MAX_CHUNKS - 3)),
+                self::accept(ImageFormat::PNG, 8, 8, 1, ['metadata' => true])
+            ),
+            'png/spoof-too-many-chunks.png' => self::generated(
+                ImageBuilder::png(8, 8, 8, 2, ImageBuilder::repeat(ImageBuilder::pngChunk('tEXt', "k\0"), PngParser::MAX_CHUNKS - 2)),
+                self::reject(ErrorCode::INVALID_IMAGE)
+            ),
             'png/bomb-100000x100000.png' => self::committed(
                 ImageBuilder::PNG_SIGNATURE . ImageBuilder::pngHeader(100000, 100000) . $idat . $iend,
                 self::reject(ErrorCode::IMAGE_TOO_LARGE, true)
@@ -173,6 +186,9 @@ final class ImageCorpus
             'gif/valid-gif87a.gif' => self::committed(ImageBuilder::gif(5, 3, 1, '', '87a'), self::accept(ImageFormat::GIF, 5, 3)),
             'gif/valid-animated.gif' => self::committed(ImageBuilder::gif(12, 6, 4), self::accept(ImageFormat::GIF, 12, 6, 4, ['metadata' => false])),
             'gif/valid-comment.gif' => self::committed(ImageBuilder::gif(8, 8, 1, ImageBuilder::gifComment('corpus')), self::accept(ImageFormat::GIF, 8, 8, 1, ['metadata' => true])),
+            // The most blocks a file may have (one-byte comment sub-blocks), then one too many.
+            'gif/valid-most-blocks.gif' => self::generated(self::gifOfSubBlocks(GifParser::MAX_BLOCKS - 6), self::accept(ImageFormat::GIF, 8, 8, 1, ['metadata' => true])),
+            'gif/spoof-too-many-blocks.gif' => self::generated(self::gifOfSubBlocks(GifParser::MAX_BLOCKS - 5), self::reject(ErrorCode::INVALID_IMAGE)),
             'gif/bomb-65535x65535.gif' => self::committed(
                 ImageBuilder::gifScreen(65535, 65535) . ImageBuilder::gifImage(0, 0, 1, 1) . "\x3B",
                 self::reject(ErrorCode::IMAGE_TOO_LARGE, true)
@@ -260,6 +276,9 @@ final class ImageCorpus
                 self::accept(ImageFormat::WEBP, 10, 6, 1, ['icc_profile' => true, 'exif' => true, 'metadata' => true])
             ),
             'webp/valid-animated.webp' => self::committed(ImageBuilder::webpAnimation(12, 6, 3), self::accept(ImageFormat::WEBP, 12, 6, 3)),
+            // The most chunks an extended file may have, then one too many.
+            'webp/valid-most-chunks.webp' => self::generated(self::webpOfChunks(WebpParser::MAX_CHUNKS - 2), self::accept(ImageFormat::WEBP, 8, 8, 1, ['metadata' => true])),
+            'webp/spoof-too-many-chunks.webp' => self::generated(self::webpOfChunks(WebpParser::MAX_CHUNKS - 1), self::reject(ErrorCode::INVALID_IMAGE)),
             // C-2: the content decides, not the name: a WEBP named .jpg is a WEBP, refused unless WEBP is enabled.
             'webp/valid-named-as-jpeg.jpg' => self::committed(ImageBuilder::webpLossless(8, 8), self::accept(ImageFormat::WEBP, 8, 8)),
             'webp/bomb-60000x60000.webp' => self::committed(
@@ -362,6 +381,24 @@ final class ImageCorpus
             'other/polyglot-html-then-png.png' => self::committed("<html><!--\n" . ImageBuilder::png(4, 4) . "--></html>\n", $unsupported),
             'other/polyglot-pdf-then-jpeg.jpg' => self::committed("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n" . ImageBuilder::jpeg(8, 8), $unsupported),
         ];
+    }
+
+    /**
+     * An 8 x 8 GIF whose comment is made of $count one-byte sub-blocks.
+     */
+    private static function gifOfSubBlocks(int $count): string
+    {
+        return ImageBuilder::gifScreen(8, 8) . "\x21\xFE" . ImageBuilder::repeat("\x01A", $count) . "\x00"
+            . ImageBuilder::gifImage(0, 0, 8, 8) . "\x3B";
+    }
+
+    /**
+     * An 8 x 8 extended WEBP followed by $count empty unknown chunks.
+     */
+    private static function webpOfChunks(int $count): string
+    {
+        return ImageBuilder::riff(ImageBuilder::vp8x(0, 8, 8) . ImageBuilder::webpChunk('VP8L', ImageBuilder::vp8l(8, 8))
+            . ImageBuilder::repeat(ImageBuilder::webpChunk('ABCD', ''), $count));
     }
 
     /**

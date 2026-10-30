@@ -34,9 +34,9 @@ final class PngParser implements ParserInterface
 {
     /**
      * Largest number of chunks in a file, IHDR and IEND included. Encoders split the image data into IDAT chunks of
-     * 8 KiB or more, so real files stay far below.
+     * 8 KiB or more, so a real file reaches this only beyond 128 MB, or with more than 8000 animation frames.
      */
-    public const MAX_CHUNKS = 65536;
+    public const MAX_CHUNKS = 16384;
 
     private const SIGNATURE = "\x89PNG\r\n\x1A\n";
 

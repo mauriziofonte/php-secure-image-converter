@@ -32,9 +32,9 @@ final class GifParser implements ParserInterface
 {
     /**
      * Largest number of blocks and sub-blocks walked. Encoders write image data in sub-blocks of 255 bytes, so a real
-     * file reaches this only beyond 500 MB.
+     * file reaches this only beyond 64 MB.
      */
-    public const MAX_BLOCKS = 2097152;
+    public const MAX_BLOCKS = 262144;
 
     /**
      * Application identifiers (8 bytes) and authentication codes (3 bytes) of the extensions that are not metadata.
