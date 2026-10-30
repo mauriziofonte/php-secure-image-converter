@@ -404,13 +404,12 @@ final class ImageCorpus
                     . ImageBuilder::webpChunk('ZIPS', $zip)),
                 self::accept(ImageFormat::WEBP, 8, 8, 1, ['metadata' => true, 'trailing_data' => true])
             ),
-            // Decoders read the fields of ANIM and ANMF, and the bitstream of a frame: they skip anything after.
+            // Decoders read the fields of ANIM and skip anything after them.
             'webp/valid-zip-in-anim.webp' => self::committed($animation($zip, $bitstream), self::accept(ImageFormat::WEBP, 8, 8, 1, ['metadata' => false, 'trailing_data' => true])),
-            'webp/valid-zip-in-frame.webp' => self::committed($animation('', $bitstream . $zip), self::accept(ImageFormat::WEBP, 8, 8, 1, ['metadata' => false, 'trailing_data' => true])),
-            'webp/valid-unknown-chunk-in-frame.webp' => self::committed(
-                $animation('', $bitstream . ImageBuilder::webpChunk('ZIPS', $zip)),
-                self::accept(ImageFormat::WEBP, 8, 8, 1, ['metadata' => false, 'trailing_data' => true])
-            ),
+            // libwebp reads what follows the bitstream of a frame as more chunks of the file: a frame holds nothing else.
+            'webp/spoof-zip-in-frame.webp' => self::committed($animation('', $bitstream . $zip), self::reject(ErrorCode::INVALID_IMAGE)),
+            'webp/spoof-chunk-in-frame.webp' => self::committed($animation('', $bitstream . ImageBuilder::webpChunk('ZIPS', $zip)), self::reject(ErrorCode::INVALID_IMAGE)),
+            'webp/spoof-frame-in-frame.webp' => self::committed($animation('', $bitstream . $frame), self::reject(ErrorCode::INVALID_IMAGE)),
             // Alpha data comes right before a lossy bitstream, in a still image or at the start of a frame.
             'webp/valid-lossy-alpha.webp' => self::committed(
                 ImageBuilder::riff(ImageBuilder::vp8x(0x10, 16, 16) . $alpha . ImageBuilder::webpChunk('VP8 ', $vp8)),

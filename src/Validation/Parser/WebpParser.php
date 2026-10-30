@@ -17,14 +17,14 @@ use Mfonte\SecureImageConverter\Validation\Limits;
  * - The RIFF size must cover at least one chunk and fit in the file (bytes after it are ignored by decoders, and
  *   reported as trailing data); every chunk must fit in the RIFF payload. At most MAX_CHUNKS chunks are walked.
  *   Decoders skip, and this parser reports as trailing data, the bytes after the bitstream chunk of a simple file,
- *   unknown chunks of an extended file, the bytes of ANIM beyond its fields, and the bytes of an ANMF frame after its
- *   bitstream.
+ *   unknown chunks of an extended file and the bytes of ANIM beyond its fields.
  * - Simple lossy (VP8): a key frame that is shown, a first partition inside the chunk, the start code 9D 01 2A and
  *   a non-zero 14-bit width and height. Simple lossless (VP8L): the signature 2F, version 0, 14-bit dimensions.
  * - Extended (VP8X, exactly 10 bytes): a 24-bit canvas width and height whose product fits in 32 bits, checked
  *   against the limits at once. With the animation flag, ANIM must be present and every ANMF frame must lie inside
- *   the canvas and start with a bitstream of its size; their number is the frame count, checked against the limits as
- *   soon as it exceeds Limits::maxFramesFor(). Without it, exactly one VP8 or VP8L bitstream must be present, with
+ *   the canvas and hold a bitstream of its size and nothing after it: libwebp reads what follows the bitstream of a
+ *   frame as more chunks of the file, further frames among them. Their number is the frame count, checked against
+ *   the limits as soon as it exceeds Limits::maxFramesFor(). Without it, exactly one VP8 or VP8L bitstream must be present, with
  *   the canvas dimensions, and no ANMF chunk.
  * - An ALPH chunk must come right before a VP8 bitstream, at the top level of a still image or at the start of an
  *   ANMF frame: decoders disagree on alpha data anywhere else.
@@ -139,7 +139,7 @@ final class WebpParser implements ParserInterface
                     if (!$animated || !$animationHeader) {
                         throw self::invalid('an ANMF frame appears outside an animation or before ANIM');
                     }
-                    $unreadBytes = self::checkFrame($reader, $start + 8, $length, $width, $height) || $unreadBytes;
+                    self::checkFrame($reader, $start + 8, $length, $width, $height);
                     if (++$frames > $frameBudget) {
                         $limits->assertImage($width, $height, $frames);
                     }
@@ -282,17 +282,15 @@ final class WebpParser implements ParserInterface
     }
 
     /**
-     * Checks an ANMF frame: its rectangle must lie inside the canvas, and its data must start with a bitstream of the
-     * frame size, which an ALPH chunk may precede when it is a VP8 bitstream.
+     * Checks an ANMF frame: its rectangle must lie inside the canvas, and its data must be a bitstream of the frame
+     * size, which an ALPH chunk may precede when it is a VP8 bitstream.
      *
      * @param int $start  offset of the frame payload
      * @param int $length size of the frame payload
      *
      * @throws InvalidImageException
-     *
-     * @return bool whether the frame holds bytes after its bitstream, which decoders skip
      */
-    private static function checkFrame(ByteReader $reader, int $start, int $length, int $canvasWidth, int $canvasHeight): bool
+    private static function checkFrame(ByteReader $reader, int $start, int $length, int $canvasWidth, int $canvasHeight): void
     {
         if ($length < self::ANMF_SIZE + 8) {
             throw self::invalid('an ANMF frame is too short');
@@ -323,7 +321,9 @@ final class WebpParser implements ParserInterface
             throw self::invalid('the bitstream of an ANMF frame differs from the frame size');
         }
 
-        return self::chunkEnd($bitstream, $chunkLength) < $end;
+        if (self::chunkEnd($bitstream, $chunkLength) < $end) {
+            throw self::invalid('an ANMF frame holds data after its bitstream');
+        }
     }
 
     private static function unpackUint32Le(string $bytes, int $offset): int
