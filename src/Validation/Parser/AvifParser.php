@@ -12,27 +12,33 @@ use Mfonte\SecureImageConverter\Validation\ImageInfo;
 use Mfonte\SecureImageConverter\Validation\Limits;
 
 /**
- * AVIF header parser: a bounded walk of the ISO-BMFF boxes that describe the image, plus the sequence header at the
- * start of each AV1 image, without decoding any AV1 frame.
+ * AVIF header parser: a bounded walk of the ISO-BMFF boxes that describe the image, plus the AV1 sequence headers of
+ * each image item and of the first sample of each track, without decoding any AV1 frame.
  *
  * - Boxes must nest inside their parent and the top-level boxes must tile the file up to its end: a truncated file is
- *   refused. At most MAX_BOXES boxes are visited and MAX_ENTRIES entries read from any table; the ftyp box is at most
- *   4 KiB and must list an "avif" or "avis" brand. A box that a decoder reads once (ftyp, meta and moov at the top;
- *   hdlr, pitm, iloc, iinf, iprp, iref, idat and dinf in meta; ipco and ipma in iprp; the boxes of a track's media
- *   and sample tables) may not appear twice, an item may not be described or associated twice, and an image item may
- *   not have two ispe, av1C, irot or imir properties: decoders disagree on which copy wins.
+ *   refused. At most MAX_BOXES boxes are visited, MAX_ENTRIES entries read from any table and MAX_ASSOCIATIONS property
+ *   associations (ipma) and item extents (iloc) read in all; the ftyp box is at most 4 KiB and must list an "avif" or
+ *   "avis" brand. A box that a decoder reads once (ftyp, meta and moov at the top; hdlr, pitm, iloc, iinf, iprp, iref,
+ *   idat and dinf in meta; ipco and ipma in iprp; the boxes of a track's media and sample tables) may not appear twice,
+ *   an item may not be described or associated twice, and an image item may not have two ispe, av1C, irot or imir
+ *   properties: decoders disagree on which copy wins.
  * - Still image (meta box): the handler must be "pict" and the primary item (pitm) an AV1 image ("av01"); grids and
  *   other derived or coded items are refused as unsupported. Every AV1 image item (the primary image, its alpha plane,
- *   thumbnails; at most MAX_IMAGES) needs one "ispe" property whose size is checked against the limits, and the AV1
- *   sequence header of its data (located through iloc, in the file or in idat) may not allow frames larger than that
- *   ispe. The primary item gives the dimensions; its "av1C" (or else "pixi") property the bit depth, a "colr"
- *   property of type "prof" or "rICC" the colour profile, its "irot" then "imir" properties the orientation. "Exif"
- *   items are EXIF, "mime" items (XMP) other metadata.
- * - Image sequence (moov box): every track whose sample description is AV1 ("av01", whatever its handler; at most
- *   MAX_IMAGES) is checked: its sample entry size and sample count (the header of stsz or stz2, never its entries)
- *   against the limits, and the sequence header of its first sample against the sample entry size. The first such
- *   track gives the dimensions and the frame count; the still primary item, when present, is checked too.
- * - Top-level boxes other than ftyp, meta, moov and mdat are trailing data.
+ *   thumbnails; at most MAX_IMAGES) needs one "ispe" property whose size is checked against the limits, and its data
+ *   (located through iloc, in the file or in idat, in a single extent; several extents are refused as unsupported) may
+ *   not hold an AV1 sequence header that allows frames larger than that ispe. The primary item gives the dimensions;
+ *   its "av1C" (or else "pixi") property the bit depth, a "colr" property of type "prof" or "rICC" the colour profile,
+ *   its "irot" then "imir" properties the orientation. "Exif" items are EXIF, "mime" items (XMP) other metadata.
+ * - Image sequence (moov box): every track with an AV1 sample entry ("av01", whatever its handler; at most MAX_IMAGES)
+ *   is checked; a track that holds it among other sample entries is refused as unsupported. Its sample entry size and
+ *   sample count (the header of stsz or stz2, never its entries) are checked against the limits, its track header
+ *   (tkhd, which decoders size the frames from) must declare the sample entry size, and no sequence header of its first
+ *   sample may allow frames larger than it. The first such track gives the dimensions and the frame count; the still
+ *   primary item, when present, is checked too.
+ * - Not read: the samples after the first one, and the AV1 frame headers, which can override the frame size (see
+ *   Av1SequenceHeader). AVIF decoders must run with their own frame size limits.
+ * - Top-level boxes other than ftyp, meta, moov and mdat are trailing data. Bytes inside mdat that no item or sample
+ *   uses are not detected (see ImageInfo::hasTrailingData()).
  *
  * @internal
  */
@@ -44,9 +50,14 @@ final class AvifParser implements ParserInterface
     public const MAX_BOXES = 16384;
 
     /**
-     * Largest number of entries read from an item, property, association or location table.
+     * Largest number of entries read from an item, property, association, location or sample description table.
      */
-    public const MAX_ENTRIES = 16384;
+    public const MAX_ENTRIES = 4096;
+
+    /**
+     * Largest number of property associations in the ipma box, and of extents in the iloc box, all entries together.
+     */
+    public const MAX_ASSOCIATIONS = 16384;
 
     /**
      * Largest number of AV1 image items, and of AV1 tracks, in a file.
@@ -87,9 +98,25 @@ final class AvifParser implements ParserInterface
      */
     private $boxes = 0;
 
+    /**
+     * OBUs walked in the AV1 data of the file, bounded by Av1SequenceHeader::MAX_OBUS.
+     *
+     * @var int
+     */
+    private $obus = 0;
+
+    /**
+     * Sequence headers read in the AV1 data of the file, bounded by Av1SequenceHeader::MAX_SEQUENCE_HEADERS.
+     *
+     * @var int
+     */
+    private $sequenceHeaders = 0;
+
     public function parse(ByteReader $reader, Limits $limits): ImageInfo
     {
         $this->boxes = 0;
+        $this->obus = 0;
+        $this->sequenceHeaders = 0;
         $size = $reader->getSize();
 
         $reader->seek(0);
@@ -210,7 +237,7 @@ final class AvifParser implements ParserInterface
             if (!isset($locations[$item])) {
                 throw self::invalid('an image item has no data location');
             }
-            list($codedWidth, $codedHeight) = Av1SequenceHeader::maxFrameSize($reader, $locations[$item][0], $locations[$item][1]);
+            list($codedWidth, $codedHeight) = Av1SequenceHeader::maxFrameSize($reader, $locations[$item][0], $locations[$item][1], $this->obus, $this->sequenceHeaders);
             if ($codedWidth > $size[0] || $codedHeight > $size[1]) {
                 throw self::invalid('the AV1 data of an image item allows frames larger than its ispe property');
             }
@@ -442,12 +469,17 @@ final class AvifParser implements ParserInterface
         $wide = ($flags & 0x01) !== 0;
 
         $associations = [];
+        $total = 0;
         for ($entry = 0; $entry < $count; ++$entry) {
             $id = $version === 0 ? self::readUint16($reader, $end) : self::readUint32($reader, $end);
             if (isset($associations[$id])) {
                 throw self::invalid('the ipma box associates properties with an item twice');
             }
             $associationCount = ord(self::readBytes($reader, $end, 1));
+            $total += $associationCount;
+            if ($total > self::MAX_ASSOCIATIONS) {
+                throw self::invalid('the ipma box has too many associations');
+            }
             $data = self::readBytes($reader, $end, $associationCount * ($wide ? 2 : 1));
             $indices = [];
             for ($association = 0; $association < $associationCount; ++$association) {
@@ -465,7 +497,7 @@ final class AvifParser implements ParserInterface
     }
 
     /**
-     * Offset and length of the first extent of each wanted item, from iloc.
+     * Offset and length of the data of each wanted item, from iloc; a wanted item must have a single extent.
      *
      * @param array{0: int, 1: int}      $iloc   payload bounds of iloc
      * @param array{0: int, 1: int}|null $idat   payload bounds of idat, if any
@@ -495,6 +527,7 @@ final class AvifParser implements ParserInterface
         if ($count > self::MAX_ENTRIES) {
             throw self::invalid('the iloc box has too many entries');
         }
+        $extentSize = $indexSize + $offsetSize + $lengthSize;
 
         $locations = [];
         $described = [];
@@ -506,35 +539,39 @@ final class AvifParser implements ParserInterface
             $baseOffset = self::readSized($reader, $end, $baseOffsetSize);
             $extentCount = self::readUint16($reader, $end);
             $extents += $extentCount;
-            if ($extents > self::MAX_ENTRIES) {
+            if ($extents > self::MAX_ASSOCIATIONS) {
                 throw self::invalid('the iloc box has too many extents');
-            }
-            $first = null;
-            for ($extent = 0; $extent < $extentCount; ++$extent) {
-                self::readSized($reader, $end, $indexSize);
-                $extentOffset = self::readSized($reader, $end, $offsetSize);
-                $extentLength = self::readSized($reader, $end, $lengthSize);
-                $first = $first === null ? [$extentOffset, $extentLength] : $first;
             }
             if (isset($described[$id])) {
                 throw self::invalid('the iloc box locates an item twice');
             }
             $described[$id] = true;
             if (!in_array($id, $wanted, true)) {
+                // The extents of other items are skipped unread.
+                if ($extentCount * $extentSize > $end - $reader->getPosition()) {
+                    throw self::invalid('a box is too short for its fields');
+                }
+                $reader->skip($extentCount * $extentSize);
                 continue;
             }
             if ($dataReference !== 0 || $method === 2) {
                 throw new UnsupportedFormatException('AVIF items stored in another file or by reference are not supported.');
             }
-            if ($method > 2 || $first === null || ($method === 1 && $idat === null)) {
+            if ($method > 2 || $extentCount === 0 || ($method === 1 && $idat === null)) {
                 throw self::invalid('an image item has no valid data location');
             }
+            if ($extentCount > 1) {
+                throw new UnsupportedFormatException('AVIF image items stored in several extents are not supported.');
+            }
+            self::readSized($reader, $end, $indexSize);
+            $extentOffset = self::readSized($reader, $end, $offsetSize);
+            $extentLength = self::readSized($reader, $end, $lengthSize);
             list($regionStart, $regionEnd) = $method === 0 ? [0, $reader->getSize()] : $idat;
-            if ($baseOffset > $regionEnd - $regionStart || $first[0] > $regionEnd - $regionStart - $baseOffset) {
+            if ($baseOffset > $regionEnd - $regionStart || $extentOffset > $regionEnd - $regionStart - $baseOffset) {
                 throw $method === 0 ? ByteReader::truncated() : self::invalid('an image item lies outside the idat box');
             }
-            $dataStart = $regionStart + $baseOffset + $first[0];
-            $dataLength = $first[1] === 0 ? $regionEnd - $dataStart : $first[1];
+            $dataStart = $regionStart + $baseOffset + $extentOffset;
+            $dataLength = $extentLength === 0 ? $regionEnd - $dataStart : $extentLength;
             if ($dataLength > $regionEnd - $dataStart) {
                 throw $method === 0 ? ByteReader::truncated() : self::invalid('an image item lies outside the idat box');
             }
@@ -584,7 +621,7 @@ final class AvifParser implements ParserInterface
      */
     private function parseTrack(ByteReader $reader, int $start, int $end, Limits $limits): ?array
     {
-        $track = $this->findChildren($reader, $start, $end, ['mdia']);
+        $track = $this->findChildren($reader, $start, $end, ['tkhd', 'mdia']);
         $media = isset($track['mdia']) ? $this->findChildren($reader, $track['mdia'][0], $track['mdia'][1], ['mdhd', 'hdlr', 'minf']) : [];
         $information = isset($media['minf']) ? $this->findChildren($reader, $media['minf'][0], $media['minf'][1], ['stbl']) : [];
         $table = isset($information['stbl'])
@@ -598,16 +635,25 @@ final class AvifParser implements ParserInterface
         $reader->seek($description);
         self::readFullBoxHeader($reader, $descriptionEnd, 0);
         $entries = self::readUint32($reader, $descriptionEnd);
-        if ($entries === 0) {
+        if ($entries > self::MAX_ENTRIES) {
+            throw self::invalid('the stsd box has too many entries');
+        }
+        // Decoders use an AV1 sample entry wherever it is in the list: every entry is looked at.
+        $av1Entry = null;
+        for ($entry = 0; $entry < $entries; ++$entry) {
+            list($entryType, $entryStart, $entryEnd) = $this->readBoxHeader($reader, $descriptionEnd);
+            if ($entryType === 'av01') {
+                if ($entries > 1) {
+                    throw new UnsupportedFormatException('AVIF tracks with several sample descriptions are not supported.');
+                }
+                $av1Entry = [$entryStart, $entryEnd];
+            }
+            $reader->seek($entryEnd);
+        }
+        if ($av1Entry === null) {
             return null;
         }
-        list($entryType, $entryStart, $entryEnd) = $this->readBoxHeader($reader, $descriptionEnd);
-        if ($entryType !== 'av01') {
-            return null;
-        }
-        if ($entries > 1) {
-            throw new UnsupportedFormatException('AVIF tracks with several sample descriptions are not supported.');
-        }
+        list($entryStart, $entryEnd) = $av1Entry;
         // VisualSampleEntry: 6 reserved bytes, data reference index, 16 bytes of pre-defined and reserved fields,
         // then width and height.
         $reader->seek($entryStart);
@@ -624,12 +670,18 @@ final class AvifParser implements ParserInterface
         $sizes = $table['stsz'] ?? $table['stz2'];
         $reader->seek($sizes[0]);
         self::readFullBoxHeader($reader, $sizes[1], 0);
-        $reader->skip(min(4, $sizes[1] - $reader->getPosition()));
+        // stsz: sample_size (32 bits); stz2: 24 reserved bits and field_size (8 bits).
+        $sampleSizeField = self::readUint32($reader, $sizes[1]);
         $frames = self::readUint32($reader, $sizes[1]);
         if ($frames === 0) {
             throw self::invalid('an image sequence track has no sample');
         }
         $limits->assertImage($width, $height, $frames);
+        $firstSampleSize = $this->readFirstSampleSize($reader, $sizes[1], isset($table['stsz']), $sampleSizeField);
+        // libavif sizes the frames of a track from tkhd and scales every decoded frame to that size.
+        if (!isset($track['tkhd']) || $this->readTrackSize($reader, $track['tkhd']) !== [$width, $height]) {
+            throw self::invalid('the track header of an image sequence does not declare the size of its sample entry');
+        }
 
         if (isset($table['stco']) === isset($table['co64'])) {
             throw self::invalid('an image sequence track needs exactly one chunk offset table');
@@ -642,15 +694,66 @@ final class AvifParser implements ParserInterface
         }
         // The first sample starts its first chunk.
         $sample = self::readSized($reader, $chunks[1], isset($table['stco']) ? 4 : 8);
-        if ($sample > $reader->getSize()) {
+        if ($sample > $reader->getSize() || $firstSampleSize > $reader->getSize() - $sample) {
             throw ByteReader::truncated();
         }
-        list($codedWidth, $codedHeight) = Av1SequenceHeader::maxFrameSize($reader, $sample, $reader->getSize() - $sample);
+        list($codedWidth, $codedHeight) = Av1SequenceHeader::maxFrameSize($reader, $sample, $firstSampleSize, $this->obus, $this->sequenceHeaders);
         if ($codedWidth > $width || $codedHeight > $height) {
             throw self::invalid('the AV1 data of a track allows frames larger than its sample entry');
         }
 
         return [$width, $height, $frames];
+    }
+
+    /**
+     * Width and height of a track header (tkhd), the integer parts of its 16.16 fixed-point fields.
+     *
+     * @param array{0: int, 1: int} $box payload bounds
+     *
+     * @throws InvalidImageException
+     *
+     * @return array{0: int, 1: int}
+     */
+    private function readTrackSize(ByteReader $reader, array $box): array
+    {
+        $reader->seek($box[0]);
+        $version = self::readFullBoxHeader($reader, $box[1], 1);
+        // Times, track ID and duration (20 or 32 bytes), then reserved, layer, alternate group, volume, reserved and
+        // the matrix (52 bytes).
+        self::readBytes($reader, $box[1], ($version === 0 ? 20 : 32) + 52);
+
+        return [self::readUint32($reader, $box[1]) >> 16, self::readUint32($reader, $box[1]) >> 16];
+    }
+
+    /**
+     * Size of the first sample of a track, from the rest of its stsz or stz2 box.
+     *
+     * @param bool $stsz            true for stsz, false for stz2 (whose entries have 4, 8 or 16 bits)
+     * @param int  $sampleSizeField sample_size of stsz (the size of every sample, or 0), or field_size of stz2 in
+     *                              its low byte
+     *
+     * @throws InvalidImageException
+     */
+    private function readFirstSampleSize(ByteReader $reader, int $end, bool $stsz, int $sampleSizeField): int
+    {
+        if ($stsz) {
+            $size = $sampleSizeField !== 0 ? $sampleSizeField : self::readUint32($reader, $end);
+        } else {
+            $fieldSize = $sampleSizeField & 0xFF;
+            if ($fieldSize === 16) {
+                $size = self::readUint16($reader, $end);
+            } elseif ($fieldSize === 8 || $fieldSize === 4) {
+                $byte = ord(self::readBytes($reader, $end, 1));
+                $size = $fieldSize === 8 ? $byte : $byte >> 4;
+            } else {
+                throw self::invalid('the stz2 box declares an invalid field size');
+            }
+        }
+        if ($size === 0) {
+            throw self::invalid('the first sample of an image sequence track is empty');
+        }
+
+        return $size;
     }
 
     /**

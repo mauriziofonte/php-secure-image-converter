@@ -14,7 +14,7 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
  * The sequence header fields before the maximum frame size, built bit by bit from the AV1 specification (section
- * 5.5), and the OBUs that may or may not precede it.
+ * 5.5), the OBUs that may or may not precede it, and the walk over every OBU of the data.
  *
  * @covers \Mfonte\SecureImageConverter\Validation\Parser\Av1SequenceHeader
  */
@@ -58,6 +58,50 @@ final class Av1SequenceHeaderTest extends TestCase
         self::assertSame([64, 48], self::maxFrameSize($data));
     }
 
+    public function testFindsASequenceHeaderAfterManyOtherObus(): void
+    {
+        $data = str_repeat(self::obu(self::OBU_TEMPORAL_DELIMITER, ''), Av1SequenceHeader::MAX_OBUS - 1)
+            . self::obu(self::OBU_SEQUENCE_HEADER, self::reducedHeader(8, 8));
+
+        self::assertSame([8, 8], self::maxFrameSize($data));
+    }
+
+    /**
+     * Items or tracks can share the same data: the OBU and sequence header budgets are for the whole file.
+     */
+    public function testCountsObusAndSequenceHeadersAcrossTheDataOfAFile(): void
+    {
+        $data = str_repeat(self::obu(self::OBU_TEMPORAL_DELIMITER, ''), Av1SequenceHeader::MAX_OBUS - 2)
+            . self::obu(self::OBU_SEQUENCE_HEADER, self::reducedHeader(8, 8))
+            . self::obu(self::OBU_SEQUENCE_HEADER, self::reducedHeader(8, 8));
+        $reader = new ByteReader(CountingStreamWrapper::open($data), strlen($data));
+        $obus = 0;
+        $sequenceHeaders = 0;
+
+        self::assertSame([8, 8], Av1SequenceHeader::maxFrameSize($reader, 0, strlen($data), $obus, $sequenceHeaders));
+        self::assertSame([Av1SequenceHeader::MAX_OBUS, 2], [$obus, $sequenceHeaders]);
+
+        $this->expectException(InvalidImageException::class);
+        $this->expectExceptionMessage('too many OBUs');
+
+        Av1SequenceHeader::maxFrameSize($reader, strlen($data) - 9, 9, $obus, $sequenceHeaders);
+    }
+
+    /**
+     * A decoder accepts a later sequence header that differs from the first one: the largest of them bounds the
+     * frames.
+     */
+    public function testEverySequenceHeaderCounts(): void
+    {
+        $data = self::obu(self::OBU_SEQUENCE_HEADER, self::reducedHeader(8, 8))
+            . self::obu(self::OBU_FRAME, '00000000')
+            . self::obu(self::OBU_SEQUENCE_HEADER, self::reducedHeader(8200, 6))
+            . self::obu(self::OBU_SEQUENCE_HEADER, self::reducedHeader(6, 4100))
+            . self::obu(self::OBU_FRAME, '00000000');
+
+        self::assertSame([8200, 4100], self::maxFrameSize($data));
+    }
+
     public function testReadsASequenceHeaderWithoutSizeField(): void
     {
         // Without obu_has_size_field, the OBU extends to the end of the data.
@@ -88,7 +132,13 @@ final class Av1SequenceHeaderTest extends TestCase
             'size longer than 8 bytes' => [pack('C', (self::OBU_SEQUENCE_HEADER << 3) | 0x02) . str_repeat("\x80", 8) . "\x01"],
             'cut size' => [pack('C', (self::OBU_PADDING << 3) | 0x02) . "\x80"],
             'cut extension header' => [pack('C', (self::OBU_SEQUENCE_HEADER << 3) | 0x04)],
-            'no sequence header in the first 16 OBUs' => [str_repeat(self::obu(self::OBU_TEMPORAL_DELIMITER, ''), 16) . self::obu(self::OBU_SEQUENCE_HEADER, self::reducedHeader(8, 8))],
+            'too many OBUs' => [str_repeat(self::obu(self::OBU_TEMPORAL_DELIMITER, ''), Av1SequenceHeader::MAX_OBUS) . self::obu(self::OBU_SEQUENCE_HEADER, self::reducedHeader(8, 8))],
+            'OBU larger than the data' => [self::obu(self::OBU_SEQUENCE_HEADER, self::reducedHeader(8, 8)) . pack('C', (self::OBU_FRAME << 3) | 0x02) . "\x05\x00"],
+            'sequence header too long' => [
+                pack('C', (self::OBU_SEQUENCE_HEADER << 3) | 0x02) . "\x81\x08" // LEB128 1025
+                . self::bytes(self::reducedHeader(8, 8)) . str_repeat("\0", Av1SequenceHeader::MAX_SEQUENCE_HEADER_BYTES + 1 - 7),
+            ],
+            'too many sequence headers' => [str_repeat(self::obu(self::OBU_SEQUENCE_HEADER, self::reducedHeader(8, 8)), Av1SequenceHeader::MAX_SEQUENCE_HEADERS + 1)],
             'padding only' => [self::obu(self::OBU_PADDING, '00000000')],
         ];
     }

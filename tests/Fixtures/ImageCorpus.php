@@ -359,6 +359,9 @@ final class ImageCorpus
         $ispe = ImageBuilder::find($still, 'ispe');
         $sampleEntry = ImageBuilder::find($sequence, 'av01', ImageBuilder::find($sequence, 'stsd'));
         $sampleSizes = ImageBuilder::find($sequence, 'stsz');
+        // The track header of the sample has version 1: the width and height follow 32 bytes of times and IDs and 52
+        // bytes of layer, volume and matrix.
+        $trackHeader = ImageBuilder::find($sequence, 'tkhd');
         $colour = ImageBuilder::find($still, 'colr') - 4;
         // A track whose handler is "vide" instead of "pict": decoders play any AV1 track.
         $video = ImageBuilder::patch($sequence, ImageBuilder::find($sequence, 'pict', ImageBuilder::find($sequence, 'trak')), 'vide');
@@ -410,6 +413,19 @@ final class ImageCorpus
                 ImageBuilder::patch($sequence, $sampleEntry + 28, pack('nn', 4, 4)),
                 self::reject(ErrorCode::INVALID_IMAGE)
             ),
+            'avif/spoof-second-sequence-header-4000x4000.avif' => self::committed(self::avifTwoSequenceHeaders(), self::reject(ErrorCode::INVALID_IMAGE)),
+            // Decoders size the frames of a track from its track header (16.16 fixed point): it must match the sample
+            // entry, and the AV1 sample entry may not hide behind another.
+            'avif/spoof-track-header-16000x16000.avif' => self::committed(
+                ImageBuilder::patch($sequence, $trackHeader + 4 + 4 + 32 + 52, pack('NN', 16000 << 16, 16000 << 16)),
+                self::reject(ErrorCode::INVALID_IMAGE)
+            ),
+            'avif/unsupported-second-sample-entry.avif' => self::committed(self::avifSecondSampleEntry(), self::reject(ErrorCode::UNSUPPORTED_FORMAT)),
+            // The most property associations and item extents a file may have, then one too many.
+            'avif/valid-most-associations.avif' => self::generated(self::avifOfAssociations(AvifParser::MAX_ASSOCIATIONS), self::accept(ImageFormat::AVIF, 8, 8)),
+            'avif/spoof-too-many-associations.avif' => self::generated(self::avifOfAssociations(AvifParser::MAX_ASSOCIATIONS + 1), self::reject(ErrorCode::INVALID_IMAGE)),
+            'avif/valid-most-extents.avif' => self::generated(self::avifOfExtents(AvifParser::MAX_ASSOCIATIONS), self::accept(ImageFormat::AVIF, 8, 8)),
+            'avif/spoof-too-many-extents.avif' => self::generated(self::avifOfExtents(AvifParser::MAX_ASSOCIATIONS + 1), self::reject(ErrorCode::INVALID_IMAGE)),
             'avif/unsupported-heic-brand.avif' => self::committed(str_replace('avif', 'heic', (string) substr($still, 0, 32)) . (string) substr($still, 32), self::reject(ErrorCode::UNSUPPORTED_FORMAT)),
             'avif/spoof-no-ispe.avif' => self::committed(ImageBuilder::patch($still, $ispe, 'xspe'), self::reject(ErrorCode::INVALID_IMAGE)),
             'avif/spoof-ftyp-only.avif' => self::committed((string) substr($still, 0, 32), self::reject(ErrorCode::INVALID_IMAGE)),
@@ -527,6 +543,109 @@ final class ImageCorpus
     {
         return ImageBuilder::riff(ImageBuilder::vp8x(0, 8, 8) . ImageBuilder::webpChunk('VP8L', ImageBuilder::vp8l(8, 8))
             . ImageBuilder::repeat(ImageBuilder::webpChunk('ABCD', ''), $count));
+    }
+
+    /**
+     * The sample whose ispe property says 8 x 8 and whose AV1 data codes 4000 x 4000 frames, with the 8 x 8 sequence
+     * header of the still sample inserted before its own: decoders use the last sequence header they read.
+     */
+    private static function avifTwoSequenceHeaders(): string
+    {
+        $small = ImageBuilder::avifStill();
+        $large = ImageBuilder::avifReproducer('ispe-below-av1');
+        // Both start their data with a temporal delimiter (2 bytes), then the sequence header OBU: a header byte, a
+        // size byte and the payload.
+        $smallHeader = ImageBuilder::find($small, 'mdat') + 4 + 2;
+        $header = (string) substr($small, $smallHeader, 2 + ord($small[$smallHeader + 1]));
+        $at = ImageBuilder::find($large, 'mdat') + 4 + 2;
+        $bytes = substr($large, 0, $at) . $header . substr($large, $at);
+        // The mdat box and the extent of the item (its length follows the offset in iloc) grow with the data.
+        $bytes = ImageBuilder::addToUint32($bytes, ImageBuilder::find($bytes, 'mdat') - 4, strlen($header));
+
+        return ImageBuilder::addToUint32($bytes, ImageBuilder::find($bytes, 'iloc') + 4 + 18, strlen($header));
+    }
+
+    /**
+     * The 3-frame sequence sample whose stsd box holds an empty "mp4v" sample entry before its av01 entry: decoders
+     * look for the AV1 entry, so it must not hide behind another.
+     */
+    private static function avifSecondSampleEntry(): string
+    {
+        $sequence = ImageBuilder::avifSequence();
+        $entry = pack('N', 16) . 'mp4v' . ImageBuilder::repeat("\0", 6) . pack('n', 1);
+        // The entries follow the type, the version and flags, and the entry count of stsd.
+        $stsd = ImageBuilder::find($sequence, 'stsd');
+        $bytes = substr($sequence, 0, $stsd + 12) . $entry . substr($sequence, $stsd + 12);
+        $bytes = ImageBuilder::patch($bytes, $stsd + 8, pack('N', 2));
+        $at = 0;
+        foreach (['moov', 'trak', 'mdia', 'minf', 'stbl', 'stsd'] as $type) {
+            $at = ImageBuilder::find($bytes, $type, $at);
+            $bytes = ImageBuilder::addToUint32($bytes, $at - 4, strlen($entry));
+        }
+        // mdat follows moov: the chunk offset of the track and the extent offset of the still item move with it.
+        $bytes = ImageBuilder::addToUint32($bytes, ImageBuilder::find($bytes, 'stco') + 12, strlen($entry));
+
+        return ImageBuilder::addToUint32($bytes, ImageBuilder::find($bytes, 'iloc') + 4 + 14, strlen($entry));
+    }
+
+    /**
+     * The 8 x 8 still sample whose ipma box (wide indices) has the most entries allowed and $total associations in
+     * all: the image item keeps its four properties, the other items share the rest, all numbered 0 (no property).
+     */
+    private static function avifOfAssociations(int $total): string
+    {
+        $items = AvifParser::MAX_ENTRIES;
+        $payload = pack('NN', 1, $items) . pack('nC', 1, 4) . pack('nnnn', 1, 2, 0x8003, 4);
+        for ($item = 2; $item <= $items; ++$item) {
+            $count = intdiv($total - 4, $items - 1) + ($item - 2 < ($total - 4) % ($items - 1) ? 1 : 0);
+            $payload .= pack('nC', $item, $count) . ImageBuilder::repeat("\0\0", $count);
+        }
+        list($bytes, $delta) = self::avifWithBox('ipma', $payload, ['meta', 'iprp']);
+
+        // iloc precedes iprp: the extent offset of the image item is where the still sample has it.
+        return ImageBuilder::addToUint32($bytes, ImageBuilder::find($bytes, 'iloc') + 4 + 14, $delta);
+    }
+
+    /**
+     * The 8 x 8 still sample whose iloc box (version 1, every field 64 bits) has the most entries allowed and $total
+     * extents in all: the image item keeps its single extent, the other items share the rest.
+     */
+    private static function avifOfExtents(int $total): string
+    {
+        $items = AvifParser::MAX_ENTRIES;
+        $payload = pack('NCCn', 0x01000000, 0x88, 0x88, $items);
+        // Item ID, construction method, data reference, base offset, extent count, then extent index, offset, length.
+        $extentOffset = strlen($payload) + 2 + 2 + 2 + 8 + 2 + 8;
+        $payload .= pack('nnnJnJJJ', 1, 0, 0, 0, 1, 0, 0, 39);
+        for ($item = 2; $item <= $items; ++$item) {
+            $count = intdiv($total - 1, $items - 1) + ($item - 2 < ($total - 1) % ($items - 1) ? 1 : 0);
+            $payload .= pack('nnnJn', $item, 0, 0, 0, $count) . ImageBuilder::repeat("\0", 24 * $count);
+        }
+        list($bytes) = self::avifWithBox('iloc', $payload, ['meta']);
+
+        return ImageBuilder::patch($bytes, ImageBuilder::find($bytes, 'iloc') + 4 + $extentOffset, pack('J', ImageBuilder::find($bytes, 'mdat') + 4));
+    }
+
+    /**
+     * The 8 x 8 still sample with the payload of its $type box replaced by $payload, and the boxes in $parents, which
+     * enclose it, grown to match.
+     *
+     * @param list<string> $parents
+     *
+     * @return array{0: string, 1: int} the bytes, and how far the boxes after it (mdat) moved
+     */
+    private static function avifWithBox(string $type, string $payload, array $parents): array
+    {
+        $still = ImageBuilder::avifStill();
+        $box = ImageBuilder::find($still, $type) - 4;
+        $size = ImageBuilder::readUint32($still, $box);
+        $delta = 8 + strlen($payload) - $size;
+        $bytes = substr($still, 0, $box) . pack('N', 8 + strlen($payload)) . $type . $payload . substr($still, $box + $size);
+        foreach ($parents as $parent) {
+            $bytes = ImageBuilder::addToUint32($bytes, ImageBuilder::find($bytes, $parent) - 4, $delta);
+        }
+
+        return [$bytes, $delta];
     }
 
     /**

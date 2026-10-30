@@ -7,36 +7,54 @@ namespace Mfonte\SecureImageConverter\Validation\Parser;
 use Mfonte\SecureImageConverter\Contract\Exception\InvalidImageException;
 
 /**
- * Finds the sequence header OBU at the start of AV1 data (an AVIF image item or the first sample of a track) and
- * reads the largest frame size it allows, which bounds every frame an AV1 decoder will allocate.
+ * Walks the OBUs of AV1 data (an AVIF image item or the first sample of a track) and reads, from every sequence header
+ * among them, the largest frame size it allows: an AV1 decoder accepts a later sequence header that differs from the
+ * first one, so each of them bounds the frames it will allocate.
  *
- * Only the OBU headers before the sequence header (temporal delimiter, metadata, padding) and the fields of the
- * sequence header up to max_frame_height_minus_1 are read: at most MAX_BYTES bytes and MAX_OBUS OBUs, and every
- * variable-length field is bounded by those bytes. No frame or tile data is touched. A frame that precedes the
- * sequence header, or AV1 data without one, is invalid: an AV1 decoder cannot decode it.
+ * Only OBU headers and sizes are read to skip from one OBU to the next, and the fields of each sequence header up to
+ * max_frame_height_minus_1 (a sequence header may hold at most MAX_SEQUENCE_HEADER_BYTES): no frame or tile data is
+ * touched. The caller counts the OBUs and sequence headers across all the AV1 data of a file, at most MAX_OBUS and
+ * MAX_SEQUENCE_HEADERS, so that items or tracks sharing the same data cannot multiply the cost. Every OBU must fit in the data, and only temporal
+ * delimiter, metadata and padding OBUs may precede the first sequence header: AV1 data without one, or with a frame
+ * before it, is invalid, as an AV1 decoder cannot decode it.
+ *
+ * Not covered, because it needs the frame headers: a frame header can override the frame size with values up to
+ * 2^frame_width_bits by 2^frame_height_bits, beyond max_frame_width and max_frame_height, unless the sequence header
+ * is a reduced still picture header (as AV1 encoders write for still images). Frames are bounded there only by the
+ * limits that the conversion backends give their decoders and processes.
  *
  * @internal
  */
 final class Av1SequenceHeader
 {
     /**
-     * Bytes of AV1 data searched for the sequence header.
+     * Largest number of OBUs walked in all the AV1 data of a file.
      */
-    public const MAX_BYTES = 1024;
+    public const MAX_OBUS = 16384;
 
     /**
-     * OBUs read before the sequence header must be found.
+     * Largest number of sequence headers read in all the AV1 data of a file; real data holds one per image or track.
      */
-    private const MAX_OBUS = 16;
+    public const MAX_SEQUENCE_HEADERS = 256;
+
+    /**
+     * Largest size of a sequence header OBU payload; real ones hold a few dozen bytes.
+     */
+    public const MAX_SEQUENCE_HEADER_BYTES = 1024;
 
     private const OBU_SEQUENCE_HEADER = 1;
 
     /**
-     * OBU types that may precede the sequence header: temporal delimiter, metadata, padding.
+     * OBU types that may precede the first sequence header: temporal delimiter, metadata, padding.
      *
      * @var list<int>
      */
     private const SKIPPABLE_OBUS = [2, 5, 15];
+
+    /**
+     * Bytes that hold any OBU header and size: header, extension and an 8-byte LEB128 size.
+     */
+    private const OBU_HEADER_MAX_BYTES = 10;
 
     /**
      * @var string
@@ -56,50 +74,74 @@ final class Av1SequenceHeader
     }
 
     /**
-     * Largest frame width and height declared by the first sequence header of the AV1 data at $offset.
+     * Largest frame width and height that any sequence header of the AV1 data at $offset declares.
      *
-     * @param int $offset offset of the AV1 data in the image
-     * @param int $length bytes of AV1 data from that offset
+     * @param int $offset          offset of the AV1 data in the image
+     * @param int $length          bytes of AV1 data from that offset
+     * @param int $obus            OBUs already walked in the other AV1 data of the file, updated
+     * @param int $sequenceHeaders sequence headers already read in the other AV1 data of the file, updated
      *
-     * @throws InvalidImageException when no sequence header can be read before the first frame
+     * @throws InvalidImageException when an OBU does not fit in the data, there are too many, or no sequence header
+     *                               comes before the first frame
      *
-     * @return array{0: int, 1: int} max_frame_width_minus_1 + 1, max_frame_height_minus_1 + 1
+     * @return array{0: int, 1: int} the largest max_frame_width_minus_1 + 1 and max_frame_height_minus_1 + 1
      */
-    public static function maxFrameSize(ByteReader $reader, int $offset, int $length): array
+    public static function maxFrameSize(ByteReader $reader, int $offset, int $length, int &$obus = 0, int &$sequenceHeaders = 0): array
     {
         if ($offset < 0 || $length < 1 || $offset > $reader->getSize() || $length > $reader->getSize() - $offset) {
             throw ByteReader::truncated();
         }
-        $reader->seek($offset);
-        $data = $reader->read(min($length, self::MAX_BYTES));
-        $available = strlen($data);
+        $end = $offset + $length;
+        $width = 0;
+        $height = 0;
 
-        $position = 0;
-        for ($obu = 0; $obu < self::MAX_OBUS && $position < $available; ++$obu) {
-            $header = ord($data[$position]);
-            $type = ($header >> 3) & 0x0F;
+        $position = $offset;
+        while ($position < $end) {
+            if (++$obus > self::MAX_OBUS) {
+                throw self::invalid('the file holds too many OBUs');
+            }
+            $reader->seek($position);
+            $head = $reader->read(min(self::OBU_HEADER_MAX_BYTES, $end - $position));
+            $header = ord($head[0]);
             if (($header & 0x80) !== 0) {
                 throw self::invalid('an OBU header has its forbidden bit set');
             }
-            $position += ($header & 0x04) !== 0 ? 2 : 1;
-            $size = $available - $position;
-            if (($header & 0x02) !== 0) {
-                list($size, $position) = self::readLeb128($data, $position);
-            }
-            if ($position > $available) {
+            $type = ($header >> 3) & 0x0F;
+            $cursor = ($header & 0x04) !== 0 ? 2 : 1;
+            if ($cursor > strlen($head)) {
                 throw self::invalid('an OBU header is cut');
+            }
+            if (($header & 0x02) !== 0) {
+                list($size, $cursor) = self::readLeb128($head, $cursor);
+            } else {
+                // Without a size field the OBU runs to the end of the data.
+                $size = $end - $position - $cursor;
+            }
+            if ($size > $end - $position - $cursor) {
+                throw self::invalid('an OBU does not fit in the data');
             }
 
             if ($type === self::OBU_SEQUENCE_HEADER) {
-                return (new self((string) substr($data, $position, $size)))->readMaxFrameSize();
-            }
-            if (!in_array($type, self::SKIPPABLE_OBUS, true)) {
+                if (++$sequenceHeaders > self::MAX_SEQUENCE_HEADERS) {
+                    throw self::invalid('the file holds too many sequence headers');
+                }
+                if ($size > self::MAX_SEQUENCE_HEADER_BYTES) {
+                    throw self::invalid('a sequence header is too long');
+                }
+                $reader->seek($position + $cursor);
+                list($frameWidth, $frameHeight) = (new self($reader->read($size)))->readMaxFrameSize();
+                $width = max($width, $frameWidth);
+                $height = max($height, $frameHeight);
+            } elseif ($width === 0 && !in_array($type, self::SKIPPABLE_OBUS, true)) {
                 throw self::invalid('the data has no sequence header before its first frame');
             }
-            $position += $size;
+            $position += $cursor + $size;
+        }
+        if ($width === 0) {
+            throw self::invalid('the data has no sequence header');
         }
 
-        throw self::invalid('the data has no sequence header within its first bytes');
+        return [$width, $height];
     }
 
     /**

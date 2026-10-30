@@ -131,6 +131,27 @@ final class ImageBuilder
     }
 
     /**
+     * The 32-bit value at $offset.
+     */
+    public static function readUint32(string $bytes, int $offset, bool $bigEndian = true): int
+    {
+        $value = $offset >= 0 && $offset + 4 <= strlen($bytes) ? unpack($bigEndian ? 'N' : 'V', $bytes, $offset) : false;
+        if (!is_array($value) || !is_int($value[1])) {
+            throw new \LogicException('ImageBuilder: the value to read is missing.');
+        }
+
+        return $value[1];
+    }
+
+    /**
+     * Adds $delta to the big-endian 32-bit value at $offset, such as the size of a box that grows.
+     */
+    public static function addToUint32(string $bytes, int $offset, int $delta): string
+    {
+        return self::patch($bytes, $offset, pack('N', self::readUint32($bytes, $offset) + $delta));
+    }
+
+    /**
      * $count copies of $bytes.
      */
     public static function repeat(string $bytes, int $count): string
