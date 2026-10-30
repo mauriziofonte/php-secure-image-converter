@@ -25,11 +25,12 @@ use Mfonte\SecureImageConverter\Validation\Limits;
  *   CRC is checked) must describe a non-empty region inside the canvas, and their number must equal the declared
  *   frame count.
  *
- * Metadata: iCCP is the colour profile, eXIf is EXIF (and gives the orientation); tEXt, zTXt, iTXt, tIME, sPLT (a
- * suggested palette of any length, which decoders do not render), animation chunks outside an animated PNG and every
- * unknown ancillary chunk are other metadata. Colour, transparency and animation chunks are not metadata, unless a
- * colour or transparency chunk is longer than its fields, which decoders do not read beyond. Bytes after IEND are
- * trailing data.
+ * Metadata: iCCP is the colour profile, eXIf is EXIF (and gives the orientation); tEXt, zTXt, iTXt, tIME, sPLT and
+ * hIST (a suggested palette of any length and a histogram, which decoders do not render), animation chunks outside an
+ * animated PNG and every unknown ancillary chunk are other metadata. Colour, transparency and animation chunks are
+ * not metadata, unless a colour or transparency chunk is longer than its fields for the colour type of the image (and,
+ * for the transparency of a palette image, its number of palette entries), which decoders do not read beyond. Bytes
+ * after IEND are trailing data.
  *
  * @internal
  */
@@ -59,14 +60,26 @@ final class PngParser implements ParserInterface
     ];
 
     /**
-     * Ancillary chunks that describe how to render the image rather than metadata about it, with the largest length
-     * of their fields (the animation chunks are checked apart).
+     * Ancillary chunks that describe how to render the image rather than metadata about it, with the length of their
+     * fields: the animation chunks are checked apart, and the chunks of COLOUR_TYPE_CHUNKS are not listed.
      *
      * @var array<string, int>
      */
     private const RENDERING_CHUNKS = [
-        'bKGD' => 6, 'cHRM' => 32, 'cICP' => 4, 'cLLI' => 8, 'cLLi' => 8, 'gAMA' => 4, 'hIST' => 512, 'mDCV' => 24,
-        'mDCv' => 24, 'pHYs' => 9, 'sBIT' => 4, 'sRGB' => 1, 'tRNS' => 256,
+        'cHRM' => 32, 'cICP' => 4, 'cLLI' => 8, 'cLLi' => 8, 'gAMA' => 4, 'mDCV' => 24, 'mDCv' => 24, 'pHYs' => 9,
+        'sRGB' => 1,
+    ];
+
+    /**
+     * Rendering chunks whose fields depend on the colour type, with their length for each colour type that allows
+     * them; the transparency of a palette image (colour type 3) has one byte per palette entry.
+     *
+     * @var array<string, array<int, int>>
+     */
+    private const COLOUR_TYPE_CHUNKS = [
+        'bKGD' => [0 => 2, 2 => 6, 3 => 1, 4 => 2, 6 => 6],
+        'sBIT' => [0 => 1, 2 => 3, 3 => 3, 4 => 2, 6 => 4],
+        'tRNS' => [0 => 2, 2 => 6],
     ];
 
     private const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
@@ -85,6 +98,7 @@ final class PngParser implements ParserInterface
         $declaredFrames = null;
         $frameControls = 0;
         $palette = false;
+        $paletteEntries = 0;
         $imageData = 0;
         $imageDataEnded = false;
         $iccProfile = false;
@@ -124,6 +138,7 @@ final class PngParser implements ParserInterface
                         throw self::invalid('the PLTE chunk has an invalid length');
                     }
                     $palette = true;
+                    $paletteEntries = intdiv($length, 3);
                     break;
                 case 'acTL':
                     if ($declaredFrames !== null || $imageData > 0 || $length !== 8) {
@@ -173,7 +188,7 @@ final class PngParser implements ParserInterface
                     if ((ord($type[0]) & 0x20) === 0) {
                         throw self::invalid('the file has an unknown critical chunk');
                     }
-                    if (!isset(self::RENDERING_CHUNKS[$type]) || $length > self::RENDERING_CHUNKS[$type]) {
+                    if ($length > self::fieldsLength($type, $colourType, $paletteEntries)) {
                         $otherMetadata = true;
                     }
             }
@@ -266,6 +281,22 @@ final class PngParser implements ParserInterface
         }
 
         return $data;
+    }
+
+    /**
+     * Length of the fields of a rendering chunk in an image of this colour type and number of palette entries (0 when
+     * the colour type does not allow the chunk), or -1 for a chunk that is not a rendering chunk.
+     */
+    private static function fieldsLength(string $type, int $colourType, int $paletteEntries): int
+    {
+        if ($type === 'tRNS' && $colourType === 3) {
+            return $paletteEntries;
+        }
+        if (isset(self::COLOUR_TYPE_CHUNKS[$type])) {
+            return self::COLOUR_TYPE_CHUNKS[$type][$colourType] ?? 0;
+        }
+
+        return self::RENDERING_CHUNKS[$type] ?? -1;
     }
 
     /**

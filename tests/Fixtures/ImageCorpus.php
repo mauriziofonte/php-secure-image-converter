@@ -192,6 +192,13 @@ final class ImageCorpus
         $tiny = ImageBuilder::PNG_SIGNATURE . ImageBuilder::pngHeader(1, 1) . $idat . $iend;
         $exif = "II*\0" . pack('V', 8) . "\0\0" . pack('V', 0);
         $frameControl = ImageBuilder::pngChunk('fcTL', pack('NNNNNnnCC', 0, 1, 1, 0, 0, 1, 10, 0, 0));
+        $zip = "PK\x05\x06" . ImageBuilder::repeat("\0", 18);
+        // A palette image of two entries with $chunks after its PLTE chunk.
+        $palette = ImageBuilder::png(4, 4, 8, 3);
+        $afterPalette = ImageBuilder::find($palette, 'PLTE') + 4 + 6 + 4;
+        $withPalette = static function (string $chunks) use ($palette, $afterPalette): string {
+            return substr($palette, 0, $afterPalette) . $chunks . substr($palette, $afterPalette);
+        };
 
         return [
             'png/valid-rgb.png' => self::committed($valid, self::accept(ImageFormat::PNG, 16, 8, 1, ['bit_depth' => 8, 'icc_profile' => false, 'exif' => false, 'metadata' => false, 'orientation' => 1, 'trailing_data' => false])),
@@ -228,8 +235,38 @@ final class ImageCorpus
                 self::accept(ImageFormat::PNG, 4, 4, 1, ['metadata' => false])
             ),
             'png/valid-zip-in-long-phys.png' => self::committed(
-                ImageBuilder::png(4, 4, 8, 2, ImageBuilder::pngChunk('pHYs', pack('NNC', 2835, 2835, 1) . "PK\x05\x06" . ImageBuilder::repeat("\0", 18))),
+                ImageBuilder::png(4, 4, 8, 2, ImageBuilder::pngChunk('pHYs', pack('NNC', 2835, 2835, 1) . $zip)),
                 self::accept(ImageFormat::PNG, 4, 4, 1, ['metadata' => true, 'trailing_data' => false])
+            ),
+            // The fields of bKGD, sBIT and tRNS depend on the colour type, and a palette has one transparency byte per
+            // entry; decoders do not render a histogram.
+            'png/valid-trns.png' => self::committed(
+                ImageBuilder::png(4, 4, 8, 2, ImageBuilder::pngChunk('tRNS', pack('nnn', 0, 0, 0))),
+                self::accept(ImageFormat::PNG, 4, 4, 1, ['metadata' => false])
+            ),
+            'png/valid-zip-in-long-trns.png' => self::committed(
+                ImageBuilder::png(4, 4, 8, 2, ImageBuilder::pngChunk('tRNS', pack('nnn', 0, 0, 0) . $zip)),
+                self::accept(ImageFormat::PNG, 4, 4, 1, ['metadata' => true, 'trailing_data' => false])
+            ),
+            'png/valid-palette-trns.png' => self::committed(
+                $withPalette(ImageBuilder::pngChunk('tRNS', "\xFF\x00") . ImageBuilder::pngChunk('bKGD', "\x01")),
+                self::accept(ImageFormat::PNG, 4, 4, 1, ['metadata' => false])
+            ),
+            'png/valid-zip-in-palette-trns.png' => self::committed(
+                $withPalette(ImageBuilder::pngChunk('tRNS', "\xFF\x00" . $zip)),
+                self::accept(ImageFormat::PNG, 4, 4, 1, ['metadata' => true, 'trailing_data' => false])
+            ),
+            'png/valid-zip-in-palette-bkgd.png' => self::committed(
+                $withPalette(ImageBuilder::pngChunk('bKGD', "\x01" . $zip)),
+                self::accept(ImageFormat::PNG, 4, 4, 1, ['metadata' => true, 'trailing_data' => false])
+            ),
+            'png/valid-palette-bkgd-of-rgb-length.png' => self::committed(
+                $withPalette(ImageBuilder::pngChunk('bKGD', "\x01\x00\x00\x00\x00\x00")),
+                self::accept(ImageFormat::PNG, 4, 4, 1, ['metadata' => true])
+            ),
+            'png/valid-histogram.png' => self::committed(
+                $withPalette(ImageBuilder::pngChunk('hIST', pack('nn', 16, 0))),
+                self::accept(ImageFormat::PNG, 4, 4, 1, ['metadata' => true])
             ),
             'png/valid-exif-orientation.png' => self::committed(
                 ImageBuilder::png(8, 4, 8, 2, ImageBuilder::pngChunk('eXIf', ImageBuilder::exifOrientation(3, true))),
