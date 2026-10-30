@@ -58,6 +58,16 @@ jobs:
           tools: composer:v2
           ini-values: error_reporting=-1, display_errors=On, zend.assertions=1
 
+      # PHPStan's PHP 7.2.5 run does not report every syntax error of older versions (typed properties, trailing
+      # commas in calls, ...), so every file is also compiled by this job's own PHP.
+      - name: Lint PHP files
+        run: |
+          status=0
+          while IFS= read -r -d '' file; do
+            php -l "$file" || status=1
+          done < <(find src tests -type f -name '*.php' -print0 | sort -z)
+          exit "$status"
+
       - name: Install highest dependencies
         if: matrix.deps == 'highest'
         run: composer update --prefer-stable --no-interaction --no-progress
