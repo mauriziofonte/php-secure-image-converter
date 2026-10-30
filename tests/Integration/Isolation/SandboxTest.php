@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Mfonte\SecureImageConverter\Tests\Integration\Isolation;
 
+use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
 use Mfonte\SecureImageConverter\Contract\IsolationLevel;
 use Mfonte\SecureImageConverter\Isolation\CommandBuilder;
 use Mfonte\SecureImageConverter\Isolation\ProcessOptions;
@@ -230,6 +231,41 @@ final class SandboxTest extends IsolationTestCase
 
         self::assertSame("image bytes read-only\n", $result->getStdout());
         self::assertStringEqualsFile($input, 'image bytes');
+    }
+
+    /**
+     * The standard input reaches the sandboxed program as descriptor 0; a run that replaces it with a link to a host
+     * file (created in the shared working directory, though the host file is invisible inside) gets the next run
+     * refused, as at the lower levels.
+     */
+    public function testStandardInputReachesTheProgramAndAPlantedLinkIsRefused(): void
+    {
+        $runner = $this->runner();
+        $this->hostDirectory = WorkingDirectory::create();
+        $host = $this->hostDirectory->pathOf('host.txt');
+        file_put_contents($host, 'host data');
+        $input = $this->workingDirectory()->pathOf('input.txt');
+        file_put_contents($input, "line 1\n\0binary");
+
+        $result = $runner->run(['sh', '-c', 'cat; readlink /proc/self/fd/0'], $this->workingDirectory(), $input);
+        self::assertSame("line 1\n\0binary" . $input . "\n", $result->getStdout());
+
+        $replace = $runner->run(
+            ['sh', '-c', 'rm -f input.txt && ln -s "$1" input.txt && echo replaced', 'sh', $host],
+            $this->workingDirectory()
+        );
+        self::assertSame("replaced\n", $replace->getStdout());
+        try {
+            $runner->run(['sh', '-c', 'cat; echo pwned > /proc/self/fd/0'], $this->workingDirectory(), $input);
+            self::fail('The link must be refused.');
+        } catch (InvalidArgumentException $exception) {
+            self::assertSame(
+                'The standard input must be a readable regular file directly inside the working directory, not a '
+                    . 'symbolic link, without other hard links.',
+                $exception->getMessage()
+            );
+        }
+        self::assertStringEqualsFile($host, 'host data');
     }
 
     public function testCapabilitiesAreDropped(): void
