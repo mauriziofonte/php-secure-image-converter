@@ -268,6 +268,10 @@ final class ImageCorpus
             'bmp/valid-top-down.bmp' => self::committed(ImageBuilder::bmp(5, 4, 24, 0, 40, true), self::accept(ImageFormat::BMP, 5, 4)),
             'bmp/valid-os2-core.bmp' => self::committed(ImageBuilder::bmpCore(6, 3), self::accept(ImageFormat::BMP, 6, 3)),
             'bmp/valid-trailing-php.bmp' => self::committed($valid . '<?php echo "payload"; ?>', self::accept(ImageFormat::BMP, 7, 5, 1, ['trailing_data' => true])),
+            // Decoders skip the bytes between the headers and the pixel data.
+            'bmp/valid-zip-before-pixels.bmp' => self::committed(self::bmpWithGap(ImageBuilder::bmp(7, 5), "PK\x05\x06" . ImageBuilder::repeat("\0", 18)), self::accept(ImageFormat::BMP, 7, 5, 1, ['trailing_data' => true])),
+            // A colour profile there is not hidden data.
+            'bmp/valid-v5-icc-before-pixels.bmp' => self::committed(self::bmpProfileBeforePixels(), self::accept(ImageFormat::BMP, 4, 4, 1, ['icc_profile' => true, 'trailing_data' => false])),
             'bmp/bomb-100000x100000.bmp' => self::committed(ImageBuilder::patch($valid, 18, pack('VV', 100000, 100000)), self::reject(ErrorCode::IMAGE_TOO_LARGE, true)),
             'bmp/spoof-planes.bmp' => self::committed(ImageBuilder::patch($valid, 26, pack('v', 2)), self::reject(ErrorCode::INVALID_IMAGE)),
             'bmp/spoof-bit-count.bmp' => self::committed(ImageBuilder::patch($valid, 30, pack('V', 1)), self::reject(ErrorCode::INVALID_IMAGE)),
@@ -317,8 +321,18 @@ final class ImageCorpus
                 $lossless . "PK\x05\x06" . ImageBuilder::repeat("\0", 18),
                 self::accept(ImageFormat::WEBP, 24, 12, 1, ['trailing_data' => true])
             ),
+            // Decoders skip what follows the bitstream of a simple file inside the RIFF payload, and unknown chunks.
+            'webp/valid-zip-inside-riff.webp' => self::committed(
+                ImageBuilder::riff(ImageBuilder::webpChunk('VP8L', ImageBuilder::vp8l(24, 12)) . "PK\x05\x06" . ImageBuilder::repeat("\0", 18)),
+                self::accept(ImageFormat::WEBP, 24, 12, 1, ['metadata' => false, 'trailing_data' => true])
+            ),
+            'webp/valid-unknown-chunk.webp' => self::committed(
+                ImageBuilder::riff(ImageBuilder::vp8x(0, 8, 8) . ImageBuilder::webpChunk('VP8L', ImageBuilder::vp8l(8, 8))
+                    . ImageBuilder::webpChunk('ZIPS', "PK\x05\x06" . ImageBuilder::repeat("\0", 18))),
+                self::accept(ImageFormat::WEBP, 8, 8, 1, ['metadata' => true, 'trailing_data' => true])
+            ),
             // The most chunks an extended file may have, then one too many.
-            'webp/valid-most-chunks.webp' => self::generated(self::webpOfChunks(WebpParser::MAX_CHUNKS - 2), self::accept(ImageFormat::WEBP, 8, 8, 1, ['metadata' => true])),
+            'webp/valid-most-chunks.webp' => self::generated(self::webpOfChunks(WebpParser::MAX_CHUNKS - 2), self::accept(ImageFormat::WEBP, 8, 8, 1, ['metadata' => true, 'trailing_data' => true])),
             'webp/spoof-too-many-chunks.webp' => self::generated(self::webpOfChunks(WebpParser::MAX_CHUNKS - 1), self::reject(ErrorCode::INVALID_IMAGE)),
             // C-2: the content decides, not the name: a WEBP named .jpg is a WEBP, refused unless WEBP is enabled.
             'webp/valid-named-as-jpeg.jpg' => self::committed(ImageBuilder::webpLossless(8, 8), self::accept(ImageFormat::WEBP, 8, 8)),
@@ -534,6 +548,31 @@ final class ImageCorpus
     {
         return ImageBuilder::gifScreen(8, 8) . "\x21\xFE" . ImageBuilder::repeat("\x01A", $count) . "\x00"
             . ImageBuilder::gifImage(0, 0, 8, 8) . "\x3B";
+    }
+
+    /**
+     * $bmp with $gap inserted before its pixel data, which the file header points to.
+     */
+    private static function bmpWithGap(string $bmp, string $gap): string
+    {
+        $dataOffset = ImageBuilder::readUint32($bmp, 10, false);
+        $bytes = substr($bmp, 0, $dataOffset) . $gap . substr($bmp, $dataOffset);
+
+        return ImageBuilder::patch($bytes, 2, pack('VvvV', strlen($bytes), 0, 0, $dataOffset + strlen($gap)));
+    }
+
+    /**
+     * A 4 x 4 V5 BMP whose embedded colour profile lies between the header and the pixel data, where some writers
+     * store it.
+     */
+    private static function bmpProfileBeforePixels(): string
+    {
+        $profile = ImageBuilder::iccProfile();
+        $bmp = ImageBuilder::bmp(4, 4, 32, 3, 124, false, 'MBED', $profile);
+        $bmp = self::bmpWithGap((string) substr($bmp, 0, -strlen($profile)), $profile);
+
+        // The profile offset (at 112 in the V5 header) counts from the start of the header, 124 bytes long.
+        return ImageBuilder::patch($bmp, 14 + 112, pack('V', 124));
     }
 
     /**

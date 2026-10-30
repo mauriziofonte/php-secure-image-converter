@@ -28,9 +28,14 @@ use Mfonte\SecureImageConverter\Contract\ValidatedSerializationTrait;
  *   there is none or it cannot be read. With 5 to 8 an auto-rotating backend swaps width and height, so output
  *   verification must expect either size.
  * - hasTrailingData() reports bytes that the decoder of the image does not read: data after the end of the image
- *   (an appended archive, script or second file, such as the ZIP of a GIFAR or of a JPEG polyglot), top-level AVIF
- *   boxes that are not part of the image, and for TIFF further pages or bytes beyond every structure of the first
- *   page. The flag errs towards true. Such a file must be re-encoded, never passed through unconverted.
+ *   (an appended archive, script or second file, such as the ZIP of a GIFAR or of a JPEG polyglot), bytes after the
+ *   bitstream of a simple WEBP file and unknown WEBP chunks, bytes between the palette and the pixel data of a BMP
+ *   other than its colour profile, top-level AVIF boxes that are not part of the image, and for TIFF further pages or
+ *   bytes beyond every structure of the first page. Where it is computed, the flag errs towards true. Such a file
+ *   must be re-encoded, never passed through unconverted. Not detected: bytes inside the AVIF mdat box that no item
+ *   or sample uses, unused bytes inside other structures that decoders skip, and data inside metadata (which
+ *   hasExif() and hasMetadata() report). A consumer that must never return bytes it has not decoded re-encodes
+ *   every image, whatever the flag.
  *
  * Only what a decoder of the first image produces is described: for TIFF, the first page (IFD0) alone is read and
  * checked against the limits, later pages are neither counted nor checked, so backends must decode page 0 only.
@@ -193,7 +198,7 @@ final class ImageInfo
     }
 
     /**
-     * @param bool $trailingData whether the file holds data that decoders ignore after the image
+     * @param bool $trailingData whether the file holds data that decoders skip (see the class description)
      */
     public function withTrailingData(bool $trailingData): self
     {
@@ -301,7 +306,7 @@ final class ImageInfo
     }
 
     /**
-     * Whether the file holds data that decoders ignore after the image (see the class description).
+     * Whether the file holds data that decoders skip (see the class description).
      */
     public function hasTrailingData(): bool
     {

@@ -42,10 +42,10 @@ use Mfonte\SecureImageConverter\Validation\Parser\WebpParser;
  * inspect() returns, and a decoder that opens the same path later may read other bytes (time of check to time of use).
  * A consumer that decodes the image must inspect and decode the same private copy of the input, one that no other
  * process can write (such as a temporary file it created itself), or call inspectStream() on the very stream it then
- * decodes. The ImageInfo flags give the rest of what a consumer needs: hasTrailingData() reports bytes after the end
- * of the image (an appended archive or script), so a consumer must re-encode the image rather than pass the original
- * bytes through; getOrientation() reports the EXIF or AVIF orientation the decoder will not apply by itself. For TIFF
- * only the first page is inspected: a backend must decode page 0 alone.
+ * decodes. The ImageInfo flags give the rest of what a consumer needs: hasTrailingData() reports bytes that decoders
+ * skip (an appended archive or script, and the places listed in ImageInfo), so a consumer must re-encode the image
+ * rather than pass the original bytes through; getOrientation() reports the EXIF or AVIF orientation the decoder will
+ * not apply by itself. For TIFF only the first page is inspected: a backend must decode page 0 alone.
  *
  * Errors (see Contract\Exception\ErrorCode): the file is above max_bytes, LimitExceededException (file_too_large);
  * its format cannot be identified, is not enabled, is SVG or is an unsupported variant, UnsupportedFormatException

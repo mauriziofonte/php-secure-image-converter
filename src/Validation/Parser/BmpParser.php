@@ -27,7 +27,8 @@ use Mfonte\SecureImageConverter\Validation\Limits;
  *   colour profile (V5 PROFILE_EMBEDDED) must lie inside the file.
  *
  * BMP carries no metadata besides the colour profile. The bit depth is 16 for 64-bit images and 8 otherwise. Bytes
- * after the pixel data and the colour profile are trailing data.
+ * between the palette and the pixel data other than the colour profile, and bytes after the pixel data and the colour
+ * profile, are trailing data.
  *
  * @internal
  */
@@ -156,12 +157,19 @@ final class BmpParser implements ParserInterface
             $end = $dataOffset + $stride * $height;
         }
 
-        $profileEnd = $headerSize === 124 ? self::embeddedProfileEnd($reader, $size) : 0;
+        list($profileStart, $profileEnd) = $headerSize === 124 ? self::embeddedProfile($reader, $size) : [0, 0];
+        // Decoders skip the bytes between the palette and the pixel data: anything there but the colour profile is
+        // hidden data, as are bytes after the pixel data and the profile.
+        $paletteEntries = $bitCount <= 8 && $colours === 0 ? 1 << $bitCount : $colours;
+        $gap = $dataOffset - min($dataOffset, $headersEnd + $paletteEntries * $paletteEntrySize);
+        if ($profileEnd > 0 && $profileStart >= $dataOffset - $gap && $profileEnd <= $dataOffset) {
+            $gap -= $profileEnd - $profileStart;
+        }
 
         return (new ImageInfo(ImageFormat::BMP, $width, $height, 1, $size))
             ->withBitDepth($bitCount === 64 ? 16 : 8)
             ->withMetadata($profileEnd > 0, false, false)
-            ->withTrailingData($size > max($end, $profileEnd));
+            ->withTrailingData($gap > 0 || $size > max($end, $profileEnd));
     }
 
     /**
@@ -190,9 +198,10 @@ final class BmpParser implements ParserInterface
      * @throws InvalidImageException
      * @throws UnsupportedFormatException
      *
-     * @return int offset after the embedded colour profile, or 0 when there is none
+     * @return array{0: int, 1: int} offsets of the embedded colour profile and of the byte after it, or [0, 0] when
+     *                               there is none
      */
-    private static function embeddedProfileEnd(ByteReader $reader, int $size): int
+    private static function embeddedProfile(ByteReader $reader, int $size): array
     {
         // V5 header from offset 14: colours important (at 50), masks (54-69), colour space type (70), endpoints and
         // gamma (74-121), intent (122), profile offset relative to the header (126), profile size (130).
@@ -202,7 +211,7 @@ final class BmpParser implements ParserInterface
             throw new UnsupportedFormatException('BMP files with a colour profile linked by file name are not supported.');
         }
         if ($colourSpace !== self::PROFILE_EMBEDDED) {
-            return 0;
+            return [0, 0];
         }
         $reader->seek(self::FILE_HEADER_SIZE + 112);
         $profileOffset = $reader->readUint32Le();
@@ -212,7 +221,7 @@ final class BmpParser implements ParserInterface
             throw self::invalid('the embedded colour profile lies outside the file');
         }
 
-        return $profileStart + $profileSize;
+        return [$profileStart, $profileStart + $profileSize];
     }
 
     /**

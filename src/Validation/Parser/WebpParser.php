@@ -16,6 +16,8 @@ use Mfonte\SecureImageConverter\Validation\Limits;
  *
  * - The RIFF size must cover at least one chunk and fit in the file (bytes after it are ignored by decoders, and
  *   reported as trailing data); every chunk must fit in the RIFF payload. At most MAX_CHUNKS chunks are walked.
+ *   Bytes after the bitstream chunk of a simple file, and unknown chunks of an extended file, are trailing data too:
+ *   decoders skip them.
  * - Simple lossy (VP8): a key frame that is shown, a first partition inside the chunk, the start code 9D 01 2A and
  *   a non-zero 14-bit width and height. Simple lossless (VP8L): the signature 2F, version 0, 14-bit dimensions.
  * - Extended (VP8X): a 24-bit canvas width and height whose product fits in 32 bits, checked against the limits at
@@ -71,6 +73,8 @@ final class WebpParser implements ParserInterface
         if ($type === 'VP8 ' || $type === 'VP8L') {
             list($width, $height) = self::readBitstreamSize($reader, $type, $length);
             $limits->assertImage($width, $height, 1);
+            // A simple file holds its bitstream alone: decoders skip anything after it in the RIFF payload.
+            $trailingData = $trailingData || self::chunkEnd(12 + 8, $length) < $end;
 
             return (new ImageInfo(ImageFormat::WEBP, $width, $height, 1, $reader->getSize()))->withTrailingData($trailingData);
         }
@@ -78,7 +82,9 @@ final class WebpParser implements ParserInterface
             throw self::invalid('the first chunk is not VP8, VP8L or VP8X');
         }
 
-        return self::parseExtended($reader, $limits, $length, $end)->withTrailingData($trailingData);
+        $info = self::parseExtended($reader, $limits, $length, $end);
+
+        return $info->withTrailingData($trailingData || $info->hasTrailingData());
     }
 
     /**
@@ -109,6 +115,7 @@ final class WebpParser implements ParserInterface
         $exif = false;
         $otherMetadata = false;
         $orientation = ImageInfo::ORIENTATION_NORMAL;
+        $unknownChunks = false;
 
         for ($chunks = 2; $reader->getPosition() < $end; ++$chunks) {
             if ($chunks > self::MAX_CHUNKS) {
@@ -152,7 +159,9 @@ final class WebpParser implements ParserInterface
                     break;
                 default:
                     if (!in_array($type, self::STRUCTURE_CHUNKS, true)) {
+                        // Decoders skip unknown chunks, which can carry anything.
                         $otherMetadata = true;
+                        $unknownChunks = true;
                     }
             }
             $reader->seek(self::chunkEnd($start + 8, $length));
@@ -170,7 +179,8 @@ final class WebpParser implements ParserInterface
 
         return (new ImageInfo(ImageFormat::WEBP, $width, $height, $frameCount, $reader->getSize()))
             ->withMetadata($iccProfile, $exif, $otherMetadata)
-            ->withOrientation($orientation);
+            ->withOrientation($orientation)
+            ->withTrailingData($unknownChunks);
     }
 
     /**
