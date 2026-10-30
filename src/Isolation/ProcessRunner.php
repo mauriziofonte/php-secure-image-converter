@@ -31,8 +31,9 @@ use Mfonte\SecureImageConverter\Contract\IsolationLevel;
  *   deliberately starts its own session (setsid()) leaves the group and escapes this; only the sandbox catches it.
  * - rlimit: process, plus ResourceLimits applied with prlimit (address space, CPU time, file size, open files, no
  *   core dumps, optionally processes).
- * - sandbox: rlimit, plus bubblewrap: no network, read-only system, private /tmp, only the working directory
- *   writable, capabilities dropped, and a PID namespace that dies with the run, taking every descendant with it.
+ * - sandbox: rlimit, plus bubblewrap: no network, read-only system with host configuration hidden, an empty
+ *   read-only /tmp, only the working directory writable, capabilities dropped, and a PID namespace that dies with
+ *   the run, taking every descendant with it.
  *
  * The runner never runs a command with weaker isolation than its level: when a tool the level needs is missing it
  * throws IsolationUnavailableException instead. IsolationDetector tells which level a host supports, and

@@ -15,8 +15,16 @@ use Mfonte\SecureImageConverter\Contract\IsolationLevel;
  * - prlimit with ResourceLimits (rlimit level and above);
  * - bwrap (sandbox level): new user, mount, PID, network, IPC, UTS and cgroup namespaces (--unshare-all, so no
  *   network at all), --die-with-parent, --new-session (no terminal injection), every capability dropped, the system
- *   paths and the per-run inputs mounted read-only, private /proc, /dev and /tmp, and the working directory as the
- *   only writable host path.
+ *   paths and the per-run inputs mounted read-only, the hidden paths covered by empty file systems, private /proc,
+ *   /dev and /tmp, and the working directory as the only writable path.
+ *
+ * Every file system that bubblewrap creates in memory (the root, /tmp, the /dev tmpfs with /dev/shm, and the ones
+ * over the hidden paths) is made read-only once the mount points it needs exist in it: /tmp shows nothing but the
+ * mount points of the working directory and the per-run paths, and the sandbox cannot store data in memory outside
+ * its address space limit. This is why no tmpfs size limit (--size, bubblewrap 0.10+, newer than the 0.9 of Ubuntu
+ * 24.04 and the 0.8 of Debian 12) is needed. Programs write their temporary files to the working directory
+ * (TMPDIR), which is on disk: RLIMIT_FSIZE bounds each file, but not their number or total size; put the working
+ * directories on a file system with a quota where that matters.
  *
  * Every element is passed as a separate argument: no shell ever parses the command (see toShellCommand() for PHP
  * 7.2 and 7.3).
@@ -113,9 +121,37 @@ final class CommandBuilder
         foreach ($readOnlyPaths as $path) {
             array_push($arguments, '--ro-bind', $path, $path);
         }
-        array_push($arguments, '--bind', $workingDirectory, $workingDirectory, '--chdir', $workingDirectory);
+        $hidden = $this->hiddenDirectories();
+        foreach ($hidden as $path) {
+            array_push($arguments, '--tmpfs', $path);
+        }
+        array_push($arguments, '--bind', $workingDirectory, $workingDirectory);
+        // Read-only last, after bubblewrap created the mount points in them; --remount-ro does not recurse, so the
+        // mounts below (the working directory in particular) keep their own flags.
+        foreach (array_merge($hidden, ['/dev', '/tmp', '/']) as $path) {
+            array_push($arguments, '--remount-ro', $path);
+        }
+        array_push($arguments, '--chdir', $workingDirectory);
 
         return $arguments;
+    }
+
+    /**
+     * The hidden paths that are directories on the host, with symbolic links resolved.
+     *
+     * @return list<string>
+     */
+    private function hiddenDirectories(): array
+    {
+        $directories = [];
+        foreach ($this->options->getSandboxHiddenPaths() as $path) {
+            $real = is_dir($path) ? realpath($path) : false;
+            if (is_string($real) && $real !== '/') {
+                $directories[$real] = $real;
+            }
+        }
+
+        return array_values($directories);
     }
 
     /**

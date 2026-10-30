@@ -44,6 +44,7 @@ final class CommandBuilderTest extends TestCase
     {
         return (new ProcessOptions())
             ->withSandboxReadOnlyPaths([])
+            ->withSandboxHiddenPaths([])
             ->withResourceLimits((new ResourceLimits())->withAddressSpaceBytes(536870912)->withProcesses(32));
     }
 
@@ -106,7 +107,9 @@ final class CommandBuilderTest extends TestCase
                 '--unshare-all', '--die-with-parent', '--new-session', '--cap-drop', 'ALL',
                 '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp',
                 '--ro-bind', '/srv/in.png', '/srv/in.png',
-                '--bind', '/tmp/job', '/tmp/job', '--chdir', '/tmp/job',
+                '--bind', '/tmp/job', '/tmp/job',
+                '--remount-ro', '/dev', '--remount-ro', '/tmp', '--remount-ro', '/',
+                '--chdir', '/tmp/job',
             ],
             $builder->bubblewrapArguments('/tmp/job', ['/srv/in.png'])
         );
@@ -120,7 +123,9 @@ final class CommandBuilderTest extends TestCase
         file_put_contents($root . '/config', '');
         symlink('usr', $root . '/bin');
         $builder = new CommandBuilder(
-            (new ProcessOptions())->withSandboxReadOnlyPaths([$root . '/usr', $root . '/bin', $root . '/config', $root . '/missing'])
+            (new ProcessOptions())
+                ->withSandboxReadOnlyPaths([$root . '/usr', $root . '/bin', $root . '/config', $root . '/missing'])
+                ->withSandboxHiddenPaths([])
         );
 
         self::assertSame(
@@ -130,10 +135,59 @@ final class CommandBuilderTest extends TestCase
                 '--symlink', 'usr', $root . '/bin',
                 '--ro-bind', $root . '/config', $root . '/config',
                 '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp',
-                '--bind', '/tmp/job', '/tmp/job', '--chdir', '/tmp/job',
+                '--bind', '/tmp/job', '/tmp/job',
+                '--remount-ro', '/dev', '--remount-ro', '/tmp', '--remount-ro', '/',
+                '--chdir', '/tmp/job',
             ],
             $builder->bubblewrapArguments('/tmp/job', [])
         );
+    }
+
+    /**
+     * Hidden directories get an empty file system, made read-only at the end like the other private ones; paths
+     * that are not directories are skipped, and links are resolved.
+     */
+    public function testHiddenDirectoriesAreCoveredByEmptyReadOnlyFileSystems(): void
+    {
+        $this->directory = WorkingDirectory::create();
+        $root = $this->directory->getPath();
+        mkdir($root . '/usr/local/etc', 0700, true);
+        mkdir($root . '/usr/src', 0700, true);
+        symlink('usr/src', $root . '/src');
+        file_put_contents($root . '/file', '');
+        $builder = new CommandBuilder(
+            (new ProcessOptions())
+                ->withSandboxReadOnlyPaths([])
+                ->withSandboxHiddenPaths(
+                    [$root . '/usr/local/etc', $root . '/src', $root . '/usr/src', $root . '/file', $root . '/missing']
+                )
+        );
+
+        self::assertSame(
+            [
+                '--unshare-all', '--die-with-parent', '--new-session', '--cap-drop', 'ALL',
+                '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp',
+                '--ro-bind', $root, $root,
+                '--tmpfs', $root . '/usr/local/etc',
+                '--tmpfs', $root . '/usr/src',
+                '--bind', '/tmp/job', '/tmp/job',
+                '--remount-ro', $root . '/usr/local/etc', '--remount-ro', $root . '/usr/src',
+                '--remount-ro', '/dev', '--remount-ro', '/tmp', '--remount-ro', '/',
+                '--chdir', '/tmp/job',
+            ],
+            $builder->bubblewrapArguments('/tmp/job', [$root])
+        );
+    }
+
+    public function testTheDefaultsHideHostConfigurationBelowUsr(): void
+    {
+        $arguments = (new CommandBuilder(new ProcessOptions()))->bubblewrapArguments('/tmp/job', []);
+        foreach (ProcessOptions::DEFAULT_SANDBOX_HIDDEN_PATHS as $path) {
+            if (is_dir($path) && !is_link($path)) {
+                self::assertContains($path, $arguments);
+            }
+        }
+        self::assertSame(['--remount-ro', '/', '--chdir', '/tmp/job'], array_slice($arguments, -4));
     }
 
     public function testEnvironmentIsBuiltFromScratch(): void

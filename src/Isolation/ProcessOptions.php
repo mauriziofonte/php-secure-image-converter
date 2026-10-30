@@ -20,6 +20,7 @@ use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
  * | inherited environment   | none                            | variable names copied from PHP's own            |
  * | search path             | DEFAULT_SEARCH_PATH             | where commands and tools are found; also PATH   |
  * | sandbox read-only paths | DEFAULT_SANDBOX_READ_ONLY_PATHS | host paths visible, read-only, in the sandbox   |
+ * | sandbox hidden paths    | DEFAULT_SANDBOX_HIDDEN_PATHS    | directories shown empty in the sandbox          |
  * | tool paths              | looked up in the search path    | setsid, prlimit and bwrap; null disables a tool |
  *
  * The process environment is built from scratch: nothing is inherited from the PHP process (which may hold
@@ -91,7 +92,10 @@ final class ProcessOptions
      * System paths mounted read-only in the sandbox when they exist: programs and shared libraries (a top-level
      * symbolic link such as /bin -> usr/bin on merged-/usr systems is recreated as a link) and the dynamic loader
      * configuration. Debian's /etc/alternatives is included because many commands in /usr/bin link through it.
-     * Nothing else of the host is visible: no /home, no /var, no other file of /etc, no /tmp.
+     *
+     * All of /usr is visible, read-only, except DEFAULT_SANDBOX_HIDDEN_PATHS: programs, libraries and shared data,
+     * which the Filesystem Hierarchy Standard keeps free of host-specific configuration and secrets. Nothing outside
+     * these paths is visible: no /home, no /var, no other file of /etc, and an empty /tmp (see CommandBuilder).
      */
     public const DEFAULT_SANDBOX_READ_ONLY_PATHS = [
         '/usr',
@@ -105,6 +109,17 @@ final class ProcessOptions
         '/etc/ld.so.cache',
         '/etc/ld.so.conf',
         '/etc/ld.so.conf.d',
+    ];
+
+    /**
+     * Directories that the sandbox shows empty (an empty read-only file system is mounted over them), when they exist:
+     * places below /usr that hold host configuration or sources rather than programs. /usr/local/etc holds the PHP
+     * and PHP-FPM configuration in the official PHP container images, including env[] secrets of the FPM pools.
+     */
+    public const DEFAULT_SANDBOX_HIDDEN_PATHS = [
+        '/usr/local/etc',
+        '/usr/local/src',
+        '/usr/src',
     ];
 
     /**
@@ -151,6 +166,11 @@ final class ProcessOptions
      * @var list<string>
      */
     private $sandboxReadOnlyPaths = self::DEFAULT_SANDBOX_READ_ONLY_PATHS;
+
+    /**
+     * @var list<string>
+     */
+    private $sandboxHiddenPaths = self::DEFAULT_SANDBOX_HIDDEN_PATHS;
 
     /**
      * Explicitly configured tools: an absolute path, or null when the tool must not be used. Tools not listed are
@@ -366,6 +386,33 @@ final class ProcessOptions
     }
 
     /**
+     * Directories shown empty and read-only inside the sandbox, although they lie below a read-only path or a path
+     * passed to a single run. Paths that are not directories on the host are skipped.
+     *
+     * @return list<string>
+     */
+    public function getSandboxHiddenPaths(): array
+    {
+        return $this->sandboxHiddenPaths;
+    }
+
+    /**
+     * Replaces the hidden sandbox paths. To add a path to the defaults, pass
+     * array_merge(ProcessOptions::DEFAULT_SANDBOX_HIDDEN_PATHS, [...]).
+     *
+     * @param list<string> $paths absolute, normalised paths other than the root
+     *
+     * @throws InvalidArgumentException when a path is invalid
+     */
+    public function withSandboxHiddenPaths(array $paths): self
+    {
+        $clone = clone $this;
+        $clone->sandboxHiddenPaths = self::checkPaths($paths, 'sandbox hidden paths', true);
+
+        return $clone;
+    }
+
+    /**
      * Sets where a tool is, or disables it with null (the isolation levels that need it then become unavailable).
      *
      * @param string      $tool one of the TOOL_* constants
@@ -427,6 +474,7 @@ final class ProcessOptions
             'resource_limits' => $this->resourceLimits->toArray(),
             'search_path' => $this->searchPath,
             'sandbox_read_only_paths' => $this->sandboxReadOnlyPaths,
+            'sandbox_hidden_paths' => $this->sandboxHiddenPaths,
             'tool_paths' => $this->toolPaths,
         ];
     }

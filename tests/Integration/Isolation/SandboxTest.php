@@ -14,8 +14,9 @@ use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\Group;
 
 /**
- * Proves the bubblewrap sandbox: no network, read-only system, no host data, private /tmp, only the working
- * directory writable, no capabilities, resource limits inside, and every process of the sandbox killed with it.
+ * Proves the bubblewrap sandbox: no network, read-only system, no host data, host configuration below /usr hidden,
+ * an empty read-only /tmp, only the working directory writable (nothing can be stored in memory), no capabilities,
+ * resource limits inside, and every process of the sandbox killed with it.
  *
  * Skipped where bubblewrap cannot run (for example in a container with Docker's default seccomp profile); the CI job
  * "isolation" installs bubblewrap and sets SIC_EXPECTED_ISOLATION_LEVEL=sandbox, so that there these tests run or
@@ -93,12 +94,15 @@ final class SandboxTest extends IsolationTestCase
         $workingDirectory = $this->workingDirectory()->getPath();
         self::assertArrayHasKey($workingDirectory, $mounts);
         self::assertContains('rw', $mounts[$workingDirectory]);
+        foreach (['/', '/tmp', '/dev'] as $mountPoint) {
+            self::assertArrayHasKey($mountPoint, $mounts);
+        }
         foreach ($mounts as $mountPoint => $flags) {
-            // The sandbox's own root, /tmp, /proc and /dev are private to it; the working directory is the only
-            // writable host path.
-            $private = in_array($mountPoint, [$workingDirectory, '/', '/tmp'], true)
-                || preg_match('#\A/(proc|dev)(/|\z)#', (string) $mountPoint) === 1;
-            if (!$private) {
+            // Besides the working directory, only /proc and the device nodes and /dev/pts below /dev may be
+            // writable; the sandbox's own root, /tmp and /dev itself are read-only file systems in memory.
+            $writable = $mountPoint === $workingDirectory
+                || preg_match('#\A/(proc(/|\z)|dev/.)#', (string) $mountPoint) === 1;
+            if (!$writable) {
                 self::assertContains('ro', $flags, sprintf('%s must be read-only', $mountPoint));
             }
         }
@@ -131,14 +135,82 @@ final class SandboxTest extends IsolationTestCase
         self::assertStringEqualsFile($this->workingDirectory()->pathOf('result.txt'), "ok\n");
     }
 
-    public function testTmpIsPrivate(): void
+    public function testTmpIsPrivateEmptyAndReadOnly(): void
     {
-        $name = 'sic-private-' . bin2hex(random_bytes(8));
-        $result = $this->runner()->run(['sh', '-c', 'echo x > /tmp/' . $name . ' && ls /tmp'], $this->workingDirectory());
+        $name = 'sic-host-' . bin2hex(random_bytes(8));
+        file_put_contents('/tmp/' . $name, 'host file');
+        try {
+            $result = $this->runner()->run(['ls', '-A', '/tmp'], $this->workingDirectory());
+        } finally {
+            unlink('/tmp/' . $name);
+        }
 
-        self::assertTrue($result->isSuccessful(), 'the sandbox has a writable /tmp of its own');
-        self::assertStringContainsString($name, $result->getStdout());
-        self::assertFileDoesNotExist(sys_get_temp_dir() . '/' . $name);
+        self::assertTrue($result->isSuccessful());
+        self::assertStringNotContainsString($name, $result->getStdout());
+        // Only the mount point of the working directory may show, when it lies below /tmp.
+        foreach (preg_split('/\n/', trim($result->getStdout()), -1, PREG_SPLIT_NO_EMPTY) ?: [] as $entry) {
+            self::assertStringStartsWith(
+                '/tmp/' . $entry . '/',
+                $this->workingDirectory()->getPath() . '/',
+                sprintf('/tmp/%s is not a parent of the working directory', $entry)
+            );
+        }
+    }
+
+    /**
+     * No path outside the working directory accepts a file: the file systems in memory are read-only, so the
+     * address space limit bounds all the memory the sandbox can use.
+     */
+    public function testNothingCanBeStoredOutsideTheWorkingDirectory(): void
+    {
+        $script = 'for path in "$@"; do echo x > "$path" 2>/dev/null && echo "stored $path"; done; '
+            . 'mkdir /tmp/new-directory 2>/dev/null && echo "created a directory"; echo x > stored.txt && echo done';
+        $paths = ['/file', '/tmp/file', '/dev/file', '/dev/shm/file', '/usr/file'];
+        foreach (ProcessOptions::DEFAULT_SANDBOX_HIDDEN_PATHS as $hidden) {
+            $paths[] = $hidden . '/file';
+        }
+
+        $result = $this->runner()->run(array_merge(['sh', '-c', $script, 'sh'], $paths), $this->workingDirectory());
+
+        self::assertSame("done\n", $result->getStdout());
+        self::assertStringEqualsFile($this->workingDirectory()->pathOf('stored.txt'), "x\n");
+    }
+
+    /**
+     * Hidden directories are empty and read-only in the sandbox, even below a path mounted read-only.
+     */
+    public function testHiddenDirectoriesAreEmpty(): void
+    {
+        $this->hostDirectory = WorkingDirectory::create();
+        $public = $this->hostDirectory->pathOf('public.txt');
+        file_put_contents($public, 'public');
+        $configuration = $this->hostDirectory->pathOf('etc');
+        mkdir($configuration, 0700);
+        file_put_contents($configuration . '/secret.conf', 'env[DB_PASSWORD] = secret');
+        $hidden = [$configuration];
+        foreach (ProcessOptions::DEFAULT_SANDBOX_HIDDEN_PATHS as $path) {
+            if (is_dir($path)) {
+                $hidden[] = $path;
+            }
+        }
+        $options = (new ProcessOptions())->withSandboxHiddenPaths(
+            array_merge(ProcessOptions::DEFAULT_SANDBOX_HIDDEN_PATHS, [$configuration])
+        );
+
+        $script = 'cat "$0"; echo; for path in "$@"; do echo "$path: $(ls -A "$path" | wc -l)"; done';
+        $result = $this->runner($options)->run(
+            array_merge(['sh', '-c', $script, $public], $hidden),
+            $this->workingDirectory(),
+            null,
+            [$this->hostDirectory->getPath()]
+        );
+
+        self::assertTrue($result->isSuccessful(), $result->getStderr());
+        $expected = "public\n";
+        foreach ($hidden as $path) {
+            $expected .= $path . ": 0\n";
+        }
+        self::assertSame($expected, $result->getStdout());
     }
 
     public function testReadOnlyInputsAreReadableButNotWritable(): void

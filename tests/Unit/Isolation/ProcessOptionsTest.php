@@ -33,6 +33,7 @@ final class ProcessOptionsTest extends TestCase
             $options->getSearchPath()
         );
         self::assertSame(ProcessOptions::DEFAULT_SANDBOX_READ_ONLY_PATHS, $options->getSandboxReadOnlyPaths());
+        self::assertSame(['/usr/local/etc', '/usr/local/src', '/usr/src'], $options->getSandboxHiddenPaths());
         self::assertSame([], $options->getToolPaths());
     }
 
@@ -59,6 +60,7 @@ final class ProcessOptionsTest extends TestCase
             ->withInheritedEnvironment(['TZ', 'TZ', 'MAGICK_HOME'])
             ->withSearchPath(['/opt/tools/bin', '/usr/bin'])
             ->withSandboxReadOnlyPaths(['/usr', '/opt/tools'])
+            ->withSandboxHiddenPaths(['/opt/tools/etc', '/opt/tools/etc'])
             ->withToolPath(ProcessOptions::TOOL_PRLIMIT, '/opt/tools/bin/prlimit')
             ->withToolPath(ProcessOptions::TOOL_BWRAP, null);
 
@@ -72,6 +74,8 @@ final class ProcessOptionsTest extends TestCase
         self::assertSame(['/usr', '/opt/tools'], $options->getSandboxReadOnlyPaths());
         self::assertSame(['bwrap' => null, 'prlimit' => '/opt/tools/bin/prlimit'], $options->getToolPaths());
         self::assertSame([], $options->withSandboxReadOnlyPaths([])->getSandboxReadOnlyPaths());
+        self::assertSame(['/opt/tools/etc'], $options->getSandboxHiddenPaths());
+        self::assertSame([], $options->withSandboxHiddenPaths([])->getSandboxHiddenPaths());
 
         self::assertEquals(new ProcessOptions(), $defaults, 'the original is unchanged');
     }
@@ -81,9 +85,13 @@ final class ProcessOptionsTest extends TestCase
         $options = new ProcessOptions();
         $fingerprint = $options->toIsolationArray();
 
-        self::assertSame(['resource_limits', 'search_path', 'sandbox_read_only_paths', 'tool_paths'], array_keys($fingerprint));
+        self::assertSame(
+            ['resource_limits', 'search_path', 'sandbox_read_only_paths', 'sandbox_hidden_paths', 'tool_paths'],
+            array_keys($fingerprint)
+        );
         self::assertSame($fingerprint, $options->withTimeoutSeconds(1.0)->withEnvironment([])->toIsolationArray());
         self::assertNotSame($fingerprint, $options->withToolPath(ProcessOptions::TOOL_BWRAP, null)->toIsolationArray());
+        self::assertNotSame($fingerprint, $options->withSandboxHiddenPaths([])->toIsolationArray());
         self::assertNotSame(
             $fingerprint,
             $options->withResourceLimits((new ResourceLimits())->withOpenFiles(64))->toIsolationArray()
@@ -189,6 +197,12 @@ final class ProcessOptionsTest extends TestCase
             }],
             'sandbox path with NUL' => [static function (ProcessOptions $options): ProcessOptions {
                 return $options->withSandboxReadOnlyPaths(["/usr\0"]);
+            }],
+            'relative hidden path' => [static function (ProcessOptions $options): ProcessOptions {
+                return $options->withSandboxHiddenPaths(['usr/local/etc']);
+            }],
+            'root as hidden path' => [static function (ProcessOptions $options): ProcessOptions {
+                return $options->withSandboxHiddenPaths(['/']);
             }],
             'unknown tool' => [static function (ProcessOptions $options): ProcessOptions {
                 return $options->withToolPath('sudo', '/usr/bin/sudo');
