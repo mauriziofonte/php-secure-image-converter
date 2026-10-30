@@ -313,7 +313,7 @@ final class BmpParser implements ParserInterface
             } else {
                 // Absolute run: $value pixels in the next bytes, padded to 2 bytes; RLE4 packs two pixels a byte.
                 $count = min($value, $pixels - $pixel);
-                $position += $rle4 ? intdiv($count + 1, 2) + (($count & 3) === 1 || ($count & 3) === 2 ? 1 : 0) : $count + ($count & 1);
+                $position += $rle4 ? (($count + 3) >> 2) << 1 : (($count + 1) >> 1) << 1;
                 $pixel += $count;
                 $column += $count;
                 if ($position > $size) {
