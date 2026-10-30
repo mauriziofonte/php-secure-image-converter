@@ -208,7 +208,8 @@ final class ImageCorpus
                 $valid . "PK\x05\x06" . ImageBuilder::repeat("\0", 18),
                 self::accept(ImageFormat::PNG, 16, 8, 1, ['trailing_data' => true])
             ),
-            // Decoders ignore animation chunks outside an animated PNG, and do not render a suggested palette.
+            // libpng and ImageMagick ignore animation chunks outside an animated PNG (Pillow refuses the file), and
+            // decoders do not render a suggested palette.
             'png/valid-zip-in-fdat-without-actl.png' => self::committed(
                 ImageBuilder::png(4, 4, 8, 2, '', ImageBuilder::pngChunk('fdAT', pack('N', 1) . "PK\x05\x06" . ImageBuilder::repeat("\0", 18))),
                 self::accept(ImageFormat::PNG, 4, 4, 1, ['metadata' => true, 'trailing_data' => false])
@@ -219,6 +220,15 @@ final class ImageCorpus
             ),
             'png/valid-zip-in-splt.png' => self::committed(
                 ImageBuilder::png(4, 4, 8, 2, ImageBuilder::pngChunk('sPLT', "zip\0\x08PK\x05\x06" . ImageBuilder::repeat("\0", 18))),
+                self::accept(ImageFormat::PNG, 4, 4, 1, ['metadata' => true, 'trailing_data' => false])
+            ),
+            // Decoders read the fields of a colour chunk and nothing beyond them.
+            'png/valid-phys.png' => self::committed(
+                ImageBuilder::png(4, 4, 8, 2, ImageBuilder::pngChunk('pHYs', pack('NNC', 2835, 2835, 1))),
+                self::accept(ImageFormat::PNG, 4, 4, 1, ['metadata' => false])
+            ),
+            'png/valid-zip-in-long-phys.png' => self::committed(
+                ImageBuilder::png(4, 4, 8, 2, ImageBuilder::pngChunk('pHYs', pack('NNC', 2835, 2835, 1) . "PK\x05\x06" . ImageBuilder::repeat("\0", 18))),
                 self::accept(ImageFormat::PNG, 4, 4, 1, ['metadata' => true, 'trailing_data' => false])
             ),
             'png/valid-exif-orientation.png' => self::committed(
@@ -297,6 +307,19 @@ final class ImageCorpus
             // Decoders skip plain text extensions and extensions of unknown label, which can carry anything.
             'gif/valid-zip-in-unknown-extension.gif' => self::committed(
                 ImageBuilder::gif(8, 8, 1, "\x21\x99" . ImageBuilder::gifSubBlocks("PK\x05\x06" . ImageBuilder::repeat("\0", 18))),
+                self::accept(ImageFormat::GIF, 8, 8, 1, ['metadata' => true, 'trailing_data' => false])
+            ),
+            // Decoders read the fields of a graphic control or loop extension from its first sub-block, and skip the rest.
+            'gif/valid-zip-in-graphic-control.gif' => self::committed(
+                ImageBuilder::gif(8, 8, 1, "\x21\xF9\x04\x00\x00\x00\x00" . ImageBuilder::gifSubBlocks("PK\x05\x06" . ImageBuilder::repeat("\0", 18))),
+                self::accept(ImageFormat::GIF, 8, 8, 1, ['metadata' => true, 'trailing_data' => false])
+            ),
+            'gif/valid-zip-in-long-graphic-control.gif' => self::committed(
+                ImageBuilder::gif(8, 8, 1, "\x21\xF9" . ImageBuilder::gifSubBlocks("\0\0\0\0PK\x05\x06" . ImageBuilder::repeat("\0", 18))),
+                self::accept(ImageFormat::GIF, 8, 8, 1, ['metadata' => true, 'trailing_data' => false])
+            ),
+            'gif/valid-zip-in-loop-extension.gif' => self::committed(
+                ImageBuilder::gif(8, 8, 1, "\x21\xFF\x0BNETSCAPE2.0\x03\x01\x00\x00" . ImageBuilder::gifSubBlocks("PK\x05\x06" . ImageBuilder::repeat("\0", 18))),
                 self::accept(ImageFormat::GIF, 8, 8, 1, ['metadata' => true, 'trailing_data' => false])
             ),
             'gif/valid-plain-text.gif' => self::committed(

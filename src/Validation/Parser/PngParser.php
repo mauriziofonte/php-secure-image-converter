@@ -27,8 +27,9 @@ use Mfonte\SecureImageConverter\Validation\Limits;
  *
  * Metadata: iCCP is the colour profile, eXIf is EXIF (and gives the orientation); tEXt, zTXt, iTXt, tIME, sPLT (a
  * suggested palette of any length, which decoders do not render), animation chunks outside an animated PNG and every
- * unknown ancillary chunk are other metadata. Colour, transparency and animation chunks are not metadata. Bytes
- * after IEND are trailing data.
+ * unknown ancillary chunk are other metadata. Colour, transparency and animation chunks are not metadata, unless a
+ * colour or transparency chunk is longer than its fields, which decoders do not read beyond. Bytes after IEND are
+ * trailing data.
  *
  * @internal
  */
@@ -58,13 +59,14 @@ final class PngParser implements ParserInterface
     ];
 
     /**
-     * Ancillary chunks that describe how to render the image rather than metadata about it.
+     * Ancillary chunks that describe how to render the image rather than metadata about it, with the largest length
+     * of their fields (the animation chunks are checked apart).
      *
-     * @var list<string>
+     * @var array<string, int>
      */
     private const RENDERING_CHUNKS = [
-        'acTL', 'fcTL', 'fdAT', 'bKGD', 'cHRM', 'cICP', 'cLLI', 'cLLi', 'gAMA', 'hIST', 'mDCV', 'mDCv', 'pHYs', 'sBIT',
-        'sRGB', 'tRNS',
+        'bKGD' => 6, 'cHRM' => 32, 'cICP' => 4, 'cLLI' => 8, 'cLLi' => 8, 'gAMA' => 4, 'hIST' => 512, 'mDCV' => 24,
+        'mDCv' => 24, 'pHYs' => 9, 'sBIT' => 4, 'sRGB' => 1, 'tRNS' => 256,
     ];
 
     private const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
@@ -138,7 +140,8 @@ final class PngParser implements ParserInterface
                     continue 2;
                 case 'fcTL':
                     if ($declaredFrames === null) {
-                        // Frame control outside an animated PNG: ignored by decoders, an unknown ancillary chunk here.
+                        // Frame control outside an animated PNG: libpng and ImageMagick ignore it (Pillow refuses the
+                        // file), an unknown ancillary chunk here.
                         $otherMetadata = true;
                         break;
                     }
@@ -152,7 +155,7 @@ final class PngParser implements ParserInterface
 
                     continue 2;
                 case 'fdAT':
-                    // Frame data outside an animated PNG: ignored by decoders, an unknown ancillary chunk here.
+                    // Frame data outside an animated PNG: libpng and ImageMagick ignore it (Pillow refuses the file).
                     $otherMetadata = $otherMetadata || $declaredFrames === null;
                     break;
                 case 'iCCP':
@@ -170,7 +173,7 @@ final class PngParser implements ParserInterface
                     if ((ord($type[0]) & 0x20) === 0) {
                         throw self::invalid('the file has an unknown critical chunk');
                     }
-                    if (!in_array($type, self::RENDERING_CHUNKS, true)) {
+                    if (!isset(self::RENDERING_CHUNKS[$type]) || $length > self::RENDERING_CHUNKS[$type]) {
                         $otherMetadata = true;
                     }
             }

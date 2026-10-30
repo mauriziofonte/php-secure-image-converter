@@ -24,8 +24,9 @@ use Mfonte\SecureImageConverter\Validation\Limits;
  *
  * Metadata: an ICCRGBG1 application extension is the colour profile; comments, XMP, unknown application extensions,
  * plain text extensions (which decoders do not render) and extensions of unknown label are other metadata.
- * NETSCAPE2.0 and ANIMEXTS1.0 loop extensions and graphic control extensions are not metadata. Bytes after the
- * trailer (the archive of a GIFAR) are trailing data.
+ * NETSCAPE2.0 and ANIMEXTS1.0 loop extensions and graphic control extensions are not metadata, unless they hold more
+ * than their fields (one sub-block of 3 and 4 bytes), which decoders skip. Bytes after the trailer (the archive of a
+ * GIFAR) are trailing data.
  *
  * @internal
  */
@@ -51,6 +52,13 @@ final class GifParser implements ParserInterface
     private const ANIMATION_APPLICATIONS = ['NETSCAPE2.0', 'ANIMEXTS1.0'];
 
     private const ICC_APPLICATION = 'ICCRGBG1012';
+
+    /**
+     * Bytes of the fields in the first sub-block of a loop extension (sub-block ID and loop count) and of a graphic
+     * control extension (flags, delay and transparent colour index).
+     */
+    private const LOOP_FIELDS_LENGTH = 3;
+    private const GRAPHIC_CONTROL_FIELDS_LENGTH = 4;
 
     private const INTRODUCER_EXTENSION = 0x21;
     private const INTRODUCER_IMAGE = 0x2C;
@@ -88,6 +96,8 @@ final class GifParser implements ParserInterface
                 break;
             }
 
+            // Length of the fields of a loop or graphic control extension, which its first sub-block holds, or 0.
+            $fieldsLength = 0;
             if ($introducer === self::INTRODUCER_EXTENSION) {
                 $label = $reader->readUint8();
                 if ($label === self::LABEL_APPLICATION) {
@@ -99,12 +109,26 @@ final class GifParser implements ParserInterface
                     $identifier = $reader->read($length);
                     if ($identifier === self::ICC_APPLICATION) {
                         $iccProfile = true;
-                    } elseif (!in_array($identifier, self::ANIMATION_APPLICATIONS, true)) {
+                    } elseif (in_array($identifier, self::ANIMATION_APPLICATIONS, true)) {
+                        $fieldsLength = self::LOOP_FIELDS_LENGTH;
+                    } else {
                         $otherMetadata = true;
                     }
-                } elseif ($label !== self::LABEL_GRAPHIC_CONTROL) {
+                } elseif ($label === self::LABEL_GRAPHIC_CONTROL) {
+                    $fieldsLength = self::GRAPHIC_CONTROL_FIELDS_LENGTH;
+                } else {
                     // Comments, plain text and unknown extensions: decoders skip them.
                     $otherMetadata = true;
+                }
+                if ($fieldsLength > 0) {
+                    // Decoders read the fields from the first sub-block and skip the rest of the extension.
+                    $length = $reader->readUint8();
+                    ++$blocks;
+                    if ($length === 0) {
+                        continue;
+                    }
+                    $reader->skip($length);
+                    $otherMetadata = $otherMetadata || $length > $fieldsLength;
                 }
             } elseif ($introducer === self::INTRODUCER_IMAGE) {
                 self::readImageDescriptor($reader, $width, $height);
@@ -120,6 +144,9 @@ final class GifParser implements ParserInterface
                 throw self::tooManyBlocks();
             }
             $blocks += $consumed;
+            if ($fieldsLength > 0 && $consumed > 1) {
+                $otherMetadata = true;
+            }
         }
 
         if ($frames === 0) {
