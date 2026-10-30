@@ -192,29 +192,38 @@ final class ByteReaderTest extends TestCase
         $reader->skipSubBlocks(10);
     }
 
-    public function testContainsFindsANeedleAcrossScanChunks(): void
+    public function testIndexOfFindsANeedleAcrossScanChunks(): void
     {
-        $data = str_repeat("\0", 65535) . "\xFF\xD9" . str_repeat("\0", 10);
+        $data = str_repeat("\0", 65535) . "\xFF\xD9" . str_repeat("\0", 10) . "\xFF\xD9";
 
-        self::assertTrue(self::reader($data)->contains("\xFF\xD9", 0));
-        self::assertTrue(self::reader($data)->contains("\xFF\xD9", 65535));
-        self::assertFalse(self::reader($data)->contains("\xFF\xD9", 65536));
-        self::assertFalse(self::reader(str_repeat("\0", 200000))->contains("\xFF\xD9", 0));
-        self::assertTrue(self::reader('abc')->contains('c', 2));
+        self::assertSame(65535, self::reader($data)->indexOf("\xFF\xD9", 0));
+        self::assertSame(65535, self::reader($data)->indexOf("\xFF\xD9", 65535));
+        self::assertSame(65547, self::reader($data)->indexOf("\xFF\xD9", 65536));
+        self::assertSame(-1, self::reader($data)->indexOf("\xFF\xD9", 65548));
+        self::assertSame(-1, self::reader(str_repeat("\0", 200000))->indexOf("\xFF\xD9", 0));
+        self::assertSame(2, self::reader('abc')->indexOf('c', 2));
+        self::assertSame(-1, self::reader('abc')->indexOf('c', 3));
     }
 
-    public function testContainsRefusesAnEmptyOrLongNeedle(): void
+    public function testIndexOfFindsANeedleAtTheStartOfALaterChunk(): void
+    {
+        $data = str_repeat("\0", 3 * 65536) . 'ab';
+
+        self::assertSame(3 * 65536, self::reader($data)->indexOf('ab', 1));
+    }
+
+    public function testIndexOfRefusesAnEmptyNeedle(): void
     {
         $this->expectException(InvalidArgumentException::class);
 
-        self::reader('abc')->contains('', 0);
+        self::reader('abc')->indexOf('', 0);
     }
 
-    public function testContainsRefusesANeedleLongerThan64Bytes(): void
+    public function testIndexOfRefusesANeedleLongerThan64Bytes(): void
     {
         $this->expectException(InvalidArgumentException::class);
 
-        self::reader('abc')->contains(str_repeat('a', 65), 0);
+        self::reader('abc')->indexOf(str_repeat('a', 65), 0);
     }
 
     public function testConstructorRefusesANegativeSize(): void

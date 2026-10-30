@@ -14,8 +14,8 @@ use Mfonte\SecureImageConverter\Validation\Limits;
  * VP8X headers that hold dimensions and flags, and the 16-byte header of each ANMF frame. Bitstreams are never
  * decoded.
  *
- * - The RIFF size must cover at least one chunk and fit in the file (bytes after it are ignored, as decoders ignore
- *   them); every chunk must fit in the RIFF payload. At most MAX_CHUNKS chunks are walked.
+ * - The RIFF size must cover at least one chunk and fit in the file (bytes after it are ignored by decoders, and
+ *   reported as trailing data); every chunk must fit in the RIFF payload. At most MAX_CHUNKS chunks are walked.
  * - Simple lossy (VP8): a key frame that is shown, a first partition inside the chunk, the start code 9D 01 2A and
  *   a non-zero 14-bit width and height. Simple lossless (VP8L): the signature 2F, version 0, 14-bit dimensions.
  * - Extended (VP8X): a 24-bit canvas width and height whose product fits in 32 bits, checked against the limits at
@@ -23,7 +23,8 @@ use Mfonte\SecureImageConverter\Validation\Limits;
  *   is the frame count, checked against the limits as soon as it exceeds Limits::maxFramesFor(). Without it, exactly
  *   one VP8 or VP8L bitstream must be present, with the canvas dimensions, and no ANMF chunk.
  *
- * Metadata: ICCP is the colour profile, EXIF is EXIF; XMP and unknown chunks are other metadata.
+ * Metadata: ICCP is the colour profile, EXIF is EXIF (and gives the orientation); XMP and unknown chunks are other
+ * metadata.
  *
  * @internal
  */
@@ -65,17 +66,19 @@ final class WebpParser implements ParserInterface
         $end = 8 + $riffSize;
 
         list($type, $length) = self::readChunkHeader($reader, $end);
+        // A RIFF payload of odd size is followed by a pad byte.
+        $trailingData = $reader->getSize() > $end + ($riffSize & 1);
         if ($type === 'VP8 ' || $type === 'VP8L') {
             list($width, $height) = self::readBitstreamSize($reader, $type, $length);
             $limits->assertImage($width, $height, 1);
 
-            return (new ImageInfo(ImageFormat::WEBP, $width, $height, 1, $reader->getSize()));
+            return (new ImageInfo(ImageFormat::WEBP, $width, $height, 1, $reader->getSize()))->withTrailingData($trailingData);
         }
         if ($type !== 'VP8X') {
             throw self::invalid('the first chunk is not VP8, VP8L or VP8X');
         }
 
-        return self::parseExtended($reader, $limits, $length, $end);
+        return self::parseExtended($reader, $limits, $length, $end)->withTrailingData($trailingData);
     }
 
     /**
@@ -105,6 +108,7 @@ final class WebpParser implements ParserInterface
         $iccProfile = false;
         $exif = false;
         $otherMetadata = false;
+        $orientation = ImageInfo::ORIENTATION_NORMAL;
 
         for ($chunks = 2; $reader->getPosition() < $end; ++$chunks) {
             if ($chunks > self::MAX_CHUNKS) {
@@ -139,6 +143,11 @@ final class WebpParser implements ParserInterface
                     $iccProfile = true;
                     break;
                 case 'EXIF':
+                    if (!$exif) {
+                        // The TIFF header, after an "Exif\0\0" prefix that some writers add.
+                        $prefix = strncmp($reader->read(min(6, $length)), "Exif\0\0", 6) === 0 ? 6 : 0;
+                        $orientation = ExifOrientation::read($reader, $start + 8 + $prefix, $length - $prefix);
+                    }
                     $exif = true;
                     break;
                 default:
@@ -160,7 +169,8 @@ final class WebpParser implements ParserInterface
         $limits->assertImage($width, $height, $frameCount);
 
         return (new ImageInfo(ImageFormat::WEBP, $width, $height, $frameCount, $reader->getSize()))
-            ->withMetadata($iccProfile, $exif, $otherMetadata);
+            ->withMetadata($iccProfile, $exif, $otherMetadata)
+            ->withOrientation($orientation);
     }
 
     /**

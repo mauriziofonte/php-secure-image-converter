@@ -36,11 +36,14 @@ final class ImageInfoTest extends TestCase
         self::assertFalse($info->hasIccProfile());
         self::assertFalse($info->hasExif());
         self::assertFalse($info->hasMetadata());
+        self::assertSame(ImageInfo::ORIENTATION_NORMAL, $info->getOrientation());
+        self::assertFalse($info->hasTrailingData());
     }
 
     public function testToArrayListsEveryFact(): void
     {
-        $info = (new ImageInfo(ImageFormat::PNG, 3, 2, 1, 99))->withBitDepth(16)->withMetadata(true, false, true);
+        $info = (new ImageInfo(ImageFormat::PNG, 3, 2, 1, 99))->withBitDepth(16)->withMetadata(true, false, true)
+            ->withOrientation(6)->withTrailingData(true);
 
         self::assertSame([
             'format' => 'png',
@@ -53,6 +56,8 @@ final class ImageInfoTest extends TestCase
             'icc_profile' => true,
             'exif' => false,
             'metadata' => true,
+            'orientation' => 6,
+            'trailing_data' => true,
         ], $info->toArray());
         self::assertFalse($info->isAnimated());
     }
@@ -129,9 +134,46 @@ final class ImageInfoTest extends TestCase
         (new ImageInfo(ImageFormat::TIFF, 1, 1, 1, 1))->withBitDepth(ImageInfo::BIT_DEPTH_MAX + 1);
     }
 
+    public function testOrientationAndTrailingDataAreSetOnCopies(): void
+    {
+        $info = new ImageInfo(ImageFormat::JPEG, 10, 10, 1, 10);
+        $turned = $info->withOrientation(ImageInfo::ORIENTATION_MAX);
+        $padded = $info->withTrailingData(true);
+
+        self::assertSame(ImageInfo::ORIENTATION_NORMAL, $info->getOrientation());
+        self::assertSame(ImageInfo::ORIENTATION_MAX, $turned->getOrientation());
+        self::assertFalse($info->hasTrailingData());
+        self::assertTrue($padded->hasTrailingData());
+        self::assertFalse($padded->withTrailingData(false)->hasTrailingData());
+    }
+
+    /**
+     * @return array<string, array{int}>
+     */
+    public static function invalidOrientations(): array
+    {
+        return [
+            'zero' => [0],
+            'nine' => [9],
+            'negative' => [-1],
+        ];
+    }
+
+    /**
+     * @dataProvider invalidOrientations
+     */
+    #[DataProvider('invalidOrientations')]
+    public function testOrientationMustBeAnExifValue(int $orientation): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        (new ImageInfo(ImageFormat::JPEG, 1, 1, 1, 1))->withOrientation($orientation);
+    }
+
     public function testSerializationRoundTrip(): void
     {
-        $info = (new ImageInfo(ImageFormat::GIF, 5, 6, 7, 8))->withBitDepth(16)->withMetadata(true, true, true);
+        $info = (new ImageInfo(ImageFormat::GIF, 5, 6, 7, 8))->withBitDepth(16)->withMetadata(true, true, true)
+            ->withOrientation(3)->withTrailingData(true);
 
         self::assertEquals($info, unserialize(serialize($info), ['allowed_classes' => [ImageInfo::class]]));
     }
@@ -151,6 +193,10 @@ final class ImageInfoTest extends TestCase
             'string width' => ['width', '10'],
             'integer flag' => ['iccProfile', 1],
             'null flag' => ['otherMetadata', null],
+            'orientation zero' => ['orientation', 0],
+            'orientation nine' => ['orientation', 9],
+            'string orientation' => ['orientation', '1'],
+            'integer trailing data flag' => ['trailingData', 0],
         ];
     }
 

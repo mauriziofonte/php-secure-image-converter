@@ -23,13 +23,13 @@ use Mfonte\SecureImageConverter\Validation\Limits;
  *   refused), 1 to 4 components with sampling factors from 1 to 4. The dimensions are checked against the limits as
  *   soon as the frame header is read.
  * - Every segment must fit in the file; a truncated header is refused. Once the first scan is reached, the image
- *   must end with an EOI marker (FF D9): either the file ends with it (the usual case, checked by reading the last
- *   two bytes), or it occurs somewhere after the scan, followed by appended data such as the video of a motion
- *   photo (checked by scanning the entropy-coded data for it, without decoding). A file without EOI is truncated.
+ *   must end with an EOI marker (FF D9), found by searching the bytes after the scan header (entropy-coded data
+ *   cannot contain FF D9, so the first match is the end of the image), without decoding them. A file without EOI is
+ *   truncated; bytes after the EOI (the video of a motion photo, an appended archive) are trailing data.
  *
  * Metadata: APP1 "Exif" is EXIF, APP2 "ICC_PROFILE" is the colour profile; APP0 JFIF and APP14 Adobe carry decoding
  * parameters, not metadata; every other APPn segment (XMP, IPTC, MPF, FlashPix...) and every comment is other
- * metadata.
+ * metadata. The orientation comes from the first EXIF segment.
  *
  * @internal
  */
@@ -76,6 +76,7 @@ final class JpegParser implements ParserInterface
         $iccProfile = false;
         $exif = false;
         $otherMetadata = false;
+        $orientation = ImageInfo::ORIENTATION_NORMAL;
 
         for ($segments = 1; ; ++$segments) {
             if ($segments > self::MAX_SEGMENTS) {
@@ -113,17 +114,22 @@ final class JpegParser implements ParserInterface
                     throw self::invalid('a scan precedes the frame header');
                 }
                 self::checkScanHeader($reader, $payloadLength);
-                $reader->seek($payloadEnd);
-                if (!self::hasEndOfImage($reader)) {
+                $endOfImage = $reader->indexOf("\xFF\xD9", $payloadEnd);
+                if ($endOfImage < 0) {
                     throw ByteReader::truncated();
                 }
 
                 return (new ImageInfo(ImageFormat::JPEG, $frame[0], $frame[1], 1, $reader->getSize()))
-                    ->withBitDepth($frame[2])
-                    ->withMetadata($iccProfile, $exif, $otherMetadata);
+                    ->withMetadata($iccProfile, $exif, $otherMetadata)
+                    ->withOrientation($orientation)
+                    ->withTrailingData($endOfImage + 2 < $reader->getSize());
             } elseif (($marker >= 0xE0 && $marker <= 0xEF) || $marker === self::MARKER_COM) {
                 $identifier = $reader->read(min($payloadLength, 12));
                 if ($marker === 0xE1 && strncmp($identifier, "Exif\0", 5) === 0) {
+                    if (!$exif) {
+                        $tiffStart = $payloadEnd - $payloadLength + 6;
+                        $orientation = ExifOrientation::read($reader, $tiffStart, $payloadEnd - $tiffStart);
+                    }
                     $exif = true;
                 } elseif ($marker === 0xE2 && $identifier === "ICC_PROFILE\0") {
                     $iccProfile = true;
@@ -176,7 +182,7 @@ final class JpegParser implements ParserInterface
      * @throws InvalidImageException
      * @throws UnsupportedFormatException
      *
-     * @return array{0: int, 1: int, 2: int} width, height and sample precision
+     * @return array{0: int, 1: int} width and height
      */
     private static function readFrameHeader(ByteReader $reader, int $payloadLength): array
     {
@@ -209,7 +215,7 @@ final class JpegParser implements ParserInterface
             }
         }
 
-        return [$width, $height, $precision];
+        return [$width, $height];
     }
 
     /**
@@ -224,27 +230,6 @@ final class JpegParser implements ParserInterface
         if ($components < 1 || $components > 4 || $payloadLength !== 4 + 2 * $components) {
             throw self::invalid('the scan header has an invalid component count or length');
         }
-    }
-
-    /**
-     * Whether an EOI marker follows the first scan header: at the end of the file, or anywhere after the scan.
-     * Entropy-coded data cannot contain FF D9 (an FF data byte is always followed by 00), so the first match after the
-     * scan header is the end of the image.
-     *
-     * @throws InvalidImageException
-     */
-    private static function hasEndOfImage(ByteReader $reader): bool
-    {
-        $scanStart = $reader->getPosition();
-        if ($reader->getSize() - $scanStart < 2) {
-            return false;
-        }
-        $reader->seek($reader->getSize() - 2);
-        if ($reader->read(2) === "\xFF\xD9") {
-            return true;
-        }
-
-        return $reader->contains("\xFF\xD9", $scanStart);
     }
 
     private static function invalid(string $problem): InvalidImageException

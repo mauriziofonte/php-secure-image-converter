@@ -70,9 +70,22 @@ final class ImageCorpus
         $greySof = ImageBuilder::find($grey, "\xFF\xC0");
 
         return [
-            'jpeg/valid-grey.jpg' => self::committed(ImageBuilder::jpeg(16, 8), self::accept(ImageFormat::JPEG, 16, 8, 1, ['bit_depth' => 8, 'icc_profile' => false, 'exif' => false, 'metadata' => false])),
+            'jpeg/valid-grey.jpg' => self::committed(ImageBuilder::jpeg(16, 8), self::accept(ImageFormat::JPEG, 16, 8, 1, ['bit_depth' => 8, 'icc_profile' => false, 'exif' => false, 'metadata' => false, 'orientation' => 1, 'trailing_data' => false])),
             'jpeg/valid-colour.jpg' => self::committed($valid, self::accept(ImageFormat::JPEG, 33, 17)),
             'jpeg/valid-progressive.jpg' => self::committed(ImageBuilder::progressiveJpeg(20, 12), self::accept(ImageFormat::JPEG, 20, 12)),
+            'jpeg/valid-exif-orientation.jpg' => self::committed(
+                ImageBuilder::jpeg(16, 8, 1, ImageBuilder::jpegSegment(0xE1, "Exif\0\0" . ImageBuilder::exifOrientation(6))),
+                self::accept(ImageFormat::JPEG, 16, 8, 1, ['exif' => true, 'orientation' => 6])
+            ),
+            'jpeg/valid-exif-orientation-big-endian.jpg' => self::committed(
+                ImageBuilder::jpeg(16, 8, 1, ImageBuilder::jpegSegment(0xE1, "Exif\0\0" . ImageBuilder::exifOrientation(8, true))),
+                self::accept(ImageFormat::JPEG, 16, 8, 1, ['exif' => true, 'orientation' => 8])
+            ),
+            // An orientation outside 1 to 8 is ignored, as viewers ignore it.
+            'jpeg/valid-exif-orientation-9.jpg' => self::committed(
+                ImageBuilder::jpeg(16, 8, 1, ImageBuilder::jpegSegment(0xE1, "Exif\0\0" . ImageBuilder::exifOrientation(9))),
+                self::accept(ImageFormat::JPEG, 16, 8, 1, ['exif' => true, 'orientation' => 1])
+            ),
             'jpeg/valid-exif-icc.jpg' => self::committed(
                 ImageBuilder::jpeg(8, 8, 3, ImageBuilder::jpegExif() . ImageBuilder::jpegIcc()),
                 self::accept(ImageFormat::JPEG, 8, 8, 1, ['icc_profile' => true, 'exif' => true, 'metadata' => true])
@@ -89,7 +102,10 @@ final class ImageCorpus
             ),
             // Data after the end of the image (a motion photo video, a ZIP archive) is ignored by decoders and dropped
             // by conversion.
-            'jpeg/valid-trailing-zip.jpg' => self::committed($grey . "PK\x03\x04" . ImageBuilder::repeat("\0", 26) . 'payload.txt', self::accept(ImageFormat::JPEG, 8, 8)),
+            'jpeg/valid-trailing-zip.jpg' => self::committed(
+                $grey . "PK\x03\x04" . ImageBuilder::repeat("\0", 26) . 'payload.txt',
+                self::accept(ImageFormat::JPEG, 8, 8, 1, ['trailing_data' => true])
+            ),
             'jpeg/bomb-65535x65535.jpg' => self::committed(ImageBuilder::patch($grey, $greySof + 5, pack('nn', 65535, 65535)), self::reject(ErrorCode::IMAGE_TOO_LARGE, true)),
             'jpeg/bomb-exif-flood.jpg' => self::committed(
                 ImageBuilder::jpeg(8, 8, 1, ImageBuilder::repeat(ImageBuilder::jpegSegment(0xE1, "Exif\0\0"), 1100)),
@@ -125,7 +141,7 @@ final class ImageCorpus
         $frameControl = ImageBuilder::pngChunk('fcTL', pack('NNNNNnnCC', 0, 1, 1, 0, 0, 1, 10, 0, 0));
 
         return [
-            'png/valid-rgb.png' => self::committed($valid, self::accept(ImageFormat::PNG, 16, 8, 1, ['bit_depth' => 8, 'icc_profile' => false, 'exif' => false, 'metadata' => false])),
+            'png/valid-rgb.png' => self::committed($valid, self::accept(ImageFormat::PNG, 16, 8, 1, ['bit_depth' => 8, 'icc_profile' => false, 'exif' => false, 'metadata' => false, 'orientation' => 1, 'trailing_data' => false])),
             'png/valid-grey-1-bit.png' => self::committed(ImageBuilder::png(33, 17, 1, 0), self::accept(ImageFormat::PNG, 33, 17, 1, ['bit_depth' => 8])),
             'png/valid-palette.png' => self::committed(ImageBuilder::png(10, 10, 8, 3), self::accept(ImageFormat::PNG, 10, 10)),
             'png/valid-rgba-16-bit.png' => self::committed(ImageBuilder::png(4, 4, 16, 6), self::accept(ImageFormat::PNG, 4, 4, 1, ['bit_depth' => 16])),
@@ -135,7 +151,14 @@ final class ImageCorpus
                 self::accept(ImageFormat::PNG, 8, 8, 1, ['icc_profile' => true, 'exif' => true, 'metadata' => true])
             ),
             'png/valid-animated.png' => self::committed(ImageBuilder::apng(12, 6, 4), self::accept(ImageFormat::PNG, 12, 6, 4)),
-            'png/valid-trailing-zip.png' => self::committed($valid . "PK\x05\x06" . ImageBuilder::repeat("\0", 18), self::accept(ImageFormat::PNG, 16, 8)),
+            'png/valid-trailing-zip.png' => self::committed(
+                $valid . "PK\x05\x06" . ImageBuilder::repeat("\0", 18),
+                self::accept(ImageFormat::PNG, 16, 8, 1, ['trailing_data' => true])
+            ),
+            'png/valid-exif-orientation.png' => self::committed(
+                ImageBuilder::png(8, 4, 8, 2, ImageBuilder::pngChunk('eXIf', ImageBuilder::exifOrientation(3, true))),
+                self::accept(ImageFormat::PNG, 8, 4, 1, ['exif' => true, 'orientation' => 3])
+            ),
             // The most chunks a file may have, then one too many: the walk stays far below 50 ms.
             'png/valid-most-chunks.png' => self::generated(
                 ImageBuilder::png(8, 8, 8, 2, ImageBuilder::repeat(ImageBuilder::pngChunk('tEXt', "k\0"), PngParser::MAX_CHUNKS - 3)),
@@ -182,10 +205,15 @@ final class ImageCorpus
         $valid = ImageBuilder::gif(16, 8);
 
         return [
-            'gif/valid-still.gif' => self::committed($valid, self::accept(ImageFormat::GIF, 16, 8, 1, ['bit_depth' => 8, 'icc_profile' => false, 'exif' => false, 'metadata' => false])),
+            'gif/valid-still.gif' => self::committed($valid, self::accept(ImageFormat::GIF, 16, 8, 1, ['bit_depth' => 8, 'icc_profile' => false, 'exif' => false, 'metadata' => false, 'orientation' => 1, 'trailing_data' => false])),
             'gif/valid-gif87a.gif' => self::committed(ImageBuilder::gif(5, 3, 1, '', '87a'), self::accept(ImageFormat::GIF, 5, 3)),
             'gif/valid-animated.gif' => self::committed(ImageBuilder::gif(12, 6, 4), self::accept(ImageFormat::GIF, 12, 6, 4, ['metadata' => false])),
             'gif/valid-comment.gif' => self::committed(ImageBuilder::gif(8, 8, 1, ImageBuilder::gifComment('corpus')), self::accept(ImageFormat::GIF, 8, 8, 1, ['metadata' => true])),
+            // A GIFAR: a GIF followed by a Java archive.
+            'gif/valid-gifar.gif' => self::committed(
+                $valid . "PK\x03\x04" . ImageBuilder::repeat("\0", 26) . "PK\x05\x06" . ImageBuilder::repeat("\0", 18),
+                self::accept(ImageFormat::GIF, 16, 8, 1, ['trailing_data' => true])
+            ),
             // The most blocks a file may have (one-byte comment sub-blocks), then one too many.
             'gif/valid-most-blocks.gif' => self::generated(self::gifOfSubBlocks(GifParser::MAX_BLOCKS - 6), self::accept(ImageFormat::GIF, 8, 8, 1, ['metadata' => true])),
             'gif/spoof-too-many-blocks.gif' => self::generated(self::gifOfSubBlocks(GifParser::MAX_BLOCKS - 5), self::reject(ErrorCode::INVALID_IMAGE)),
@@ -225,7 +253,7 @@ final class ImageCorpus
         $os2 = 'BM' . pack('VvvV', 14 + 64 + 16, 0, 0, 14 + 64) . pack('VVVvvVV', 64, 2, 2, 1, 24, 0, 16) . ImageBuilder::repeat("\0", 64 - 24 + 16);
 
         return [
-            'bmp/valid-24-bit.bmp' => self::committed($valid, self::accept(ImageFormat::BMP, 7, 5, 1, ['bit_depth' => 8, 'icc_profile' => false, 'exif' => false, 'metadata' => false])),
+            'bmp/valid-24-bit.bmp' => self::committed($valid, self::accept(ImageFormat::BMP, 7, 5, 1, ['bit_depth' => 8, 'icc_profile' => false, 'exif' => false, 'metadata' => false, 'orientation' => 1, 'trailing_data' => false])),
             'bmp/valid-1-bit.bmp' => self::committed(ImageBuilder::bmp(9, 3, 1), self::accept(ImageFormat::BMP, 9, 3)),
             'bmp/valid-8-bit-palette.bmp' => self::committed($paletted, self::accept(ImageFormat::BMP, 4, 4)),
             'bmp/valid-rle8.bmp' => self::committed(ImageBuilder::bmp(300, 3, 8, 1), self::accept(ImageFormat::BMP, 300, 3)),
@@ -236,6 +264,7 @@ final class ImageCorpus
             ),
             'bmp/valid-top-down.bmp' => self::committed(ImageBuilder::bmp(5, 4, 24, 0, 40, true), self::accept(ImageFormat::BMP, 5, 4)),
             'bmp/valid-os2-core.bmp' => self::committed(ImageBuilder::bmpCore(6, 3), self::accept(ImageFormat::BMP, 6, 3)),
+            'bmp/valid-trailing-php.bmp' => self::committed($valid . '<?php echo "payload"; ?>', self::accept(ImageFormat::BMP, 7, 5, 1, ['trailing_data' => true])),
             'bmp/bomb-100000x100000.bmp' => self::committed(ImageBuilder::patch($valid, 18, pack('VV', 100000, 100000)), self::reject(ErrorCode::IMAGE_TOO_LARGE, true)),
             'bmp/spoof-planes.bmp' => self::committed(ImageBuilder::patch($valid, 26, pack('v', 2)), self::reject(ErrorCode::INVALID_IMAGE)),
             'bmp/spoof-bit-count.bmp' => self::committed(ImageBuilder::patch($valid, 30, pack('V', 1)), self::reject(ErrorCode::INVALID_IMAGE)),
@@ -266,7 +295,7 @@ final class ImageCorpus
             . ImageBuilder::uint24(100) . "\0" . ImageBuilder::webpChunk('VP8L', ImageBuilder::vp8l(8, 8)));
 
         return [
-            'webp/valid-lossy.webp' => self::committed($lossy, self::accept(ImageFormat::WEBP, 16, 16, 1, ['bit_depth' => 8, 'icc_profile' => false, 'exif' => false, 'metadata' => false])),
+            'webp/valid-lossy.webp' => self::committed($lossy, self::accept(ImageFormat::WEBP, 16, 16, 1, ['bit_depth' => 8, 'icc_profile' => false, 'exif' => false, 'metadata' => false, 'orientation' => 1, 'trailing_data' => false])),
             'webp/valid-lossless.webp' => self::committed($lossless, self::accept(ImageFormat::WEBP, 24, 12)),
             'webp/valid-lossless-alpha.webp' => self::committed(ImageBuilder::webpLossless(7, 3, true), self::accept(ImageFormat::WEBP, 7, 3)),
             'webp/valid-extended-metadata.webp' => self::committed(
@@ -276,6 +305,15 @@ final class ImageCorpus
                 self::accept(ImageFormat::WEBP, 10, 6, 1, ['icc_profile' => true, 'exif' => true, 'metadata' => true])
             ),
             'webp/valid-animated.webp' => self::committed(ImageBuilder::webpAnimation(12, 6, 3), self::accept(ImageFormat::WEBP, 12, 6, 3)),
+            'webp/valid-exif-orientation.webp' => self::committed(
+                ImageBuilder::riff(ImageBuilder::vp8x(0x08, 8, 4) . ImageBuilder::webpChunk('VP8L', ImageBuilder::vp8l(8, 4))
+                    . ImageBuilder::webpChunk('EXIF', ImageBuilder::exifOrientation(5))),
+                self::accept(ImageFormat::WEBP, 8, 4, 1, ['exif' => true, 'orientation' => 5])
+            ),
+            'webp/valid-trailing-zip.webp' => self::committed(
+                $lossless . "PK\x05\x06" . ImageBuilder::repeat("\0", 18),
+                self::accept(ImageFormat::WEBP, 24, 12, 1, ['trailing_data' => true])
+            ),
             // The most chunks an extended file may have, then one too many.
             'webp/valid-most-chunks.webp' => self::generated(self::webpOfChunks(WebpParser::MAX_CHUNKS - 2), self::accept(ImageFormat::WEBP, 8, 8, 1, ['metadata' => true])),
             'webp/spoof-too-many-chunks.webp' => self::generated(self::webpOfChunks(WebpParser::MAX_CHUNKS - 1), self::reject(ErrorCode::INVALID_IMAGE)),
@@ -320,7 +358,7 @@ final class ImageCorpus
         $sampleSizes = ImageBuilder::find($sequence, 'stsz');
 
         return [
-            'avif/valid-still.avif' => self::committed($still, self::accept(ImageFormat::AVIF, 8, 8, 1, ['bit_depth' => 8, 'icc_profile' => false, 'exif' => false, 'metadata' => false])),
+            'avif/valid-still.avif' => self::committed($still, self::accept(ImageFormat::AVIF, 8, 8, 1, ['bit_depth' => 8, 'icc_profile' => false, 'exif' => false, 'metadata' => false, 'orientation' => 1, 'trailing_data' => false])),
             'avif/valid-sequence.avif' => self::committed($sequence, self::accept(ImageFormat::AVIF, 8, 8, 3)),
             'avif/bomb-100000x100000.avif' => self::committed(ImageBuilder::patch($still, $ispe + 8, pack('NN', 100000, 100000)), self::reject(ErrorCode::IMAGE_TOO_LARGE, true)),
             'avif/bomb-sequence-65535x65535.avif' => self::committed(ImageBuilder::patch($sequence, $sampleEntry + 28, pack('nn', 65535, 65535)), self::reject(ErrorCode::IMAGE_TOO_LARGE, true)),
@@ -341,7 +379,7 @@ final class ImageCorpus
         $tiny = ImageBuilder::tiff(8, 8);
 
         return [
-            'tiff/valid-grey-little-endian.tif' => self::committed($valid, self::accept(ImageFormat::TIFF, 9, 5, 1, ['bit_depth' => 8, 'icc_profile' => false, 'exif' => false, 'metadata' => false])),
+            'tiff/valid-grey-little-endian.tif' => self::committed($valid, self::accept(ImageFormat::TIFF, 9, 5, 1, ['bit_depth' => 8, 'icc_profile' => false, 'exif' => false, 'metadata' => false, 'orientation' => 1, 'trailing_data' => false])),
             'tiff/valid-rgb-big-endian.tif' => self::committed(ImageBuilder::tiff(6, 4, true, 3), self::accept(ImageFormat::TIFF, 6, 4)),
             'tiff/valid-metadata.tif' => self::committed(
                 ImageBuilder::tiff(4, 4, false, 1, 1, [270 => [2, "corpus\0"], 34675 => [7, ImageBuilder::iccProfile()]]),

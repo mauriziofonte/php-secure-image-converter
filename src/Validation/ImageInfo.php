@@ -23,6 +23,17 @@ use Mfonte\SecureImageConverter\Contract\ValidatedSerializationTrait;
  * - hasIccProfile() reports an embedded colour profile, hasExif() an EXIF block, and hasMetadata() any metadata
  *   other than the colour profile: EXIF, XMP, IPTC, comments, text chunks and unknown ancillary data, which
  *   metadata stripping removes.
+ * - getOrientation() is the EXIF orientation (1 to 8) a viewer applies when it auto-rotates: the Orientation tag of
+ *   the EXIF block of JPEG, PNG and WEBP and of the TIFF directory, or the irot and imir transforms of AVIF; 1 when
+ *   there is none or it cannot be read. With 5 to 8 an auto-rotating backend swaps width and height, so output
+ *   verification must expect either size.
+ * - hasTrailingData() reports bytes that the decoder of the image does not read: data after the end of the image
+ *   (an appended archive, script or second file, such as the ZIP of a GIFAR or of a JPEG polyglot), top-level AVIF
+ *   boxes that are not part of the image, and for TIFF further pages or bytes beyond every structure of the first
+ *   page. The flag errs towards true. Such a file must be re-encoded, never passed through unconverted.
+ *
+ * Only what a decoder of the first image produces is described: for TIFF, the first page (IFD0) alone is read and
+ * checked against the limits, later pages are neither counted nor checked, so backends must decode page 0 only.
  *
  * Immutable value object. Every property has a default, and the defaults form a valid instance (a one-pixel JPEG of
  * one byte without metadata); an unserialized instance is validated again, see ValidatedSerializationTrait.
@@ -33,6 +44,16 @@ final class ImageInfo
 
     public const BIT_DEPTH_MIN = 8;
     public const BIT_DEPTH_MAX = 64;
+
+    /**
+     * EXIF orientation of an image displayed as stored.
+     */
+    public const ORIENTATION_NORMAL = 1;
+
+    /**
+     * Largest EXIF orientation value: displayed after a quarter turn anticlockwise.
+     */
+    public const ORIENTATION_MAX = 8;
 
     /**
      * @var string
@@ -78,6 +99,16 @@ final class ImageInfo
      * @var bool
      */
     private $otherMetadata = false;
+
+    /**
+     * @var int
+     */
+    private $orientation = self::ORIENTATION_NORMAL;
+
+    /**
+     * @var bool
+     */
+    private $trailingData = false;
 
     /**
      * Describes an 8-bit image without colour profile or metadata; see withBitDepth() and withMetadata().
@@ -143,6 +174,31 @@ final class ImageInfo
         $clone->iccProfile = $iccProfile;
         $clone->exif = $exif;
         $clone->otherMetadata = $otherMetadata;
+
+        return $clone;
+    }
+
+    /**
+     * @param int $orientation EXIF orientation, from ORIENTATION_NORMAL (1) to ORIENTATION_MAX (8)
+     *
+     * @throws InvalidArgumentException when the orientation is out of range
+     */
+    public function withOrientation(int $orientation): self
+    {
+        self::assertRange('orientation', $orientation, self::ORIENTATION_NORMAL, self::ORIENTATION_MAX);
+        $clone = clone $this;
+        $clone->orientation = $orientation;
+
+        return $clone;
+    }
+
+    /**
+     * @param bool $trailingData whether the file holds data that decoders ignore after the image
+     */
+    public function withTrailingData(bool $trailingData): self
+    {
+        $clone = clone $this;
+        $clone->trailingData = $trailingData;
 
         return $clone;
     }
@@ -236,9 +292,26 @@ final class ImageInfo
     }
 
     /**
+     * EXIF orientation a viewer applies, from 1 (as stored) to 8; with 5 to 8 the displayed width and height are
+     * swapped.
+     */
+    public function getOrientation(): int
+    {
+        return $this->orientation;
+    }
+
+    /**
+     * Whether the file holds data that decoders ignore after the image (see the class description).
+     */
+    public function hasTrailingData(): bool
+    {
+        return $this->trailingData;
+    }
+
+    /**
      * Every value with snake_case keys, e.g. for logs.
      *
-     * @return array{format: string, mime_type: string, width: int, height: int, frame_count: int, byte_size: int, bit_depth: int, icc_profile: bool, exif: bool, metadata: bool}
+     * @return array{format: string, mime_type: string, width: int, height: int, frame_count: int, byte_size: int, bit_depth: int, icc_profile: bool, exif: bool, metadata: bool, orientation: int, trailing_data: bool}
      */
     public function toArray(): array
     {
@@ -253,6 +326,8 @@ final class ImageInfo
             'icc_profile' => $this->iccProfile,
             'exif' => $this->exif,
             'metadata' => $this->hasMetadata(),
+            'orientation' => $this->orientation,
+            'trailing_data' => $this->trailingData,
         ];
     }
 
@@ -267,7 +342,9 @@ final class ImageInfo
         try {
             return (new self($this->format, $this->width, $this->height, $this->frameCount, $this->byteSize))
                 ->withBitDepth($this->bitDepth)
-                ->withMetadata($this->iccProfile, $this->exif, $this->otherMetadata);
+                ->withMetadata($this->iccProfile, $this->exif, $this->otherMetadata)
+                ->withOrientation($this->orientation)
+                ->withTrailingData($this->trailingData);
         } catch (\TypeError $exception) {
             // unserialize() can give a property any type, whatever its @var tag says; strict_types makes a property
             // of the wrong type a TypeError instead of a silent conversion.

@@ -25,8 +25,9 @@ use Mfonte\SecureImageConverter\Validation\Limits;
  *   CRC is checked) must describe a non-empty region inside the canvas, and their number must equal the declared
  *   frame count.
  *
- * Metadata: iCCP is the colour profile, eXIf is EXIF; tEXt, zTXt, iTXt, tIME and every unknown ancillary chunk are
- * other metadata. Colour, transparency and animation chunks are not metadata.
+ * Metadata: iCCP is the colour profile, eXIf is EXIF (and gives the orientation); tEXt, zTXt, iTXt, tIME and every
+ * unknown ancillary chunk are other metadata. Colour, transparency and animation chunks are not metadata. Bytes
+ * after IEND are trailing data.
  *
  * @internal
  */
@@ -86,6 +87,7 @@ final class PngParser implements ParserInterface
         $iccProfile = false;
         $exif = false;
         $otherMetadata = false;
+        $orientation = ImageInfo::ORIENTATION_NORMAL;
 
         for ($chunks = 2; ; ++$chunks) {
             if ($chunks > self::MAX_CHUNKS) {
@@ -152,6 +154,11 @@ final class PngParser implements ParserInterface
                     $iccProfile = true;
                     break;
                 case 'eXIf':
+                    if (!$exif) {
+                        $payloadStart = $reader->getPosition();
+                        $orientation = ExifOrientation::read($reader, $payloadStart, $length);
+                        $reader->seek($payloadStart);
+                    }
                     $exif = true;
                     break;
                 default:
@@ -182,7 +189,9 @@ final class PngParser implements ParserInterface
 
         return (new ImageInfo(ImageFormat::PNG, $width, $height, $frameCount, $reader->getSize()))
             ->withBitDepth($bitDepth === 16 ? 16 : 8)
-            ->withMetadata($iccProfile, $exif, $otherMetadata);
+            ->withMetadata($iccProfile, $exif, $otherMetadata)
+            ->withOrientation($orientation)
+            ->withTrailingData($reader->getRemaining() > 0);
     }
 
     /**

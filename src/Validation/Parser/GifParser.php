@@ -24,7 +24,7 @@ use Mfonte\SecureImageConverter\Validation\Limits;
  *
  * Metadata: an ICCRGBG1 application extension is the colour profile; comments, XMP and unknown application
  * extensions are other metadata. NETSCAPE2.0 and ANIMEXTS1.0 loop extensions, graphic control and plain text
- * extensions are not metadata.
+ * extensions are not metadata. Bytes after the trailer (the archive of a GIFAR) are trailing data.
  *
  * @internal
  */
@@ -119,7 +119,8 @@ final class GifParser implements ParserInterface
         $limits->assertImage($width, $height, $frames);
 
         return (new ImageInfo(ImageFormat::GIF, $width, $height, $frames, $reader->getSize()))
-            ->withMetadata($iccProfile, false, $otherMetadata);
+            ->withMetadata($iccProfile, false, $otherMetadata)
+            ->withTrailingData($reader->getRemaining() > 0);
     }
 
     /**

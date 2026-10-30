@@ -26,7 +26,7 @@ final class ByteReader
     public const BUFFER_SIZE = 8192;
 
     /**
-     * Bytes read from the stream per step of contains().
+     * Bytes read from the stream per step of indexOf().
      */
     private const SCAN_CHUNK_SIZE = 65536;
 
@@ -288,8 +288,8 @@ final class ByteReader
     }
 
     /**
-     * Whether $needle occurs between $from and the end of the image. Reads that whole range, in chunks, without
-     * keeping it in memory.
+     * Offset of the first occurrence of $needle between $from and the end of the image, or -1. Reads that range in
+     * chunks of SCAN_CHUNK_SIZE bytes, without keeping it in memory; the position is then unspecified.
      *
      * @param string $needle 1 to 64 bytes
      * @param int    $from   offset where the search starts, from 0 to the size of the image
@@ -299,7 +299,7 @@ final class ByteReader
      *
      * @phpstan-impure
      */
-    public function contains(string $needle, int $from): bool
+    public function indexOf(string $needle, int $from): int
     {
         $needleLength = strlen($needle);
         if ($needleLength < 1 || $needleLength > 64) {
@@ -309,16 +309,17 @@ final class ByteReader
         $this->seek($from);
         $tail = '';
         while ($this->position < $this->size) {
-            $length = min(self::SCAN_CHUNK_SIZE, $this->size - $this->position);
-            $chunk = $tail . $this->read($length);
-            if (strpos($chunk, $needle) !== false) {
-                return true;
+            $chunkStart = $this->position - strlen($tail);
+            $chunk = $tail . $this->read(min(self::SCAN_CHUNK_SIZE, $this->size - $this->position));
+            $found = strpos($chunk, $needle);
+            if ($found !== false) {
+                return $chunkStart + $found;
             }
             // Keep the last needle length - 1 bytes, so that a match across two chunks is found.
             $tail = $needleLength > 1 ? (string) substr($chunk, 1 - $needleLength) : '';
         }
 
-        return false;
+        return -1;
     }
 
     /**

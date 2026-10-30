@@ -570,6 +570,21 @@ final class ImageBuilder
         return ($bigEndian ? "MM\0*" : "II*\0") . pack($long, 8) . $directory . pack($long, 0) . $overflow . $pixels;
     }
 
+    // EXIF ----------------------------------------------------------------------------------------------------------
+
+    /**
+     * The TIFF structure of an EXIF block whose IFD0 holds the Orientation tag alone, as a JPEG APP1 segment (after
+     * "Exif\0\0"), a PNG eXIf chunk or a WEBP EXIF chunk carries it.
+     */
+    public static function exifOrientation(int $orientation, bool $bigEndian = false): string
+    {
+        $short = $bigEndian ? 'n' : 'v';
+        $long = $bigEndian ? 'N' : 'V';
+
+        return ($bigEndian ? "MM\0*" : "II*\0") . pack($long, 8) . pack($short, 1)
+            . pack($short . $short . $long . $short . $short, 0x0112, 3, 1, $orientation, 0) . pack($long, 0);
+    }
+
     // SVG -----------------------------------------------------------------------------------------------------------
 
     public static function svg(string $prolog = ''): string
