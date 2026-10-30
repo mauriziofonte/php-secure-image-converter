@@ -25,8 +25,8 @@ namespace Mfonte\SecureImageConverter\Contract\Exception;
  * | `conversion_timeout`         | 422    | ConversionTimeoutException    | processing budget exhausted; a retry will not |
  * |                              |        |                               | help                                          |
  * | `isolation_unavailable`      | 503    | IsolationUnavailableException | required isolation level missing on the host  |
- * | `concurrency_limit`          | 503    | ConcurrencyLimitException     | no conversion slot free in time; retry later  |
- * |                              |        |                               | (with Retry-After)                            |
+ * | `concurrency_limit`          | 503    | ConcurrencyLimitException     | no conversion slot or key lock free in time;  |
+ * |                              |        |                               | retry later (Retry-After from the exception)  |
  * | `conversion_failed`          | 500    | ConversionFailedException     | no backend could produce the output           |
  * | `output_verification_failed` | 500    | OutputVerificationException   | the produced output was not what was asked    |
  * | `internal_error`             | 500    | InvalidArgumentException      | programming, configuration or integration     |
