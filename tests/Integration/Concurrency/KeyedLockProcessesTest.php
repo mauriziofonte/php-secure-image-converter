@@ -40,7 +40,7 @@ final class KeyedLockProcessesTest extends TestCase
 
     private const STRESS_WORKERS = 8;
 
-    private const STRESS_ITERATIONS = 250;
+    private const STRESS_ITERATIONS = 1000;
 
     /**
      * @var string
