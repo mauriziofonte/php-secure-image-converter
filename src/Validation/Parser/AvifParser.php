@@ -5,29 +5,34 @@ declare(strict_types=1);
 namespace Mfonte\SecureImageConverter\Validation\Parser;
 
 use Mfonte\SecureImageConverter\Contract\Exception\InvalidImageException;
+use Mfonte\SecureImageConverter\Contract\Exception\LimitExceededException;
 use Mfonte\SecureImageConverter\Contract\Exception\UnsupportedFormatException;
 use Mfonte\SecureImageConverter\Contract\ImageFormat;
 use Mfonte\SecureImageConverter\Validation\ImageInfo;
 use Mfonte\SecureImageConverter\Validation\Limits;
 
 /**
- * AVIF header parser: a bounded walk of the ISO-BMFF boxes that describe the image, without touching the coded data
- * (mdat) or decoding any AV1 bitstream.
+ * AVIF header parser: a bounded walk of the ISO-BMFF boxes that describe the image, plus the sequence header at the
+ * start of each AV1 image, without decoding any AV1 frame.
  *
  * - Boxes must nest inside their parent and the top-level boxes must tile the file up to its end: a truncated file is
  *   refused. At most MAX_BOXES boxes are visited and MAX_ENTRIES entries read from any table; the ftyp box is at most
- *   4 KiB and must list an "avif" or "avis" brand.
- * - Still image (meta box): the handler must be "pict" and the primary item (pitm) an AV1 image ("av01") or a grid
- *   of them ("grid"); other primary item types are refused as unsupported. Its "ispe" property gives the
- *   dimensions, which must be non-zero and are checked against the limits; its "av1C" (or else "pixi") property gives
- *   the bit depth, a "colr" property of type "prof" or "rICC" the colour profile. "Exif" items are EXIF, "mime" items
- *   (XMP) other metadata.
- * - Image sequence (moov box): the first track with a "pict" handler and an "av01" sample entry gives the frame
- *   count (its stsz or stz2 sample count, at least 1) and the dimensions (its sample entry), which then describe the
- *   image. Only the header of the size table is read, never its entries. A still primary item, when also present,
- *   is checked against the limits too.
- * - The limits are checked once the bounded walk ends: no box is ever expanded, so its cost does not depend on the
- *   declared dimensions or frame count.
+ *   4 KiB and must list an "avif" or "avis" brand. A box that a decoder reads once (ftyp, meta and moov at the top;
+ *   hdlr, pitm, iloc, iinf, iprp, iref, idat and dinf in meta; ipco and ipma in iprp; the boxes of a track's media
+ *   and sample tables) may not appear twice, an item may not be described or associated twice, and an image item may
+ *   not have two ispe, av1C, irot or imir properties: decoders disagree on which copy wins.
+ * - Still image (meta box): the handler must be "pict" and the primary item (pitm) an AV1 image ("av01"); grids and
+ *   other derived or coded items are refused as unsupported. Every AV1 image item (the primary image, its alpha plane,
+ *   thumbnails; at most MAX_IMAGES) needs one "ispe" property whose size is checked against the limits, and the AV1
+ *   sequence header of its data (located through iloc, in the file or in idat) may not allow frames larger than that
+ *   ispe. The primary item gives the dimensions; its "av1C" (or else "pixi") property the bit depth, a "colr"
+ *   property of type "prof" or "rICC" the colour profile, its "irot" then "imir" properties the orientation. "Exif"
+ *   items are EXIF, "mime" items (XMP) other metadata.
+ * - Image sequence (moov box): every track whose sample description is AV1 ("av01", whatever its handler; at most
+ *   MAX_IMAGES) is checked: its sample entry size and sample count (the header of stsz or stz2, never its entries)
+ *   against the limits, and the sequence header of its first sample against the sample entry size. The first such
+ *   track gives the dimensions and the frame count; the still primary item, when present, is checked too.
+ * - Top-level boxes other than ftyp, meta, moov and mdat are trailing data.
  *
  * @internal
  */
@@ -39,9 +44,14 @@ final class AvifParser implements ParserInterface
     public const MAX_BOXES = 16384;
 
     /**
-     * Largest number of entries read from an item, property or association table.
+     * Largest number of entries read from an item, property, association or location table.
      */
     public const MAX_ENTRIES = 16384;
+
+    /**
+     * Largest number of AV1 image items, and of AV1 tracks, in a file.
+     */
+    public const MAX_IMAGES = 16;
 
     private const FTYP_SIZE_MAX = 4096;
 
@@ -51,11 +61,26 @@ final class AvifParser implements ParserInterface
     private const BRANDS = ['avif', 'avis'];
 
     /**
-     * Primary item types this library processes.
+     * Top-level boxes that make up an AVIF image.
      *
      * @var list<string>
      */
-    private const IMAGE_ITEM_TYPES = ['av01', 'grid'];
+    private const IMAGE_BOXES = ['ftyp', 'meta', 'moov', 'mdat'];
+
+    /**
+     * Boxes that the meta box may hold once at most.
+     *
+     * @var list<string>
+     */
+    private const META_BOXES = ['hdlr', 'pitm', 'iloc', 'iinf', 'iprp', 'iref', 'idat', 'dinf'];
+
+    /**
+     * EXIF orientation for a transform that first mirrors left to right (index 1) or not (index 0), then rotates
+     * clockwise by the key in quarter turns.
+     *
+     * @var array<int, array{0: int, 1: int}>
+     */
+    private const ORIENTATIONS = [0 => [1, 2], 1 => [6, 7], 2 => [3, 4], 3 => [8, 5]];
 
     /**
      * @var int
@@ -77,36 +102,38 @@ final class AvifParser implements ParserInterface
 
         $still = null;
         $sequence = null;
+        $seen = [];
+        $trailingData = false;
         while ($reader->getPosition() < $size) {
             list($type, $start, $end) = $this->readBoxHeader($reader, $size);
+            if ($type === 'ftyp' || (($type === 'meta' || $type === 'moov') && isset($seen[$type]))) {
+                throw self::invalid('the file holds a top-level box twice');
+            }
+            $seen[$type] = true;
             if ($type === 'meta') {
-                if ($still !== null) {
-                    throw self::invalid('the file has more than one meta box');
-                }
-                $still = $this->parseMeta($reader, $start, $end);
-            } elseif ($type === 'moov' && $sequence === null) {
-                $sequence = $this->parseMovie($reader, $start, $end);
+                $still = $this->parseMeta($reader, $start, $end, $limits);
+            } elseif ($type === 'moov') {
+                $sequence = $this->parseMovie($reader, $start, $end, $limits);
+            } elseif (!in_array($type, self::IMAGE_BOXES, true)) {
+                $trailingData = true;
             }
             $reader->seek($end);
         }
 
-        if ($still !== null) {
-            $limits->assertImage($still['width'], $still['height'], 1);
-        }
         if ($sequence !== null) {
-            $limits->assertImage($sequence['width'], $sequence['height'], $sequence['frames']);
-            $info = new ImageInfo(ImageFormat::AVIF, $sequence['width'], $sequence['height'], $sequence['frames'], $size);
+            $info = new ImageInfo(ImageFormat::AVIF, $sequence[0], $sequence[1], $sequence[2], $size);
         } elseif ($still !== null) {
             $info = new ImageInfo(ImageFormat::AVIF, $still['width'], $still['height'], 1, $size);
         } else {
             throw self::invalid('the file has neither a primary image item nor an image sequence track');
         }
-
-        if ($still === null) {
-            return $info;
+        if ($still !== null) {
+            $info = $info->withBitDepth($still['bitDepth'])
+                ->withMetadata($still['icc'], $still['exif'], $still['metadata'])
+                ->withOrientation($still['orientation']);
         }
 
-        return $info->withBitDepth($still['bitDepth'])->withMetadata($still['icc'], $still['exif'], $still['metadata']);
+        return $info->withTrailingData($trailingData);
     }
 
     /**
@@ -124,94 +151,71 @@ final class AvifParser implements ParserInterface
     }
 
     /**
-     * Reads the meta box of a still image and returns the description of its primary item.
+     * Reads the meta box of a still image, checks every AV1 image item and describes the primary one.
      *
      * @throws InvalidImageException
+     * @throws LimitExceededException
      * @throws UnsupportedFormatException
      *
-     * @return array{width: int, height: int, bitDepth: int, icc: bool, exif: bool, metadata: bool}
+     * @return array{width: int, height: int, bitDepth: int, icc: bool, exif: bool, metadata: bool, orientation: int}
      */
-    private function parseMeta(ByteReader $reader, int $start, int $end): array
+    private function parseMeta(ByteReader $reader, int $start, int $end, Limits $limits): array
     {
         $reader->seek($start);
         self::readFullBoxHeader($reader, $end, 0);
-
-        $handler = null;
-        $primary = null;
-        $itemInfo = null;
-        $properties = null;
-        $associations = null;
-        while ($reader->getPosition() < $end) {
-            list($type, $childStart, $childEnd) = $this->readBoxHeader($reader, $end);
-            switch ($type) {
-                case 'hdlr':
-                    self::readFullBoxHeader($reader, $childEnd, 0);
-                    $reader->skip(min(4, $childEnd - $reader->getPosition()));
-                    $handler = self::readBytes($reader, $childEnd, 4);
-                    break;
-                case 'pitm':
-                    $version = self::readFullBoxHeader($reader, $childEnd, 1);
-                    $primary = $version === 0 ? self::readUint16($reader, $childEnd) : self::readUint32($reader, $childEnd);
-                    break;
-                case 'iinf':
-                    $itemInfo = [$childStart, $childEnd];
-                    break;
-                case 'iprp':
-                    list($properties, $associations) = $this->findPropertyBoxes($reader, $childStart, $childEnd);
-                    break;
-            }
-            $reader->seek($childEnd);
-        }
-
-        if ($handler !== 'pict') {
+        $boxes = $this->findChildren($reader, $reader->getPosition(), $end, self::META_BOXES);
+        if (!isset($boxes['hdlr']) || $this->readHandler($reader, $boxes['hdlr']) !== 'pict') {
             throw self::invalid('the meta box has no "pict" handler');
         }
-        if ($primary === null || $itemInfo === null || $properties === null || $associations === null) {
-            throw self::invalid('the meta box lacks the primary item, item information or item properties');
+        if (!isset($boxes['pitm'], $boxes['iinf'], $boxes['iprp'], $boxes['iloc'])) {
+            throw self::invalid('the meta box lacks the primary item, item information, locations or properties');
         }
 
-        $items = $this->readItemTypes($reader, $itemInfo[0], $itemInfo[1]);
+        $reader->seek($boxes['pitm'][0]);
+        $version = self::readFullBoxHeader($reader, $boxes['pitm'][1], 1);
+        $primary = $version === 0 ? self::readUint16($reader, $boxes['pitm'][1]) : self::readUint32($reader, $boxes['pitm'][1]);
+        $items = $this->readItemTypes($reader, $boxes['iinf'][0], $boxes['iinf'][1]);
         if (!isset($items[$primary])) {
             throw self::invalid('the primary item is not described');
         }
-        if (!in_array($items[$primary], self::IMAGE_ITEM_TYPES, true)) {
-            throw new UnsupportedFormatException('The primary item of this AVIF file is not an AV1 image or grid.');
+        if ($items[$primary] !== 'av01') {
+            throw new UnsupportedFormatException('AVIF images whose primary item is a grid or not an AV1 image are not supported.');
+        }
+        $images = array_keys($items, 'av01', true);
+        if (count($images) > self::MAX_IMAGES) {
+            throw new UnsupportedFormatException(sprintf('AVIF files with more than %d AV1 image items are not supported.', self::MAX_IMAGES));
         }
 
-        $propertyBoxes = $this->readPropertyList($reader, $properties[0], $properties[1]);
-        $description = ['width' => 0, 'height' => 0, 'bitDepth' => 8, 'icc' => false, 'exif' => false, 'metadata' => false];
-        $codecBits = 0;
-        $pixelBits = 0;
-        foreach ($this->readAssociations($reader, $associations[0], $associations[1], $primary) as $index) {
-            if (!isset($propertyBoxes[$index])) {
-                throw self::invalid('the primary item is associated with a missing property');
-            }
-            list($type, $propertyStart, $propertyEnd) = $propertyBoxes[$index];
-            $reader->seek($propertyStart);
-            if ($type === 'ispe') {
-                self::readFullBoxHeader($reader, $propertyEnd, 0);
-                $description['width'] = self::readUint32($reader, $propertyEnd);
-                $description['height'] = self::readUint32($reader, $propertyEnd);
-            } elseif ($type === 'av1C') {
-                $configuration = self::readBytes($reader, $propertyEnd, 3);
-                $flags = ord($configuration[2]);
-                $codecBits = ($flags & 0x40) === 0 ? 8 : (($flags & 0x20) === 0 ? 10 : 12);
-            } elseif ($type === 'pixi') {
-                self::readFullBoxHeader($reader, $propertyEnd, 0);
-                $channels = ord(self::readBytes($reader, $propertyEnd, 1));
-                foreach (str_split(self::readBytes($reader, $propertyEnd, max(1, $channels))) as $bits) {
-                    $pixelBits = max($pixelBits, ord($bits));
-                }
-            } elseif ($type === 'colr') {
-                $colourType = self::readBytes($reader, $propertyEnd, 4);
-                $description['icc'] = $description['icc'] || $colourType === 'prof' || $colourType === 'rICC';
+        $propertyBoxes = $this->findChildren($reader, $boxes['iprp'][0], $boxes['iprp'][1], ['ipco', 'ipma']);
+        if (!isset($propertyBoxes['ipco'], $propertyBoxes['ipma'])) {
+            throw self::invalid('the iprp box lacks ipco or ipma');
+        }
+        $properties = $this->readPropertyList($reader, $propertyBoxes['ipco'][0], $propertyBoxes['ipco'][1]);
+        $associations = $this->readAssociations($reader, $propertyBoxes['ipma'][0], $propertyBoxes['ipma'][1]);
+
+        $description = ['width' => 0, 'height' => 0, 'bitDepth' => 8, 'icc' => false, 'exif' => false, 'metadata' => false, 'orientation' => ImageInfo::ORIENTATION_NORMAL];
+        $sizes = [];
+        foreach ($images as $item) {
+            $image = $this->readImageProperties($reader, $properties, $associations[$item] ?? []);
+            $limits->assertImage($image['width'], $image['height'], 1);
+            $sizes[$item] = [$image['width'], $image['height']];
+            if ($item === $primary) {
+                $description = ['exif' => false, 'metadata' => false] + $image;
             }
         }
-        if ($description['width'] === 0 || $description['height'] === 0) {
-            throw self::invalid('the primary item has no ispe property or a zero width or height');
+
+        // The coded sizes are read once every declared size has passed the limits.
+        $locations = $this->readItemLocations($reader, $boxes['iloc'], $boxes['idat'] ?? null, $images);
+        foreach ($sizes as $item => $size) {
+            if (!isset($locations[$item])) {
+                throw self::invalid('an image item has no data location');
+            }
+            list($codedWidth, $codedHeight) = Av1SequenceHeader::maxFrameSize($reader, $locations[$item][0], $locations[$item][1]);
+            if ($codedWidth > $size[0] || $codedHeight > $size[1]) {
+                throw self::invalid('the AV1 data of an image item allows frames larger than its ispe property');
+            }
         }
-        // The codec configuration is authoritative; pixi describes the reconstructed image of a derived item.
-        $description['bitDepth'] = $codecBits > 0 ? $codecBits : min(64, max(8, $pixelBits));
+
         $description['exif'] = in_array('Exif', $items, true);
         $description['metadata'] = in_array('mime', $items, true);
 
@@ -219,31 +223,145 @@ final class AvifParser implements ParserInterface
     }
 
     /**
-     * Finds the ipco and ipma boxes inside iprp.
+     * Reads the properties associated with one AV1 image item.
+     *
+     * @param array<int, array{0: string, 1: int, 2: int}> $properties property boxes by 1-based index
+     * @param list<int>                                    $indices    the indices associated with the item, in order
      *
      * @throws InvalidImageException
      *
-     * @return array{0: array{0: int, 1: int}, 1: array{0: int, 1: int}}
+     * @return array{width: int, height: int, bitDepth: int, icc: bool, orientation: int}
      */
-    private function findPropertyBoxes(ByteReader $reader, int $start, int $end): array
+    private function readImageProperties(ByteReader $reader, array $properties, array $indices): array
     {
-        $container = null;
-        $associations = null;
+        $size = null;
+        $configurations = 0;
+        $codecBits = 0;
+        $pixelBits = 0;
+        $icc = false;
+        $angle = null;
+        $mirror = null;
+        foreach ($indices as $index) {
+            if (!isset($properties[$index])) {
+                throw self::invalid('an item is associated with a missing property');
+            }
+            list($type, $start, $end) = $properties[$index];
+            $reader->seek($start);
+            switch ($type) {
+                case 'ispe':
+                    if ($size !== null) {
+                        throw self::invalid('an image item has more than one ispe property');
+                    }
+                    self::readFullBoxHeader($reader, $end, 0);
+                    $size = [self::readUint32($reader, $end), self::readUint32($reader, $end)];
+                    break;
+                case 'av1C':
+                    if (++$configurations > 1) {
+                        throw self::invalid('an image item has more than one av1C property');
+                    }
+                    $flags = ord(self::readBytes($reader, $end, 3)[2]);
+                    $codecBits = ($flags & 0x40) === 0 ? 8 : (($flags & 0x20) === 0 ? 10 : 12);
+                    break;
+                case 'pixi':
+                    self::readFullBoxHeader($reader, $end, 0);
+                    $channels = ord(self::readBytes($reader, $end, 1));
+                    foreach (str_split(self::readBytes($reader, $end, max(1, $channels))) as $bits) {
+                        $pixelBits = max($pixelBits, ord($bits));
+                    }
+                    break;
+                case 'colr':
+                    $colourType = self::readBytes($reader, $end, 4);
+                    $icc = $icc || $colourType === 'prof' || $colourType === 'rICC';
+                    break;
+                case 'irot':
+                case 'imir':
+                    if (($type === 'irot' ? $angle : $mirror) !== null) {
+                        throw self::invalid('an image item has more than one ' . $type . ' property');
+                    }
+                    $value = ord(self::readBytes($reader, $end, 1));
+                    if ($type === 'irot') {
+                        $angle = $value & 0x03;
+                    } else {
+                        $mirror = $value & 0x01;
+                    }
+                    break;
+            }
+        }
+        if ($size === null || $size[0] === 0 || $size[1] === 0) {
+            throw self::invalid('an image item has no ispe property or a zero width or height');
+        }
+
+        return [
+            'width' => $size[0],
+            'height' => $size[1],
+            // The codec configuration is authoritative; pixi describes the reconstructed image of a derived item.
+            'bitDepth' => $codecBits > 0 ? $codecBits : min(64, max(8, $pixelBits)),
+            'icc' => $icc,
+            'orientation' => self::orientation($angle, $mirror),
+        ];
+    }
+
+    /**
+     * EXIF orientation of an item rotated by irot, then mirrored by imir: the order HEIF requires and libavif applies
+     * whatever the order of the associations.
+     *
+     * @param int|null $angle  irot angle: anticlockwise quarter turns
+     * @param int|null $mirror imir mode: 0 exchanges top and bottom, 1 left and right (ISO/IEC 23008-12:2022)
+     */
+    private static function orientation(?int $angle, ?int $mirror): int
+    {
+        $rotation = (4 - ($angle === null ? 0 : $angle)) % 4;
+        if ($mirror === null) {
+            return self::ORIENTATIONS[$rotation][0];
+        }
+        // Mirroring left to right after a clockwise rotation r equals mirroring first, then rotating by -r; top to
+        // bottom adds a half turn.
+        $rotation = ($mirror === 1 ? 4 - $rotation : 6 - $rotation) % 4;
+
+        return self::ORIENTATIONS[$rotation][1];
+    }
+
+    /**
+     * Payload bounds of the children of the wanted types, each of which may appear once at most.
+     *
+     * @param list<string> $wanted
+     *
+     * @throws InvalidImageException
+     *
+     * @return array<string, array{0: int, 1: int}>
+     */
+    private function findChildren(ByteReader $reader, int $start, int $end, array $wanted): array
+    {
+        $found = [];
         $reader->seek($start);
         while ($reader->getPosition() < $end) {
             list($type, $childStart, $childEnd) = $this->readBoxHeader($reader, $end);
-            if ($type === 'ipco' && $container === null) {
-                $container = [$childStart, $childEnd];
-            } elseif ($type === 'ipma' && $associations === null) {
-                $associations = [$childStart, $childEnd];
+            if (in_array($type, $wanted, true)) {
+                if (isset($found[$type])) {
+                    throw self::invalid('a box appears twice where only one is allowed');
+                }
+                $found[$type] = [$childStart, $childEnd];
             }
             $reader->seek($childEnd);
         }
-        if ($container === null || $associations === null) {
-            throw self::invalid('the iprp box lacks ipco or ipma');
-        }
 
-        return [$container, $associations];
+        return $found;
+    }
+
+    /**
+     * Handler type of an hdlr box.
+     *
+     * @param array{0: int, 1: int} $box payload bounds
+     *
+     * @throws InvalidImageException
+     */
+    private function readHandler(ByteReader $reader, array $box): string
+    {
+        $reader->seek($box[0]);
+        self::readFullBoxHeader($reader, $box[1], 0);
+        $reader->skip(min(4, $box[1] - $reader->getPosition()));
+
+        return self::readBytes($reader, $box[1], 4);
     }
 
     /**
@@ -271,6 +389,9 @@ final class AvifParser implements ParserInterface
             $entryVersion = self::readFullBoxHeader($reader, $entryEnd, 3);
             if ($entryVersion >= 2) {
                 $id = $entryVersion === 2 ? self::readUint16($reader, $entryEnd) : self::readUint32($reader, $entryEnd);
+                if (isset($items[$id])) {
+                    throw self::invalid('the iinf box describes an item twice');
+                }
                 $reader->skip(min(2, $entryEnd - $reader->getPosition()));
                 $items[$id] = self::readBytes($reader, $entryEnd, 4);
             }
@@ -304,13 +425,13 @@ final class AvifParser implements ParserInterface
     }
 
     /**
-     * Property indices (1-based) associated with one item in ipma.
+     * Property indices (1-based, in order) associated with each item by ipma.
      *
      * @throws InvalidImageException
      *
-     * @return list<int>
+     * @return array<int, list<int>>
      */
-    private function readAssociations(ByteReader $reader, int $start, int $end, int $itemId): array
+    private function readAssociations(ByteReader $reader, int $start, int $end): array
     {
         $reader->seek($start);
         $version = self::readFullBoxHeader($reader, $end, 1, $flags);
@@ -318,16 +439,16 @@ final class AvifParser implements ParserInterface
         if ($count > self::MAX_ENTRIES) {
             throw self::invalid('the ipma box has too many entries');
         }
+        $wide = ($flags & 0x01) !== 0;
 
+        $associations = [];
         for ($entry = 0; $entry < $count; ++$entry) {
             $id = $version === 0 ? self::readUint16($reader, $end) : self::readUint32($reader, $end);
-            $associationCount = ord(self::readBytes($reader, $end, 1));
-            $wide = ($flags & 0x01) !== 0;
-            $data = self::readBytes($reader, $end, $associationCount * ($wide ? 2 : 1));
-            if ($id !== $itemId) {
-                continue;
+            if (isset($associations[$id])) {
+                throw self::invalid('the ipma box associates properties with an item twice');
             }
-
+            $associationCount = ord(self::readBytes($reader, $end, 1));
+            $data = self::readBytes($reader, $end, $associationCount * ($wide ? 2 : 1));
             $indices = [];
             for ($association = 0; $association < $associationCount; ++$association) {
                 $index = $wide
@@ -337,72 +458,155 @@ final class AvifParser implements ParserInterface
                     $indices[] = $index;
                 }
             }
-
-            return $indices;
+            $associations[$id] = $indices;
         }
 
-        return [];
+        return $associations;
     }
 
     /**
-     * Reads the image sequence of a moov box: the first track with a "pict" handler and an "av01" sample entry.
+     * Offset and length of the first extent of each wanted item, from iloc.
+     *
+     * @param array{0: int, 1: int}      $iloc   payload bounds of iloc
+     * @param array{0: int, 1: int}|null $idat   payload bounds of idat, if any
+     * @param list<int>                  $wanted item IDs to locate
      *
      * @throws InvalidImageException
+     * @throws UnsupportedFormatException
      *
-     * @return array{width: int, height: int, frames: int}|null
+     * @return array<int, array{0: int, 1: int}>
      */
-    private function parseMovie(ByteReader $reader, int $start, int $end): ?array
+    private function readItemLocations(ByteReader $reader, array $iloc, ?array $idat, array $wanted): array
     {
+        list($start, $end) = $iloc;
+        $reader->seek($start);
+        $version = self::readFullBoxHeader($reader, $end, 2);
+        $sizes = self::readBytes($reader, $end, 2);
+        $offsetSize = ord($sizes[0]) >> 4;
+        $lengthSize = ord($sizes[0]) & 0x0F;
+        $baseOffsetSize = ord($sizes[1]) >> 4;
+        $indexSize = $version > 0 ? ord($sizes[1]) & 0x0F : 0;
+        foreach ([$offsetSize, $lengthSize, $baseOffsetSize, $indexSize] as $fieldSize) {
+            if ($fieldSize !== 0 && $fieldSize !== 4 && $fieldSize !== 8) {
+                throw self::invalid('the iloc box declares an invalid field size');
+            }
+        }
+        $count = $version < 2 ? self::readUint16($reader, $end) : self::readUint32($reader, $end);
+        if ($count > self::MAX_ENTRIES) {
+            throw self::invalid('the iloc box has too many entries');
+        }
+
+        $locations = [];
+        $described = [];
+        $extents = 0;
+        for ($index = 0; $index < $count; ++$index) {
+            $id = $version < 2 ? self::readUint16($reader, $end) : self::readUint32($reader, $end);
+            $method = $version > 0 ? self::readUint16($reader, $end) & 0x0F : 0;
+            $dataReference = self::readUint16($reader, $end);
+            $baseOffset = self::readSized($reader, $end, $baseOffsetSize);
+            $extentCount = self::readUint16($reader, $end);
+            $extents += $extentCount;
+            if ($extents > self::MAX_ENTRIES) {
+                throw self::invalid('the iloc box has too many extents');
+            }
+            $first = null;
+            for ($extent = 0; $extent < $extentCount; ++$extent) {
+                self::readSized($reader, $end, $indexSize);
+                $extentOffset = self::readSized($reader, $end, $offsetSize);
+                $extentLength = self::readSized($reader, $end, $lengthSize);
+                $first = $first === null ? [$extentOffset, $extentLength] : $first;
+            }
+            if (isset($described[$id])) {
+                throw self::invalid('the iloc box locates an item twice');
+            }
+            $described[$id] = true;
+            if (!in_array($id, $wanted, true)) {
+                continue;
+            }
+            if ($dataReference !== 0 || $method === 2) {
+                throw new UnsupportedFormatException('AVIF items stored in another file or by reference are not supported.');
+            }
+            if ($method > 2 || $first === null || ($method === 1 && $idat === null)) {
+                throw self::invalid('an image item has no valid data location');
+            }
+            list($regionStart, $regionEnd) = $method === 0 ? [0, $reader->getSize()] : $idat;
+            if ($baseOffset > $regionEnd - $regionStart || $first[0] > $regionEnd - $regionStart - $baseOffset) {
+                throw $method === 0 ? ByteReader::truncated() : self::invalid('an image item lies outside the idat box');
+            }
+            $dataStart = $regionStart + $baseOffset + $first[0];
+            $dataLength = $first[1] === 0 ? $regionEnd - $dataStart : $first[1];
+            if ($dataLength > $regionEnd - $dataStart) {
+                throw $method === 0 ? ByteReader::truncated() : self::invalid('an image item lies outside the idat box');
+            }
+            $locations[$id] = [$dataStart, $dataLength];
+        }
+
+        return $locations;
+    }
+
+    /**
+     * Reads the image sequence of a moov box: checks every AV1 track and describes the first one.
+     *
+     * @throws InvalidImageException
+     * @throws LimitExceededException
+     * @throws UnsupportedFormatException
+     *
+     * @return array{0: int, 1: int, 2: int}|null width, height and frame count
+     */
+    private function parseMovie(ByteReader $reader, int $start, int $end, Limits $limits): ?array
+    {
+        $first = null;
+        $tracks = 0;
         $reader->seek($start);
         while ($reader->getPosition() < $end) {
             list($type, $trackStart, $trackEnd) = $this->readBoxHeader($reader, $end);
             if ($type === 'trak') {
-                $media = $this->findChild($reader, $trackStart, $trackEnd, 'mdia');
-                $track = $media === null ? null : $this->parseMedia($reader, $media[0], $media[1]);
-                if ($track !== null) {
-                    return $track;
+                $track = $this->parseTrack($reader, $trackStart, $trackEnd, $limits);
+                if ($track !== null && ++$tracks > self::MAX_IMAGES) {
+                    throw new UnsupportedFormatException(sprintf('AVIF files with more than %d AV1 tracks are not supported.', self::MAX_IMAGES));
                 }
+                $first = $first === null ? $track : $first;
             }
             $reader->seek($trackEnd);
         }
 
-        return null;
+        return $first;
     }
 
     /**
-     * @throws InvalidImageException
+     * Reads a track; null when it holds no AV1 samples.
      *
-     * @return array{width: int, height: int, frames: int}|null
+     * @throws InvalidImageException
+     * @throws LimitExceededException
+     * @throws UnsupportedFormatException
+     *
+     * @return array{0: int, 1: int, 2: int}|null width, height and frame count
      */
-    private function parseMedia(ByteReader $reader, int $start, int $end): ?array
+    private function parseTrack(ByteReader $reader, int $start, int $end, Limits $limits): ?array
     {
-        $handler = $this->findChild($reader, $start, $end, 'hdlr');
-        if ($handler === null) {
-            return null;
-        }
-        $reader->seek($handler[0]);
-        self::readFullBoxHeader($reader, $handler[1], 0);
-        $reader->skip(min(4, $handler[1] - $reader->getPosition()));
-        if (self::readBytes($reader, $handler[1], 4) !== 'pict') {
+        $track = $this->findChildren($reader, $start, $end, ['mdia']);
+        $media = isset($track['mdia']) ? $this->findChildren($reader, $track['mdia'][0], $track['mdia'][1], ['mdhd', 'hdlr', 'minf']) : [];
+        $information = isset($media['minf']) ? $this->findChildren($reader, $media['minf'][0], $media['minf'][1], ['stbl']) : [];
+        $table = isset($information['stbl'])
+            ? $this->findChildren($reader, $information['stbl'][0], $information['stbl'][1], ['stsd', 'stts', 'stsc', 'stsz', 'stz2', 'stco', 'co64', 'stss'])
+            : [];
+        if (!isset($table['stsd'])) {
             return null;
         }
 
-        $mediaInformation = $this->findChild($reader, $start, $end, 'minf');
-        $sampleTable = $mediaInformation === null ? null : $this->findChild($reader, $mediaInformation[0], $mediaInformation[1], 'stbl');
-        if ($sampleTable === null) {
-            throw self::invalid('an image sequence track has no sample table');
+        list($description, $descriptionEnd) = $table['stsd'];
+        $reader->seek($description);
+        self::readFullBoxHeader($reader, $descriptionEnd, 0);
+        $entries = self::readUint32($reader, $descriptionEnd);
+        if ($entries === 0) {
+            return null;
         }
-
-        $description = $this->findChild($reader, $sampleTable[0], $sampleTable[1], 'stsd');
-        if ($description === null) {
-            throw self::invalid('an image sequence track has no sample description');
-        }
-        $reader->seek($description[0]);
-        self::readFullBoxHeader($reader, $description[1], 0);
-        $reader->skip(min(4, $description[1] - $reader->getPosition()));
-        list($entryType, $entryStart, $entryEnd) = $this->readBoxHeader($reader, $description[1]);
+        list($entryType, $entryStart, $entryEnd) = $this->readBoxHeader($reader, $descriptionEnd);
         if ($entryType !== 'av01') {
             return null;
+        }
+        if ($entries > 1) {
+            throw new UnsupportedFormatException('AVIF tracks with several sample descriptions are not supported.');
         }
         // VisualSampleEntry: 6 reserved bytes, data reference index, 16 bytes of pre-defined and reserved fields,
         // then width and height.
@@ -414,42 +618,39 @@ final class AvifParser implements ParserInterface
             throw self::invalid('an image sequence track declares a zero width or height');
         }
 
-        $sizes = $this->findChild($reader, $sampleTable[0], $sampleTable[1], 'stsz');
-        $compactSizes = $sizes === null ? $this->findChild($reader, $sampleTable[0], $sampleTable[1], 'stz2') : null;
-        if ($sizes === null && $compactSizes === null) {
-            throw self::invalid('an image sequence track has no sample size table');
+        if (isset($table['stsz']) === isset($table['stz2'])) {
+            throw self::invalid('an image sequence track needs exactly one sample size table');
         }
-        $table = $sizes !== null ? $sizes : $compactSizes;
-        $reader->seek($table[0]);
-        self::readFullBoxHeader($reader, $table[1], 0);
-        $reader->skip(min(4, $table[1] - $reader->getPosition()));
-        $frames = self::readUint32($reader, $table[1]);
+        $sizes = $table['stsz'] ?? $table['stz2'];
+        $reader->seek($sizes[0]);
+        self::readFullBoxHeader($reader, $sizes[1], 0);
+        $reader->skip(min(4, $sizes[1] - $reader->getPosition()));
+        $frames = self::readUint32($reader, $sizes[1]);
         if ($frames === 0) {
             throw self::invalid('an image sequence track has no sample');
         }
+        $limits->assertImage($width, $height, $frames);
 
-        return ['width' => $width, 'height' => $height, 'frames' => $frames];
-    }
-
-    /**
-     * Payload bounds of the first child box of a type, or null.
-     *
-     * @throws InvalidImageException
-     *
-     * @return array{0: int, 1: int}|null
-     */
-    private function findChild(ByteReader $reader, int $start, int $end, string $wanted): ?array
-    {
-        $reader->seek($start);
-        while ($reader->getPosition() < $end) {
-            list($type, $childStart, $childEnd) = $this->readBoxHeader($reader, $end);
-            if ($type === $wanted) {
-                return [$childStart, $childEnd];
-            }
-            $reader->seek($childEnd);
+        if (isset($table['stco']) === isset($table['co64'])) {
+            throw self::invalid('an image sequence track needs exactly one chunk offset table');
+        }
+        $chunks = $table['stco'] ?? $table['co64'];
+        $reader->seek($chunks[0]);
+        self::readFullBoxHeader($reader, $chunks[1], 0);
+        if (self::readUint32($reader, $chunks[1]) === 0) {
+            throw self::invalid('an image sequence track has no chunk');
+        }
+        // The first sample starts its first chunk.
+        $sample = self::readSized($reader, $chunks[1], isset($table['stco']) ? 4 : 8);
+        if ($sample > $reader->getSize()) {
+            throw ByteReader::truncated();
+        }
+        list($codedWidth, $codedHeight) = Av1SequenceHeader::maxFrameSize($reader, $sample, $reader->getSize() - $sample);
+        if ($codedWidth > $width || $codedHeight > $height) {
+            throw self::invalid('the AV1 data of a track allows frames larger than its sample entry');
         }
 
-        return null;
+        return [$width, $height, $frames];
     }
 
     /**
@@ -546,6 +747,25 @@ final class AvifParser implements ParserInterface
         $bytes = self::readBytes($reader, $end, 4);
 
         return (ord($bytes[0]) << 24) | (ord($bytes[1]) << 16) | (ord($bytes[2]) << 8) | ord($bytes[3]);
+    }
+
+    /**
+     * Reads an unsigned field of 0, 4 or 8 bytes; a 64-bit value above PHP_INT_MAX reads as PHP_INT_MAX.
+     *
+     * @throws InvalidImageException
+     */
+    private static function readSized(ByteReader $reader, int $end, int $size): int
+    {
+        if ($size === 0) {
+            return 0;
+        }
+        $value = self::readUint32($reader, $end);
+        if ($size === 4) {
+            return $value;
+        }
+        $low = self::readUint32($reader, $end);
+
+        return $value > 0x7FFFFFFF ? PHP_INT_MAX : ($value << 32) | $low;
     }
 
     /**

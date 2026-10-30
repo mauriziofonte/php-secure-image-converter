@@ -52,6 +52,51 @@ final class ImageBuilder
         . '4AEkkkiQQCgAAn1sZEtDNKNn3ImwEgAyGzAEAQV9+HrgASSSSJBAKAAHyeitlL/ie0y+rQ==';
 
     /**
+     * The 8 x 8 still sample with a second iprp box before the first, whose ispe property says 16000 x 16000.
+     */
+    private const AVIF_TWO_IPRP = 'AAAAIGZ0eXBhdmlmAAAAAGF2aWZtaWYxbWlhZk1BMUIAAAFVbWV0YQAAAAAAAAAhaGRscgAAAAAAAAAAcGljdAAAAAAAAAAAAAAA'
+        . 'AAAAAAAOcGl0bQAAAAAAAQAAAB5pbG9jAAAAAEQAAAEAAQAAAAEAAAF9AAAAJwAAAChpaW5mAAAAAAABAAAAGmluZmUCAAAAAAEA'
+        . 'AGF2MDFDb2xvcgAAAABqaXBycAAAAEtpcGNvAAAAFGlzcGUAAAAAAAA+gAAAPoAAAAAQcGl4aQAAAAADCAgIAAAADGF2MUOBAAwA'
+        . 'AAAAE2NvbHJuY2x4AAEADQAGgAAAABdpcG1hAAAAAAAAAAEAAQQBAoMEAAAAamlwcnAAAABLaXBjbwAAABRpc3BlAAAAAAAAAAgA'
+        . 'AAAIAAAAEHBpeGkAAAAAAwgICAAAAAxhdjFDgQAMAAAAABNjb2xybmNseAABAA0ABoAAAAAXaXBtYQAAAAAAAAABAAEEAQKDBAAA'
+        . 'AC9tZGF0EgAKCBgIv2iAhoNCMhkZR4eGIYeeeeaCQACQQRHVRJViy13QWdY5';
+
+    /**
+     * The 8 x 8 still sample with a second item of 16000 x 16000 and two pitm boxes, naming the second item first.
+     */
+    private const AVIF_TWO_PITM = 'AAAAIGZ0eXBhdmlmAAAAAGF2aWZtaWYxbWlhZk1BMUIAAAE8bWV0YQAAAAAAAAAhaGRscgAAAAAAAAAAcGljdAAAAAAAAAAAAAAA'
+        . 'AAAAAAAOcGl0bQAAAAAAAgAAAA5waXRtAAAAAAABAAAALGlsb2MAAAAARAAAAgABAAAAAQAAAWQAAAAnAAIAAAABAAABZAAAACcA'
+        . 'AABCaWluZgAAAAAAAgAAABppbmZlAgAAAAABAABhdjAxQ29sb3IAAAAAGmluZmUCAAAAAAIAAGF2MDFDb2xvcgAAAACFaXBycAAA'
+        . 'AF9pcGNvAAAAFGlzcGUAAAAAAAAACAAAAAgAAAAQcGl4aQAAAAADCAgIAAAADGF2MUOBAAwAAAAAE2NvbHJuY2x4AAEADQAGgAAA'
+        . 'ABRpc3BlAAAAAAAAPoAAAD6AAAAAHmlwbWEAAAAAAAAAAgABBAECgwQAAgQFAoMEAAAAL21kYXQSAAoIGAi/aICGg0IyGRlHh4Yh'
+        . 'h5555oJAAJBBEdVElWLLXdBZ1jk=';
+
+    /**
+     * The 8 x 8 still sample whose item has two ispe properties: 16000 x 16000 first, then 8 x 8.
+     */
+    private const AVIF_TWO_ISPE = 'AAAAIGZ0eXBhdmlmAAAAAGF2aWZtaWYxbWlhZk1BMUIAAAEAbWV0YQAAAAAAAAAhaGRscgAAAAAAAAAAcGljdAAAAAAAAAAAAAAA'
+        . 'AAAAAAAOcGl0bQAAAAAAAQAAAB5pbG9jAAAAAEQAAAEAAQAAAAEAAAEoAAAAJwAAAChpaW5mAAAAAAABAAAAGmluZmUCAAAAAAEA'
+        . 'AGF2MDFDb2xvcgAAAAB/aXBycAAAAF9pcGNvAAAAFGlzcGUAAAAAAAA+gAAAPoAAAAAQcGl4aQAAAAADCAgIAAAADGF2MUOBAAwA'
+        . 'AAAAE2NvbHJuY2x4AAEADQAGgAAAABRpc3BlAAAAAAAAAAgAAAAIAAAAGGlwbWEAAAAAAAAAAQABBQECgwQFAAAAL21kYXQSAAoI'
+        . 'GAi/aICGg0IyGRlHh4Yhh5555oJAAJBBEdVElWLLXdBZ1jk=';
+
+    /**
+     * A still AVIF whose ispe property says 8 x 8 while its AV1 sequence header codes frames of 4000 x 4000.
+     */
+    private const AVIF_ISPE_BELOW_AV1 = 'AAAAIGZ0eXBhdmlmAAAAAGF2aWZtaWYxbWlhZk1BMUIAAADrbWV0YQAAAAAAAAAhaGRscgAAAAAAAAAAcGljdAAAAAAAAAAAAAAA'
+        . 'AAAAAAAOcGl0bQAAAAAAAQAAAB5pbG9jAAAAAEQAAAEAAQAAAAEAAAETAAACMwAAAChpaW5mAAAAAAABAAAAGmluZmUCAAAAAAEA'
+        . 'AGF2MDFDb2xvcgAAAABqaXBycAAAAEtpcGNvAAAAFGlzcGUAAAAAAAAACAAAAAgAAAAQcGl4aQAAAAADCAgIAAAADGF2MUOBEAwA'
+        . 'AAAAE2NvbHJuY2x4AAEADQAGgAAAABdpcG1hAAAAAAAAAAEAAQQBAoMEAAACO21kYXQSAAoLHC7+f+faICGg0IAyoQQdExHh4Xd0'
+        . '000wsbAAAD/PyinCc3rwK8ta/6Xy5sYDHllymRPvRVFxpkl8jGT2IzIADTWZJ2jJT82HMrK0t5/5MyR1VFYz4Z5PLGgkc7m6Qc/K'
+        . 'RFsJ0SfEflONiRIWFQQFOLb8xU/C8C1kdfwfvsIwa+VZ43u59CcnbGRzjESaTx7bTFzsoRJxety6VZF5xJ+hwkHPykRbCdEnxH5T'
+        . 'jYkSFhUEBTi2/MVPwvAtZHX8H77CMGvlWeN7ufQnJ2xkc4xEmk8e20xc7KEScXrculWRecSfocJAz8pEWwnRJ8R+U42JEhYVBAU4'
+        . 'tvzFT8LwLWR1/B++wjBsAN7LUfxTMJjUMIer26fnIF61ziNm1TajmrLtcAViqDpBz8pEWwnRJ8R+U42JEhYVBAU4tvzFT8LwLWR1'
+        . '/B++wjBr5Vnje7n0JydsZHOMRJpPHttMXOyhEnF63LpVkXnEn6HAQc/KRFsJ0SfEflONiRIWFQQFOLb8xU/C8C1kdfwfvsIwa+VZ'
+        . '43u59CcnbGRzjESaTx7bTFzsoRJxety6VZF5xJ+hwEHPykRbCdEnxH5TjYkSFhUEBTi2/MVPwvAtZHX8H77CMGvlWeN7ufQnJ2xk'
+        . 'c4xEmk8e20xc7KEScXrculWRecSfocDPykRbCdEnxH5TjYkSFhUEBTi2/MVPwvAtZHX8H77CMGwA3stR/FMwmNQwh6vbp+cgXrXO'
+        . 'I2bVNqOasu1wBWKoIA==';
+
+    /**
      * Channels per PNG colour type.
      *
      * @var array<int, int>
@@ -521,6 +566,35 @@ final class ImageBuilder
     public static function avifSequence(): string
     {
         return self::decode(self::AVIF_SEQUENCE);
+    }
+
+    /**
+     * A still AVIF that holds a box or property twice, or whose ispe property understates its AV1 frame size; see the
+     * AVIF_* constants.
+     *
+     * @param string $name "two-iprp", "two-pitm", "two-ispe" or "ispe-below-av1"
+     */
+    public static function avifReproducer(string $name): string
+    {
+        $samples = [
+            'two-iprp' => self::AVIF_TWO_IPRP,
+            'two-pitm' => self::AVIF_TWO_PITM,
+            'two-ispe' => self::AVIF_TWO_ISPE,
+            'ispe-below-av1' => self::AVIF_ISPE_BELOW_AV1,
+        ];
+        if (!isset($samples[$name])) {
+            throw new \LogicException('ImageBuilder: unknown AVIF sample.');
+        }
+
+        return self::decode($samples[$name]);
+    }
+
+    /**
+     * An ipco property box of one byte, such as irot (anticlockwise quarter turns) or imir (mirroring mode).
+     */
+    public static function avifProperty(string $type, int $value): string
+    {
+        return pack('N', 9) . $type . pack('C', $value);
     }
 
     // TIFF ----------------------------------------------------------------------------------------------------------

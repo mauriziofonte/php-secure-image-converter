@@ -6,6 +6,7 @@ namespace Mfonte\SecureImageConverter\Tests\Fixtures;
 
 use Mfonte\SecureImageConverter\Contract\Exception\ErrorCode;
 use Mfonte\SecureImageConverter\Contract\ImageFormat;
+use Mfonte\SecureImageConverter\Validation\Parser\AvifParser;
 use Mfonte\SecureImageConverter\Validation\Parser\GifParser;
 use Mfonte\SecureImageConverter\Validation\Parser\PngParser;
 use Mfonte\SecureImageConverter\Validation\Parser\WebpParser;
@@ -19,7 +20,7 @@ use Mfonte\SecureImageConverter\Validation\Parser\WebpParser;
  * inconsistent or forged header), truncated-*, unsupported-* (an identified variant this library does not process),
  * polyglot-* (another file type dressed as an image, or the reverse). Cases larger than 100 KB are not committed and
  * the tests generate them in memory: a GIF of 10,000 frames, and the files that reach a walk cap of a parser (the
- * most chunks or blocks allowed, then one too many), which bound the time a hostile file costs.
+ * most chunks, blocks or boxes allowed, then one too many), which bound the time a hostile file costs.
  *
  * An accepted case expects a subset of ImageInfo::toArray(); a refused case expects an error code. "max_bytes_read"
  * bounds the bytes the inspector may read from the file: bombs are refused from their header, whatever their size.
@@ -356,13 +357,57 @@ final class ImageCorpus
         $ispe = ImageBuilder::find($still, 'ispe');
         $sampleEntry = ImageBuilder::find($sequence, 'av01', ImageBuilder::find($sequence, 'stsd'));
         $sampleSizes = ImageBuilder::find($sequence, 'stsz');
+        $colour = ImageBuilder::find($still, 'colr') - 4;
+        // A track whose handler is "vide" instead of "pict": decoders play any AV1 track.
+        $video = ImageBuilder::patch($sequence, ImageBuilder::find($sequence, 'pict', ImageBuilder::find($sequence, 'trak')), 'vide');
+        // Replaces the 19-byte colr property with a 9-byte property and a 10-byte free box, so that no offset moves,
+        // and marks its association (the fourth of the ipma box) essential, as a transformative property must be.
+        $associations = ImageBuilder::find($still, 'ipma') + 4 + 4 + 4 + 2 + 1;
+        $transformed = static function (string $type, int $value) use ($still, $colour, $associations): string {
+            $bytes = ImageBuilder::patch($still, $colour, ImageBuilder::avifProperty($type, $value) . pack('N', 10) . 'free' . "\0\0");
+
+            return ImageBuilder::patch($bytes, $associations + 3, "\x84");
+        };
 
         return [
             'avif/valid-still.avif' => self::committed($still, self::accept(ImageFormat::AVIF, 8, 8, 1, ['bit_depth' => 8, 'icc_profile' => false, 'exif' => false, 'metadata' => false, 'orientation' => 1, 'trailing_data' => false])),
             'avif/valid-sequence.avif' => self::committed($sequence, self::accept(ImageFormat::AVIF, 8, 8, 3)),
+            'avif/valid-video-track.avif' => self::committed($video, self::accept(ImageFormat::AVIF, 8, 8, 3)),
+            // irot turns anticlockwise: one quarter turn is EXIF orientation 8. imir mode 1 mirrors left to right.
+            'avif/valid-rotated.avif' => self::committed($transformed('irot', 1), self::accept(ImageFormat::AVIF, 8, 8, 1, ['orientation' => 8])),
+            'avif/valid-mirrored.avif' => self::committed($transformed('imir', 1), self::accept(ImageFormat::AVIF, 8, 8, 1, ['orientation' => 2])),
+            'avif/valid-trailing-box.avif' => self::committed(
+                $still . pack('N', 32) . 'skip<?php echo "payload"; ?>',
+                self::accept(ImageFormat::AVIF, 8, 8, 1, ['trailing_data' => true])
+            ),
+            // The most boxes a file may have, then one too many.
+            'avif/valid-most-boxes.avif' => self::generated(
+                $still . ImageBuilder::repeat(pack('N', 8) . 'free', AvifParser::MAX_BOXES - 15),
+                self::accept(ImageFormat::AVIF, 8, 8, 1, ['trailing_data' => true])
+            ),
+            'avif/spoof-too-many-boxes.avif' => self::generated(
+                $still . ImageBuilder::repeat(pack('N', 8) . 'free', AvifParser::MAX_BOXES - 14),
+                self::reject(ErrorCode::INVALID_IMAGE)
+            ),
             'avif/bomb-100000x100000.avif' => self::committed(ImageBuilder::patch($still, $ispe + 8, pack('NN', 100000, 100000)), self::reject(ErrorCode::IMAGE_TOO_LARGE, true)),
             'avif/bomb-sequence-65535x65535.avif' => self::committed(ImageBuilder::patch($sequence, $sampleEntry + 28, pack('nn', 65535, 65535)), self::reject(ErrorCode::IMAGE_TOO_LARGE, true)),
             'avif/bomb-100000-frames.avif' => self::committed(ImageBuilder::patch($sequence, $sampleSizes + 12, pack('N', 100000)), self::reject(ErrorCode::IMAGE_TOO_LARGE, true)),
+            'avif/bomb-video-track-100000-frames.avif' => self::committed(ImageBuilder::patch($video, $sampleSizes + 12, pack('N', 100000)), self::reject(ErrorCode::IMAGE_TOO_LARGE, true)),
+            'avif/unsupported-grid.avif' => self::committed(
+                ImageBuilder::patch($still, ImageBuilder::find($still, 'av01', ImageBuilder::find($still, 'infe')), 'grid'),
+                self::reject(ErrorCode::UNSUPPORTED_FORMAT)
+            ),
+            // Decoders read the first copy of a box or property, so a second copy must not hide a large first one.
+            'avif/spoof-two-iprp.avif' => self::committed(ImageBuilder::avifReproducer('two-iprp'), self::reject(ErrorCode::INVALID_IMAGE)),
+            'avif/spoof-two-pitm.avif' => self::committed(ImageBuilder::avifReproducer('two-pitm'), self::reject(ErrorCode::INVALID_IMAGE)),
+            'avif/spoof-two-ispe.avif' => self::committed(ImageBuilder::avifReproducer('two-ispe'), self::reject(ErrorCode::INVALID_IMAGE)),
+            // The AV1 sequence header bounds the frames the decoder allocates: ispe and the sample entry may not say less.
+            'avif/spoof-ispe-below-av1.avif' => self::committed(ImageBuilder::patch($still, $ispe + 8, pack('NN', 4, 4)), self::reject(ErrorCode::INVALID_IMAGE)),
+            'avif/spoof-ispe-below-av1-4000x4000.avif' => self::committed(ImageBuilder::avifReproducer('ispe-below-av1'), self::reject(ErrorCode::INVALID_IMAGE)),
+            'avif/spoof-sample-entry-below-av1.avif' => self::committed(
+                ImageBuilder::patch($sequence, $sampleEntry + 28, pack('nn', 4, 4)),
+                self::reject(ErrorCode::INVALID_IMAGE)
+            ),
             'avif/unsupported-heic-brand.avif' => self::committed(str_replace('avif', 'heic', (string) substr($still, 0, 32)) . (string) substr($still, 32), self::reject(ErrorCode::UNSUPPORTED_FORMAT)),
             'avif/spoof-no-ispe.avif' => self::committed(ImageBuilder::patch($still, $ispe, 'xspe'), self::reject(ErrorCode::INVALID_IMAGE)),
             'avif/spoof-ftyp-only.avif' => self::committed((string) substr($still, 0, 32), self::reject(ErrorCode::INVALID_IMAGE)),
