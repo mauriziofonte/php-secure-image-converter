@@ -32,8 +32,8 @@ final class NoDecoderTest extends TestCase
         // The path check of ImageInspector::inspect().
         'preg_match',
         // Opening, checking and reading the input.
-        'fclose', 'fopen', 'fseek', 'fstat', 'get_resource_type', 'is_file', 'is_readable', 'stream_get_contents',
-        'stream_get_meta_data',
+        'clearstatcache', 'fclose', 'fopen', 'fseek', 'fstat', 'get_resource_type', 'lstat', 'stream_get_contents',
+        'stream_get_meta_data', 'stream_set_blocking',
     ];
 
     /**

@@ -34,10 +34,10 @@ final class ImageInspectorTest extends TestCase
 
     protected function tear_down(): void
     {
-        foreach ($this->temporaryPaths as $path) {
-            if (is_dir($path)) {
+        foreach (array_reverse($this->temporaryPaths) as $path) {
+            if (is_dir($path) && !is_link($path)) {
                 rmdir($path);
-            } elseif (is_file($path)) {
+            } elseif (is_link($path) || file_exists($path)) {
                 unlink($path);
             }
         }
@@ -219,7 +219,7 @@ final class ImageInspectorTest extends TestCase
     public function testInspectRefusesAMissingFile(): void
     {
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('The input path is not a readable file.');
+        $this->expectExceptionMessage('The input path is not a regular file.');
 
         (new ImageInspector())->inspect(sys_get_temp_dir() . '/missing-' . bin2hex(random_bytes(8)) . '.png');
     }
@@ -233,6 +233,47 @@ final class ImageInspectorTest extends TestCase
         $this->expectException(InvalidArgumentException::class);
 
         (new ImageInspector())->inspect($directory);
+    }
+
+    public function testInspectRefusesASymbolicLinkToAnImage(): void
+    {
+        $target = $this->temporaryFile(ImageBuilder::jpeg(10, 4));
+        $link = sys_get_temp_dir() . '/inspector-link-' . bin2hex(random_bytes(8)) . '.jpg';
+        if (!function_exists('symlink') || !@symlink($target, $link)) {
+            self::markTestSkipped('Symbolic links cannot be created here.');
+        }
+        $this->temporaryPaths[] = $link;
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('The input path is not a regular file.');
+
+        (new ImageInspector())->inspect($link);
+    }
+
+    public function testInspectRefusesAFifoWithoutBlocking(): void
+    {
+        $fifo = sys_get_temp_dir() . '/inspector-fifo-' . bin2hex(random_bytes(8));
+        if (!function_exists('posix_mkfifo') || !posix_mkfifo($fifo, 0600)) {
+            self::markTestSkipped('FIFOs cannot be created here.');
+        }
+        $this->temporaryPaths[] = $fifo;
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('The input path is not a regular file.');
+
+        (new ImageInspector())->inspect($fifo);
+    }
+
+    public function testInspectRefusesADevice(): void
+    {
+        if (!file_exists('/dev/zero')) {
+            self::markTestSkipped('/dev/zero does not exist here.');
+        }
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('The input path is not a regular file.');
+
+        (new ImageInspector())->inspect('/dev/zero');
     }
 
     public function testRefusalsQuoteNeitherThePathNorTheContent(): void

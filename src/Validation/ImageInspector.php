@@ -36,6 +36,15 @@ use Mfonte\SecureImageConverter\Validation\Parser\WebpParser;
  * an SVG input is refused with an UnsupportedFormatException even when SVG is enabled, and getInputFormats() never
  * lists it.
  *
+ * Inspect what you decode: inspect() opens the path and checks that it is a regular file, but the file can change once
+ * inspect() returns, and a decoder that opens the same path later may read other bytes (time of check to time of use).
+ * A consumer that decodes the image must inspect and decode the same private copy of the input, one that no other
+ * process can write (such as a temporary file it created itself), or call inspectStream() on the very stream it then
+ * decodes. The ImageInfo flags give the rest of what a consumer needs: hasTrailingData() reports bytes after the end
+ * of the image (an appended archive or script), so a consumer must re-encode the image rather than pass the original
+ * bytes through; getOrientation() reports the EXIF or AVIF orientation the decoder will not apply by itself. For TIFF
+ * only the first page is inspected: a backend must decode page 0 alone.
+ *
  * Errors (see Contract\Exception\ErrorCode): the file is above max_bytes, LimitExceededException (file_too_large);
  * its format cannot be identified, is not enabled, is SVG or is an unsupported variant, UnsupportedFormatException
  * (unsupported_format); its header is malformed, truncated, inconsistent or spoofed, InvalidImageException
@@ -104,10 +113,17 @@ final class ImageInspector
     /**
      * Inspects the image file at a local path.
      *
+     * The path must name a regular file itself, not a symbolic link, a directory, a FIFO, a socket or a device: it is
+     * checked with lstat() before it is opened, opened without blocking (so a FIFO put in its place cannot stall the
+     * call), and checked again with fstat() on the open handle, which must be the same regular file (same device and
+     * inode) as the one lstat() saw. Resolve a symbolic link with realpath() first if it is trusted.
+     *
+     * The check covers this call only: decode the bytes inspected here, not the path again (see the class summary).
+     *
      * @param string $path path of a regular, readable local file; URLs and stream wrappers ("scheme:..." with a scheme
      *                     of two characters or more, such as phar:// or data:) are refused: use inspectStream()
      *
-     * @throws InvalidArgumentException   when the path is not a readable regular local file
+     * @throws InvalidArgumentException   when the path is not a readable regular local file, or changed while opened
      * @throws LimitExceededException     when the file or the image exceeds a limit
      * @throws UnsupportedFormatException when the format is unidentified, not enabled, SVG or an unsupported variant
      * @throws InvalidImageException      when the header is malformed, truncated, inconsistent or spoofed
@@ -117,16 +133,25 @@ final class ImageInspector
         if ($path === '' || strpos($path, "\0") !== false || preg_match('/\A[A-Za-z][A-Za-z0-9+.-]+:/', $path) === 1) {
             throw new InvalidArgumentException('The input path must be a local file path, not a URL or stream wrapper.');
         }
-        $handle = is_file($path) && is_readable($path) ? @fopen($path, 'rb') : false;
+        clearstatcache(true, $path);
+        $link = @lstat($path);
+        if (!is_array($link) || !self::isRegularFile($link['mode'])) {
+            throw new InvalidArgumentException('The input path is not a regular file.');
+        }
+        // "n" opens with O_NONBLOCK where the platform has it: opening a FIFO swapped in after lstat() returns at once.
+        $handle = @fopen($path, 'rbn');
         if ($handle === false) {
             throw new InvalidArgumentException('The input path is not a readable file.');
         }
 
         try {
             $stat = fstat($handle);
-            if (!is_array($stat) || ($stat['mode'] & 0170000) !== 0100000) {
-                throw new InvalidArgumentException('The input path is not a regular file.');
+            if (!is_array($stat) || !self::isRegularFile($stat['mode'])
+                || $stat['dev'] !== $link['dev'] || $stat['ino'] !== $link['ino']
+            ) {
+                throw new InvalidArgumentException('The input path changed while it was being opened.');
             }
+            stream_set_blocking($handle, true);
 
             return $this->inspectReader(new ByteReader($handle, $stat['size']));
         } finally {
@@ -136,7 +161,8 @@ final class ImageInspector
 
     /**
      * Inspects the image held by a stream, from its offset 0 to the size reported by fstat(). The stream is left
-     * open, at an unspecified position.
+     * open, at an unspecified position. Decode from this same stream (rewound), and only if nothing else can write
+     * to what it reads: the result describes the bytes read now.
      *
      * @param resource $stream a seekable stream whose fstat() reports its size
      *
@@ -179,6 +205,14 @@ final class ImageInspector
         }
 
         return self::parserFor($format)->parse($reader, $this->limits);
+    }
+
+    /**
+     * Whether a stat() mode is that of a regular file (S_IFREG).
+     */
+    private static function isRegularFile(int $mode): bool
+    {
+        return ($mode & 0170000) === 0100000;
     }
 
     /**
