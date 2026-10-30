@@ -11,19 +11,23 @@ use Mfonte\SecureImageConverter\Validation\Limits;
 
 /**
  * WEBP header parser: reads the RIFF container and walks its chunks, reading only the few bytes of the VP8, VP8L and
- * VP8X headers that hold dimensions and flags, and the 16-byte header of each ANMF frame. Bitstreams are never
- * decoded.
+ * VP8X headers that hold dimensions and flags, the 16-byte header of each ANMF frame and the header of its bitstream.
+ * Bitstreams are never decoded.
  *
  * - The RIFF size must cover at least one chunk and fit in the file (bytes after it are ignored by decoders, and
  *   reported as trailing data); every chunk must fit in the RIFF payload. At most MAX_CHUNKS chunks are walked.
- *   Bytes after the bitstream chunk of a simple file, and unknown chunks of an extended file, are trailing data too:
- *   decoders skip them.
+ *   Decoders skip, and this parser reports as trailing data, the bytes after the bitstream chunk of a simple file,
+ *   unknown chunks of an extended file, the bytes of ANIM beyond its fields, and the bytes of an ANMF frame after its
+ *   bitstream.
  * - Simple lossy (VP8): a key frame that is shown, a first partition inside the chunk, the start code 9D 01 2A and
  *   a non-zero 14-bit width and height. Simple lossless (VP8L): the signature 2F, version 0, 14-bit dimensions.
- * - Extended (VP8X): a 24-bit canvas width and height whose product fits in 32 bits, checked against the limits at
- *   once. With the animation flag, ANIM must be present and every ANMF frame must lie inside the canvas; their number
- *   is the frame count, checked against the limits as soon as it exceeds Limits::maxFramesFor(). Without it, exactly
- *   one VP8 or VP8L bitstream must be present, with the canvas dimensions, and no ANMF chunk.
+ * - Extended (VP8X, exactly 10 bytes): a 24-bit canvas width and height whose product fits in 32 bits, checked
+ *   against the limits at once. With the animation flag, ANIM must be present and every ANMF frame must lie inside
+ *   the canvas and start with a bitstream of its size; their number is the frame count, checked against the limits as
+ *   soon as it exceeds Limits::maxFramesFor(). Without it, exactly one VP8 or VP8L bitstream must be present, with
+ *   the canvas dimensions, and no ANMF chunk.
+ * - An ALPH chunk must come right before a VP8 bitstream, at the top level of a still image or at the start of an
+ *   ANMF frame: decoders disagree on alpha data anywhere else.
  *
  * Metadata: ICCP is the colour profile, EXIF is EXIF (and gives the orientation); XMP and unknown chunks are other
  * metadata.
@@ -45,11 +49,11 @@ final class WebpParser implements ParserInterface
     private const FLAG_ANIMATION = 0x02;
 
     /**
-     * Chunks of an extended file that are neither image data nor metadata.
-     *
-     * @var list<string>
+     * Sizes of the fields of the VP8X, ANIM and ANMF chunks.
      */
-    private const STRUCTURE_CHUNKS = ['ANIM', 'ALPH'];
+    private const VP8X_SIZE = 10;
+    private const ANIM_SIZE = 6;
+    private const ANMF_SIZE = 16;
 
     public function parse(ByteReader $reader, Limits $limits): ImageInfo
     {
@@ -93,8 +97,9 @@ final class WebpParser implements ParserInterface
      */
     private static function parseExtended(ByteReader $reader, Limits $limits, int $length, int $end): ImageInfo
     {
-        if ($length < 10) {
-            throw self::invalid('the VP8X chunk is too short');
+        // libwebp decodes a still image only when VP8X has its exact size, while its demuxer takes a longer chunk.
+        if ($length !== self::VP8X_SIZE) {
+            throw self::invalid('the VP8X chunk does not have a size of 10 bytes');
         }
         $flags = $reader->readUint8();
         $reader->skip(3);
@@ -115,7 +120,8 @@ final class WebpParser implements ParserInterface
         $exif = false;
         $otherMetadata = false;
         $orientation = ImageInfo::ORIENTATION_NORMAL;
-        $unknownChunks = false;
+        $unreadBytes = false;
+        $previous = 'VP8X';
 
         for ($chunks = 2; $reader->getPosition() < $end; ++$chunks) {
             if ($chunks > self::MAX_CHUNKS) {
@@ -123,13 +129,17 @@ final class WebpParser implements ParserInterface
             }
             $start = $reader->getPosition();
             list($type, $length) = self::readChunkHeader($reader, $end);
+            if ($previous === 'ALPH' && $type !== 'VP8 ') {
+                throw self::invalid('an ALPH chunk is not followed by a VP8 bitstream');
+            }
+            $previous = $type;
 
             switch ($type) {
                 case 'ANMF':
                     if (!$animated || !$animationHeader) {
                         throw self::invalid('an ANMF frame appears outside an animation or before ANIM');
                     }
-                    self::checkFrame($reader, $length, $width, $height);
+                    $unreadBytes = self::checkFrame($reader, $start + 8, $length, $width, $height) || $unreadBytes;
                     if (++$frames > $frameBudget) {
                         $limits->assertImage($width, $height, $frames);
                     }
@@ -144,7 +154,16 @@ final class WebpParser implements ParserInterface
                     }
                     break;
                 case 'ANIM':
+                    if ($length < self::ANIM_SIZE) {
+                        throw self::invalid('the ANIM chunk is too short');
+                    }
                     $animationHeader = true;
+                    $unreadBytes = $unreadBytes || $length > self::ANIM_SIZE;
+                    break;
+                case 'ALPH':
+                    if ($animated) {
+                        throw self::invalid('an animation holds an ALPH chunk outside its frames');
+                    }
                     break;
                 case 'ICCP':
                     $iccProfile = true;
@@ -158,13 +177,14 @@ final class WebpParser implements ParserInterface
                     $exif = true;
                     break;
                 default:
-                    if (!in_array($type, self::STRUCTURE_CHUNKS, true)) {
-                        // Decoders skip unknown chunks, which can carry anything.
-                        $otherMetadata = true;
-                        $unknownChunks = true;
-                    }
+                    // Decoders skip unknown chunks, which can carry anything.
+                    $otherMetadata = true;
+                    $unreadBytes = true;
             }
             $reader->seek(self::chunkEnd($start + 8, $length));
+        }
+        if ($previous === 'ALPH') {
+            throw self::invalid('an ALPH chunk is not followed by a VP8 bitstream');
         }
 
         if ($animated) {
@@ -180,25 +200,28 @@ final class WebpParser implements ParserInterface
         return (new ImageInfo(ImageFormat::WEBP, $width, $height, $frameCount, $reader->getSize()))
             ->withMetadata($iccProfile, $exif, $otherMetadata)
             ->withOrientation($orientation)
-            ->withTrailingData($unknownChunks);
+            ->withTrailingData($unreadBytes);
     }
 
     /**
-     * Reads a chunk FourCC and size, and checks that the chunk fits before the end of the RIFF payload.
+     * Reads a chunk FourCC and size, and checks that the chunk fits before $end, the end of the RIFF payload or of the
+     * enclosing chunk.
+     *
+     * @param string $container what ends at $end, for the error messages
      *
      * @throws InvalidImageException
      *
      * @return array{0: string, 1: int}
      */
-    private static function readChunkHeader(ByteReader $reader, int $end): array
+    private static function readChunkHeader(ByteReader $reader, int $end, string $container = 'the RIFF payload'): array
     {
         if ($end - $reader->getPosition() < 8) {
-            throw self::invalid('a chunk header is cut by the end of the RIFF payload');
+            throw self::invalid('a chunk header is cut by the end of ' . $container);
         }
         $header = $reader->read(8);
         $length = self::unpackUint32Le($header, 4);
         if ($length > $end - $reader->getPosition()) {
-            throw $end === $reader->getSize() ? ByteReader::truncated() : self::invalid('a chunk overflows the RIFF payload');
+            throw $end === $reader->getSize() ? ByteReader::truncated() : self::invalid('a chunk overflows ' . $container);
         }
 
         return [substr($header, 0, 4), $length];
@@ -259,13 +282,19 @@ final class WebpParser implements ParserInterface
     }
 
     /**
-     * Checks the 16-byte header of an ANMF frame: its rectangle must lie inside the canvas.
+     * Checks an ANMF frame: its rectangle must lie inside the canvas, and its data must start with a bitstream of the
+     * frame size, which an ALPH chunk may precede when it is a VP8 bitstream.
+     *
+     * @param int $start  offset of the frame payload
+     * @param int $length size of the frame payload
      *
      * @throws InvalidImageException
+     *
+     * @return bool whether the frame holds bytes after its bitstream, which decoders skip
      */
-    private static function checkFrame(ByteReader $reader, int $length, int $canvasWidth, int $canvasHeight): void
+    private static function checkFrame(ByteReader $reader, int $start, int $length, int $canvasWidth, int $canvasHeight): bool
     {
-        if ($length < 16 + 8) {
+        if ($length < self::ANMF_SIZE + 8) {
             throw self::invalid('an ANMF frame is too short');
         }
         $left = 2 * $reader->readUint24Le();
@@ -275,6 +304,26 @@ final class WebpParser implements ParserInterface
         if ($left + $width > $canvasWidth || $top + $height > $canvasHeight) {
             throw self::invalid('an ANMF frame extends beyond the canvas');
         }
+
+        $end = $start + $length;
+        $reader->seek($start + self::ANMF_SIZE);
+        list($type, $chunkLength) = self::readChunkHeader($reader, $end, 'an ANMF frame');
+        if ($type === 'ALPH') {
+            $reader->seek(self::chunkEnd($reader->getPosition(), $chunkLength));
+            list($type, $chunkLength) = self::readChunkHeader($reader, $end, 'an ANMF frame');
+            if ($type !== 'VP8 ') {
+                throw self::invalid('an ALPH chunk is not followed by a VP8 bitstream');
+            }
+        }
+        if ($type !== 'VP8 ' && $type !== 'VP8L') {
+            throw self::invalid('an ANMF frame does not start with its bitstream');
+        }
+        $bitstream = $reader->getPosition();
+        if (self::readBitstreamSize($reader, $type, $chunkLength) !== [$width, $height]) {
+            throw self::invalid('the bitstream of an ANMF frame differs from the frame size');
+        }
+
+        return self::chunkEnd($bitstream, $chunkLength) < $end;
     }
 
     private static function unpackUint32Le(string $bytes, int $offset): int

@@ -273,6 +273,16 @@ final class ImageCorpus
             'bmp/valid-zip-before-pixels.bmp' => self::committed(self::bmpWithGap(ImageBuilder::bmp(7, 5), "PK\x05\x06" . ImageBuilder::repeat("\0", 18)), self::accept(ImageFormat::BMP, 7, 5, 1, ['trailing_data' => true])),
             // A colour profile there is not hidden data.
             'bmp/valid-v5-icc-before-pixels.bmp' => self::committed(self::bmpProfileBeforePixels(), self::accept(ImageFormat::BMP, 4, 4, 1, ['icc_profile' => true, 'trailing_data' => false])),
+            // Images of more than 8 bits have no palette for decoders to read, whatever the colours-used field says.
+            'bmp/valid-zip-as-unused-palette.bmp' => self::committed(
+                ImageBuilder::patch(self::bmpWithGap($valid, "PK\x05\x06" . ImageBuilder::repeat("\0", 20)), 46, pack('V', 6)),
+                self::accept(ImageFormat::BMP, 7, 5, 1, ['trailing_data' => true])
+            ),
+            // Nor do they read the bytes between the pixel data and a colour profile stored after it.
+            'bmp/valid-zip-before-icc.bmp' => self::committed(
+                self::bmpGapBeforeProfile("PK\x05\x06" . ImageBuilder::repeat("\0", 18)),
+                self::accept(ImageFormat::BMP, 4, 4, 1, ['icc_profile' => true, 'trailing_data' => true])
+            ),
             'bmp/bomb-100000x100000.bmp' => self::committed(ImageBuilder::patch($valid, 18, pack('VV', 100000, 100000)), self::reject(ErrorCode::IMAGE_TOO_LARGE, true)),
             'bmp/spoof-planes.bmp' => self::committed(ImageBuilder::patch($valid, 26, pack('v', 2)), self::reject(ErrorCode::INVALID_IMAGE)),
             'bmp/spoof-bit-count.bmp' => self::committed(ImageBuilder::patch($valid, 30, pack('V', 1)), self::reject(ErrorCode::INVALID_IMAGE)),
@@ -301,6 +311,18 @@ final class ImageCorpus
         $exif = "II*\0" . pack('V', 8) . "\0\0" . pack('V', 0);
         $frame = ImageBuilder::webpChunk('ANMF', ImageBuilder::repeat("\0", 6) . ImageBuilder::uint24(7) . ImageBuilder::uint24(7)
             . ImageBuilder::uint24(100) . "\0" . ImageBuilder::webpChunk('VP8L', ImageBuilder::vp8l(8, 8)));
+        $zip = "PK\x05\x06" . ImageBuilder::repeat("\0", 18);
+        // The VP8 payload of the 16 x 16 lossy sample follows the RIFF header and its chunk header.
+        $vp8 = (string) substr($lossy, 12 + 8, ImageBuilder::readUint32($lossy, 16, false));
+        $alpha = ImageBuilder::webpChunk('ALPH', "\0" . ImageBuilder::repeat("\xFF", 16 * 16));
+        // An 8 x 8 animation of one frame of $frameSize x $frameSize: $animationData follows the fields of ANIM,
+        // $frameData those of the frame.
+        $animation = static function (string $animationData, string $frameData, int $frameSize = 8): string {
+            return ImageBuilder::riff(ImageBuilder::vp8x(0x02, 8, 8) . ImageBuilder::webpChunk('ANIM', "\0\0\0\0\0\0" . $animationData)
+                . ImageBuilder::webpChunk('ANMF', ImageBuilder::repeat("\0", 6) . ImageBuilder::uint24($frameSize - 1) . ImageBuilder::uint24($frameSize - 1)
+                . ImageBuilder::uint24(100) . "\0" . $frameData));
+        };
+        $bitstream = ImageBuilder::webpChunk('VP8L', ImageBuilder::vp8l(8, 8));
 
         return [
             'webp/valid-lossy.webp' => self::committed($lossy, self::accept(ImageFormat::WEBP, 16, 16, 1, ['bit_depth' => 8, 'icc_profile' => false, 'exif' => false, 'metadata' => false, 'orientation' => 1, 'trailing_data' => false])),
@@ -329,8 +351,26 @@ final class ImageCorpus
             ),
             'webp/valid-unknown-chunk.webp' => self::committed(
                 ImageBuilder::riff(ImageBuilder::vp8x(0, 8, 8) . ImageBuilder::webpChunk('VP8L', ImageBuilder::vp8l(8, 8))
-                    . ImageBuilder::webpChunk('ZIPS', "PK\x05\x06" . ImageBuilder::repeat("\0", 18))),
+                    . ImageBuilder::webpChunk('ZIPS', $zip)),
                 self::accept(ImageFormat::WEBP, 8, 8, 1, ['metadata' => true, 'trailing_data' => true])
+            ),
+            // Decoders read the fields of ANIM and ANMF, and the bitstream of a frame: they skip anything after.
+            'webp/valid-zip-in-anim.webp' => self::committed($animation($zip, $bitstream), self::accept(ImageFormat::WEBP, 8, 8, 1, ['metadata' => false, 'trailing_data' => true])),
+            'webp/valid-zip-in-frame.webp' => self::committed($animation('', $bitstream . $zip), self::accept(ImageFormat::WEBP, 8, 8, 1, ['metadata' => false, 'trailing_data' => true])),
+            'webp/valid-unknown-chunk-in-frame.webp' => self::committed(
+                $animation('', $bitstream . ImageBuilder::webpChunk('ZIPS', $zip)),
+                self::accept(ImageFormat::WEBP, 8, 8, 1, ['metadata' => false, 'trailing_data' => true])
+            ),
+            // Alpha data comes right before a lossy bitstream, in a still image or at the start of a frame.
+            'webp/valid-lossy-alpha.webp' => self::committed(
+                ImageBuilder::riff(ImageBuilder::vp8x(0x10, 16, 16) . $alpha . ImageBuilder::webpChunk('VP8 ', $vp8)),
+                self::accept(ImageFormat::WEBP, 16, 16, 1, ['metadata' => false, 'trailing_data' => false])
+            ),
+            'webp/valid-lossy-alpha-frame.webp' => self::committed(
+                ImageBuilder::riff(ImageBuilder::vp8x(0x12, 16, 16) . ImageBuilder::webpChunk('ANIM', "\0\0\0\0\0\0")
+                    . ImageBuilder::webpChunk('ANMF', ImageBuilder::repeat("\0", 6) . ImageBuilder::uint24(15) . ImageBuilder::uint24(15)
+                    . ImageBuilder::uint24(100) . "\0" . $alpha . ImageBuilder::webpChunk('VP8 ', $vp8))),
+                self::accept(ImageFormat::WEBP, 16, 16, 1, ['trailing_data' => false])
             ),
             // The most chunks an extended file may have, then one too many.
             'webp/valid-most-chunks.webp' => self::generated(self::webpOfChunks(WebpParser::MAX_CHUNKS - 2), self::accept(ImageFormat::WEBP, 8, 8, 1, ['metadata' => true, 'trailing_data' => true])),
@@ -359,6 +399,35 @@ final class ImageCorpus
                 self::reject(ErrorCode::INVALID_IMAGE)
             ),
             'webp/spoof-frame-without-anim.webp' => self::committed(ImageBuilder::riff(ImageBuilder::vp8x(0x02, 8, 8) . $frame), self::reject(ErrorCode::INVALID_IMAGE)),
+            // Decoders size a frame from its bitstream, and need one.
+            'webp/spoof-frame-bitstream-size.webp' => self::committed($animation('', $bitstream, 1), self::reject(ErrorCode::INVALID_IMAGE)),
+            'webp/spoof-frame-without-bitstream.webp' => self::committed($animation('', ImageBuilder::webpChunk('ZIPS', $zip)), self::reject(ErrorCode::INVALID_IMAGE)),
+            // Decoders disagree on alpha data anywhere but right before a lossy bitstream.
+            'webp/spoof-alpha-before-lossless.webp' => self::committed(
+                ImageBuilder::riff(ImageBuilder::vp8x(0x10, 8, 8) . $alpha . $bitstream),
+                self::reject(ErrorCode::INVALID_IMAGE)
+            ),
+            'webp/spoof-alpha-after-bitstream.webp' => self::committed(
+                ImageBuilder::riff(ImageBuilder::vp8x(0x10, 16, 16) . ImageBuilder::webpChunk('VP8 ', $vp8) . $alpha),
+                self::reject(ErrorCode::INVALID_IMAGE)
+            ),
+            'webp/spoof-two-alpha-chunks.webp' => self::committed(
+                ImageBuilder::riff(ImageBuilder::vp8x(0x10, 16, 16) . $alpha . $alpha . ImageBuilder::webpChunk('VP8 ', $vp8)),
+                self::reject(ErrorCode::INVALID_IMAGE)
+            ),
+            'webp/spoof-alpha-outside-frames.webp' => self::committed(
+                ImageBuilder::riff(ImageBuilder::vp8x(0x12, 8, 8) . ImageBuilder::webpChunk('ANIM', "\0\0\0\0\0\0") . $alpha . $frame),
+                self::reject(ErrorCode::INVALID_IMAGE)
+            ),
+            // libwebp decodes a still image only when VP8X has its exact size, while its demuxer takes a longer chunk.
+            'webp/spoof-zip-in-vp8x.webp' => self::committed(
+                ImageBuilder::riff(ImageBuilder::webpChunk('VP8X', "\0\0\0\0" . ImageBuilder::uint24(7) . ImageBuilder::uint24(7) . $zip) . $bitstream),
+                self::reject(ErrorCode::INVALID_IMAGE)
+            ),
+            'webp/spoof-anim-too-short.webp' => self::committed(
+                ImageBuilder::riff(ImageBuilder::vp8x(0x02, 8, 8) . ImageBuilder::webpChunk('ANIM', "\0\0\0\0") . $frame),
+                self::reject(ErrorCode::INVALID_IMAGE)
+            ),
             'webp/spoof-riff-avi.webp' => self::committed('RIFF' . pack('V', 16) . 'AVI LIST' . pack('V', 4) . 'hdrl', self::reject(ErrorCode::UNSUPPORTED_FORMAT)),
             'webp/truncated.webp' => self::committed((string) substr($lossless, 0, -4), self::reject(ErrorCode::INVALID_IMAGE)),
         ];
@@ -590,6 +659,21 @@ final class ImageCorpus
 
         // The profile offset (at 112 in the V5 header) counts from the start of the header, 124 bytes long.
         return ImageBuilder::patch($bmp, 14 + 112, pack('V', 124));
+    }
+
+    /**
+     * A 4 x 4 V5 BMP with $gap between its pixel data and its embedded colour profile, which follows them.
+     */
+    private static function bmpGapBeforeProfile(string $gap): string
+    {
+        $profile = ImageBuilder::iccProfile();
+        $bmp = ImageBuilder::bmp(4, 4, 32, 3, 124, false, 'MBED', $profile);
+        $bytes = substr($bmp, 0, -strlen($profile)) . $gap . $profile;
+        // The file size follows the signature; the profile offset (at 112 in the V5 header) counts from the start of
+        // the header.
+        $bytes = ImageBuilder::patch($bytes, 2, pack('V', strlen($bytes)));
+
+        return ImageBuilder::patch($bytes, 14 + 112, pack('V', ImageBuilder::readUint32($bytes, 14 + 112, false) + strlen($gap)));
     }
 
     /**

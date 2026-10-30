@@ -26,9 +26,10 @@ use Mfonte\SecureImageConverter\Validation\Limits;
  *   by file name are variants this library does not process: they are refused as unsupported formats. An embedded
  *   colour profile (V5 PROFILE_EMBEDDED) must lie inside the file.
  *
- * BMP carries no metadata besides the colour profile. The bit depth is 16 for 64-bit images and 8 otherwise. Bytes
- * between the palette and the pixel data other than the colour profile, and bytes after the pixel data and the colour
- * profile, are trailing data.
+ * BMP carries no metadata besides the colour profile. The bit depth is 16 for 64-bit images and 8 otherwise. Decoders
+ * read the headers and bit masks, the palette of an image of 8 bits or less (images of more bits have none to read,
+ * whatever the colours-used field says), the pixel data and the colour profile: any other byte of the file, before,
+ * between or after them, is trailing data.
  *
  * @internal
  */
@@ -158,18 +159,40 @@ final class BmpParser implements ParserInterface
         }
 
         list($profileStart, $profileEnd) = $headerSize === 124 ? self::embeddedProfile($reader, $size) : [0, 0];
-        // Decoders skip the bytes between the palette and the pixel data: anything there but the colour profile is
-        // hidden data, as are bytes after the pixel data and the profile.
-        $paletteEntries = $bitCount <= 8 && $colours === 0 ? 1 << $bitCount : $colours;
-        $gap = $dataOffset - min($dataOffset, $headersEnd + $paletteEntries * $paletteEntrySize);
-        if ($profileEnd > 0 && $profileStart >= $dataOffset - $gap && $profileEnd <= $dataOffset) {
-            $gap -= $profileEnd - $profileStart;
+        $paletteEnd = $headersEnd;
+        if ($bitCount <= 8) {
+            $paletteEnd = min($dataOffset, $headersEnd + ($colours === 0 ? 1 << $bitCount : $colours) * $paletteEntrySize);
+        }
+        $regions = [[0, $paletteEnd], [$dataOffset, $end]];
+        if ($profileEnd > 0) {
+            $regions[] = [$profileStart, $profileEnd];
         }
 
         return (new ImageInfo(ImageFormat::BMP, $width, $height, 1, $size))
             ->withBitDepth($bitCount === 64 ? 16 : 8)
             ->withMetadata($profileEnd > 0, false, false)
-            ->withTrailingData($gap > 0 || $size > max($end, $profileEnd));
+            ->withTrailingData(!self::covers($regions, $size));
+    }
+
+    /**
+     * Whether the regions that decoders read cover every byte of the file.
+     *
+     * @param list<array{0: int, 1: int}> $regions start and end offsets
+     */
+    private static function covers(array $regions, int $size): bool
+    {
+        // Each pass extends the covered start of the file by the regions that begin inside it, until none does.
+        $covered = 0;
+        do {
+            $previous = $covered;
+            foreach ($regions as list($start, $end)) {
+                if ($start <= $covered) {
+                    $covered = max($covered, $end);
+                }
+            }
+        } while ($covered > $previous && $covered < $size);
+
+        return $covered >= $size;
     }
 
     /**
