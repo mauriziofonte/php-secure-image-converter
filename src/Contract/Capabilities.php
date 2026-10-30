@@ -14,8 +14,11 @@ use Mfonte\SecureImageConverter\Contract\Exception\LimitExceededException;
  * Limits bound both sides of a conversion. max_bytes bounds the input file. The dimension, pixel and frame limits
  * bound the input, checked on header data before any decoder runs (assertInputWithinLimits()), and the output
  * resolved from the request, checked before any encoder runs (assertOutputWithinLimits() on
- * ConversionRequest::resolveOutputSize() and resolveOutputFrameCount()). A violation throws LimitExceededException:
- * error code file_too_large (413) for max_bytes, image_too_large (422) for every other limit.
+ * ConversionRequest::resolveOutputSize() and resolveOutputFrameCount()); the output width and height are also capped
+ * at OUTPUT_DIMENSION_MAX, the largest size every output format can encode. A violation throws
+ * LimitExceededException: error code file_too_large (413) for max_bytes, image_too_large (422) for every other limit.
+ * The checks use 64-bit integer arithmetic, exact for every value up to LIMIT_VALUE_MAX: composer.json requires a
+ * 64-bit PHP (php-64bit).
  *
  * Immutable value object. Format lists are normalised to the canonical order of ImageFormat::all(); backends keep
  * their order, which is the order of preference. The conversion API publishes toArray() as JSON on /healthz and the
@@ -41,6 +44,8 @@ use Mfonte\SecureImageConverter\Contract\Exception\LimitExceededException;
  */
 final class Capabilities
 {
+    use ValidatedSerializationTrait;
+
     /**
      * Version of the array shape produced by toArray() and accepted by fromArray().
      */
@@ -52,12 +57,12 @@ final class Capabilities
     public const LIMIT_MAX_BYTES = 'max_bytes';
 
     /**
-     * Maximum width in pixels of the input and of the resolved output.
+     * Maximum width in pixels of the input and of the resolved output (the latter never above OUTPUT_DIMENSION_MAX).
      */
     public const LIMIT_MAX_WIDTH = 'max_width';
 
     /**
-     * Maximum height in pixels of the input and of the resolved output.
+     * Maximum height in pixels of the input and of the resolved output (the latter never above OUTPUT_DIMENSION_MAX).
      */
     public const LIMIT_MAX_HEIGHT = 'max_height';
 
@@ -80,9 +85,19 @@ final class Capabilities
 
     /**
      * Largest value of any limit, 2^31 - 1, so that limits read exactly in any JSON consumer and that pixel
-     * arithmetic on values within the limits cannot overflow.
+     * arithmetic on values within the limits cannot overflow a 64-bit integer (32-bit PHP is not supported:
+     * composer.json requires php-64bit).
      */
     public const LIMIT_VALUE_MAX = 2147483647;
+
+    /**
+     * Largest width and height of a resolved output, whatever max_width and max_height allow: 16383 px
+     * (ConversionRequest::DIMENSION_MAX), the largest dimension WEBP can encode and the smallest maximum among the
+     * output formats. assertOutputWithinLimits() refuses a wider or taller output with image_too_large (422) before
+     * any encoder runs, so that a size no encoder of the fallback chain could write never ends as conversion_failed
+     * (500). Inputs may be larger, up to max_width and max_height, and be resized down.
+     */
+    public const OUTPUT_DIMENSION_MAX = ConversionRequest::DIMENSION_MAX;
 
     /**
      * @var list<string>
@@ -213,27 +228,6 @@ final class Capabilities
             $isolationLevel,
             self::checkLimits($limits)
         );
-    }
-
-    /**
-     * Validates an unserialized instance as fromArray() would, so that a tampered or outdated serialized string
-     * cannot produce capabilities outside the documented domain.
-     *
-     * @throws InvalidArgumentException when the unserialized state is not valid
-     */
-    public function __wakeup(): void
-    {
-        $state = get_object_vars($this);
-
-        try {
-            // toArray() copies the properties without converting them, so fromArray() sees the state as it is.
-            $valid = get_object_vars(self::fromArray($this->toArray())) === $state;
-        } catch (InvalidArgumentException $exception) {
-            $valid = false;
-        }
-        if (!$valid) {
-            throw new InvalidArgumentException('The serialized Capabilities are not valid.');
-        }
     }
 
     /**
@@ -393,7 +387,9 @@ final class Capabilities
     /**
      * Checks the output resolved from a request (ConversionRequest::resolveOutputSize() and
      * resolveOutputFrameCount()) against the dimension, pixel and frame limits, before any encoder runs. Limits are
-     * checked in the order of limitNames() and the first one exceeded is reported.
+     * checked in the order of limitNames() and the first one exceeded is reported. Width and height are checked
+     * against max_width and max_height capped at OUTPUT_DIMENSION_MAX, which the exception then reports as the
+     * maximum.
      *
      * @param int $width      resolved output width in pixels, at least 1
      * @param int $height     resolved output height in pixels, at least 1
@@ -426,6 +422,18 @@ final class Capabilities
     }
 
     /**
+     * Copy of these capabilities rebuilt from their property values by fromArray(), so that unserialized
+     * capabilities cannot hold a value outside the documented domain; see ValidatedSerializationTrait. toArray()
+     * copies the properties without converting them, so fromArray() sees them as they are.
+     *
+     * @throws InvalidArgumentException when a property value is not valid
+     */
+    private function validatedCopy(): self
+    {
+        return self::fromArray($this->toArray());
+    }
+
+    /**
      * @throws LimitExceededException
      * @throws InvalidArgumentException
      */
@@ -440,10 +448,17 @@ final class Capabilities
             ));
         }
 
-        self::assertAtMost(self::LIMIT_MAX_WIDTH, $this->limits[self::LIMIT_MAX_WIDTH], $width, $output);
-        self::assertAtMost(self::LIMIT_MAX_HEIGHT, $this->limits[self::LIMIT_MAX_HEIGHT], $height, $output);
+        $maxWidth = $this->limits[self::LIMIT_MAX_WIDTH];
+        $maxHeight = $this->limits[self::LIMIT_MAX_HEIGHT];
+        if ($output) {
+            $maxWidth = min($maxWidth, self::OUTPUT_DIMENSION_MAX);
+            $maxHeight = min($maxHeight, self::OUTPUT_DIMENSION_MAX);
+        }
+        self::assertAtMost(self::LIMIT_MAX_WIDTH, $maxWidth, $width, $output);
+        self::assertAtMost(self::LIMIT_MAX_HEIGHT, $maxHeight, $height, $output);
 
-        // Width and height are now at most LIMIT_VALUE_MAX, and so is every limit: none of these products overflows.
+        // Width and height are now at most LIMIT_VALUE_MAX, and so is every limit: none of these products overflows
+        // a 64-bit integer.
         $pixels = $width * $height;
         self::assertAtMost(self::LIMIT_MAX_MEGAPIXELS, $this->limits[self::LIMIT_MAX_MEGAPIXELS] * 1000000, $pixels, $output);
         self::assertAtMost(self::LIMIT_MAX_FRAMES, $this->limits[self::LIMIT_MAX_FRAMES], $frameCount, $output);

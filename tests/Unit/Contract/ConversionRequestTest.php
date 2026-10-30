@@ -1086,8 +1086,68 @@ final class ConversionRequestTest extends TestCase
 
         $state = self::stateOf(new ConversionRequest()) + ['injected' => 'value'];
         $this->expectException(InvalidArgumentException::class);
-        // @ silences the PHP 8.2+ deprecation for the dynamic property, so that __wakeup() is reached.
-        @unserialize(self::serializedWithState(ConversionRequest::class, $state), ['allowed_classes' => [ConversionRequest::class]]);
+        unserialize(self::serializedWithState(ConversionRequest::class, $state), ['allowed_classes' => [ConversionRequest::class]]);
+    }
+
+    /**
+     * PHP 7.2 and 7.3 assign serialized properties to their declared slots whatever their order, and so does
+     * __unserialize() on PHP 7.4 and later.
+     */
+    public function testUnserializeAcceptsPropertiesInAnyOrder(): void
+    {
+        $request = (new ConversionRequest('avif'))->withQuality(55);
+        $state = array_reverse(self::stateOf($request), true);
+
+        self::assertEquals(
+            $request,
+            unserialize(self::serializedWithState(ConversionRequest::class, $state), ['allowed_classes' => [ConversionRequest::class]])
+        );
+    }
+
+    /**
+     * The private properties under their mangled names, in declaration order: what PHP 7.2 and 7.3 write natively
+     * and what __serialize() writes on PHP 7.4 and later, so that a string written by one version is read by another.
+     * A restored request is serialized again to the same string.
+     */
+    public function testSerializedFormIsTheSameOnEveryPhpVersion(): void
+    {
+        $request = (new ConversionRequest('avif'))->withQuality(55)->withWidth(640);
+        $expected = self::serializedWithState(ConversionRequest::class, self::stateOf($request));
+
+        self::assertSame($expected, serialize($request));
+        self::assertSame($expected, serialize(unserialize($expected, ['allowed_classes' => [ConversionRequest::class]])));
+    }
+
+    public function testUnserializeAcceptsBarePropertyNames(): void
+    {
+        $request = (new ConversionRequest('avif'))->withQuality(55);
+        $serialized = self::serializedWithState(ConversionRequest::class, self::stateOf($request), [], true);
+
+        self::assertEquals($request, unserialize($serialized, ['allowed_classes' => [ConversionRequest::class]]));
+    }
+
+    /**
+     * A crafted string can make two properties share one PHP reference ("R:" back-reference). unserialize() must
+     * rebuild them by value: otherwise withQuality() on the restored request would also change its effort, in the
+     * modified copy and in the restored request itself.
+     */
+    public function testUnserializeBreaksAReferenceSharedByTwoProperties(): void
+    {
+        $state = self::stateOf((new ConversionRequest())->withQuality(4));
+        self::assertSame(4, $state['effort']);
+        $serialized = self::serializedWithState(
+            ConversionRequest::class,
+            $state,
+            ['effort' => sprintf('R:%d;', self::referenceNumberOf($state, 'quality'))]
+        );
+
+        $restored = unserialize($serialized, ['allowed_classes' => [ConversionRequest::class]]);
+        self::assertInstanceOf(ConversionRequest::class, $restored);
+        $modified = $restored->withQuality(100);
+
+        self::assertSame([100, 4], [$modified->getQuality(), $modified->getEffort()]);
+        self::assertSame([4, 4], [$restored->getQuality(), $restored->getEffort()]);
+        self::assertEquals((new ConversionRequest())->withQuality(4), $restored);
     }
 
     public function testFingerprintIsShortLowercaseHex(): void

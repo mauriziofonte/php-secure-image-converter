@@ -272,4 +272,39 @@ final class ConversionResultTest extends TestCase
 
         unserialize(self::serializedWithState(ConversionResult::class, $state), ['allowed_classes' => [ConversionResult::class]]);
     }
+
+    /**
+     * The private properties under their mangled names, in declaration order, on every PHP version. A restored
+     * instance is serialized again to the same string.
+     */
+    public function testSerializedFormIsTheSameOnEveryPhpVersion(): void
+    {
+        $result = self::create();
+        $expected = self::serializedWithState(ConversionResult::class, self::stateOf($result));
+
+        self::assertSame($expected, serialize($result));
+        self::assertSame($expected, serialize(unserialize($expected, ['allowed_classes' => [ConversionResult::class]])));
+    }
+
+    /**
+     * A crafted string can make a property and an array element share one PHP reference ("R:" back-reference).
+     * unserialize() must rebuild them by value: otherwise a caller changing the array returned by getWarnings() would
+     * change the output path of the restored result.
+     */
+    public function testUnserializeBreaksAReferenceSharedByAPropertyAndAnArrayElement(): void
+    {
+        $state = self::stateOf(self::create(['warnings' => ['/tmp/out/photo.webp']]));
+        $raw = sprintf('a:1:{i:0;R:%d;}', self::referenceNumberOf($state, 'outputPath'));
+
+        $restored = unserialize(
+            self::serializedWithState(ConversionResult::class, $state, ['warnings' => $raw]),
+            ['allowed_classes' => [ConversionResult::class]]
+        );
+        self::assertInstanceOf(ConversionResult::class, $restored);
+        $warnings = $restored->getWarnings();
+        $warnings[0] = 'changed';
+
+        self::assertSame('/tmp/out/photo.webp', $restored->getOutputPath());
+        self::assertSame(['/tmp/out/photo.webp'], $restored->getWarnings());
+    }
 }

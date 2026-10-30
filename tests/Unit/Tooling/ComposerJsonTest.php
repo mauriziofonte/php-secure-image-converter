@@ -57,12 +57,21 @@ final class ComposerJsonTest extends TestCase
         self::assertSame('^7.2.5 || ^8.0', self::section('require')['php']);
     }
 
+    /**
+     * The overflow-free pixel arithmetic of the contract (Capabilities::LIMIT_VALUE_MAX) needs 64-bit integers, so
+     * Composer refuses to install the library on a 32-bit PHP.
+     */
+    public function testSixtyFourBitPhpIsRequired(): void
+    {
+        self::assertSame('*', self::section('require')['php-64bit'] ?? null);
+    }
+
     public function testPsrLogIsTheOnlyRuntimePackage(): void
     {
         $packages = [];
         foreach (self::section('require') as $name => $constraint) {
             self::assertIsString($name);
-            if ($name !== 'php' && strpos($name, 'ext-') !== 0) {
+            if (!in_array($name, ['php', 'php-64bit'], true) && strpos($name, 'ext-') !== 0) {
                 $packages[$name] = $constraint;
             }
         }

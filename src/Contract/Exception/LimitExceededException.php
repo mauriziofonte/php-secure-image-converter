@@ -140,7 +140,9 @@ final class LimitExceededException extends \RangeException implements ExceptionI
     }
 
     /**
-     * Value of the limit, in bytes, pixels or frames. Megapixel limits are converted to pixels.
+     * Value of the limit, in bytes, pixels or frames. Megapixel limits are converted to pixels. For the width and
+     * height of a resolved output it is the effective maximum: max_width or max_height capped at
+     * Capabilities::OUTPUT_DIMENSION_MAX.
      */
     public function getMaximum(): int
     {

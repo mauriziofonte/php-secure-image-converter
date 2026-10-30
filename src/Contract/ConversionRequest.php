@@ -14,7 +14,7 @@ use Mfonte\SecureImageConverter\Contract\Exception\InvalidRequestException;
  * Immutable value object: every with*() method validates its argument and returns a modified copy, leaving the
  * original untouched; an invalid argument throws InvalidRequestException and creates nothing. A new instance holds
  * the defaults (webp, default quality, effort 4, no resize, metadata stripped but ICC profile kept, animation
- * preserved). An unserialized instance is validated again, see __wakeup().
+ * preserved). An unserialized instance is validated again and rebuilt by value, see ValidatedSerializationTrait.
  *
  * This class is the single source of truth for conversion parameters across the library, the conversion API and the
  * proxy: the API maps HTTP parameters with fromParameters(), the proxy sends toParameters() to the API, and caches
@@ -49,6 +49,8 @@ use Mfonte\SecureImageConverter\Contract\Exception\InvalidRequestException;
  */
 final class ConversionRequest
 {
+    use ValidatedSerializationTrait;
+
     /**
      * Target format meaning "keep the input format": the image is only resized and/or stripped of metadata, and
      * re-encoded in its own format.
@@ -264,32 +266,6 @@ final class ConversionRequest
     public function __construct(string $format = self::DEFAULT_FORMAT)
     {
         $this->format = self::checkChoice(self::PARAM_FORMAT, $format, self::TARGET_FORMATS);
-    }
-
-    /**
-     * Validates an unserialized instance as fromParameters() would, so that a tampered or outdated serialized string
-     * cannot produce a request outside the documented domain (for example the format "gif").
-     *
-     * @throws InvalidArgumentException when the unserialized state is not a valid request
-     */
-    public function __wakeup(): void
-    {
-        $state = get_object_vars($this);
-        $parameters = [];
-        foreach (self::PROPERTY_PARAMETERS as $property => $parameter) {
-            if (isset($state[$property])) {
-                $parameters[$parameter] = $state[$property];
-            }
-        }
-
-        try {
-            $valid = get_object_vars(self::fromParameters($parameters)) === $state;
-        } catch (InvalidRequestException $exception) {
-            $valid = false;
-        }
-        if (!$valid) {
-            throw new InvalidArgumentException('The serialized ConversionRequest is not a valid request.');
-        }
     }
 
     /**
@@ -691,10 +667,12 @@ final class ConversionRequest
      *   either axis is scaled down with its own aspect ratio until it fits inside the input, and a fill box is
      *   clamped to the input on each axis.
      *
-     * Computed dimensions are rounded half up and are never below 1. Only integer arithmetic is used, so the result is
-     * the same on every platform: the pipeline resizes to exactly this size and the output verification expects it.
-     * The result is not bounded by DIMENSION_MAX (only one side up to 16383 is requested; the other follows the input)
-     * and must be checked with Capabilities::assertOutputWithinLimits() before any encoder runs.
+     * Computed dimensions are rounded half up and are never below 1. Only 64-bit integer arithmetic is used
+     * (composer.json requires php-64bit), so the result is the same on every platform: the pipeline resizes to exactly
+     * this size and the output verification expects it. The result is not bounded by DIMENSION_MAX (only one side up
+     * to 16383 is requested; the other follows the input) and must be checked with
+     * Capabilities::assertOutputWithinLimits() before any encoder runs, which refuses a side above
+     * Capabilities::OUTPUT_DIMENSION_MAX.
      *
      * @param int $inputWidth  input width in pixels, 1 to Capabilities::LIMIT_VALUE_MAX
      * @param int $inputHeight input height in pixels, 1 to Capabilities::LIMIT_VALUE_MAX
@@ -884,6 +862,26 @@ final class ConversionRequest
     }
 
     /**
+     * Copy of this request rebuilt from its property values by fromParameters(), so that an unserialized request
+     * cannot hold a value outside the documented domain (for example the format "gif"); see
+     * ValidatedSerializationTrait.
+     *
+     * @throws InvalidRequestException when a property value is not a valid parameter value
+     */
+    private function validatedCopy(): self
+    {
+        $state = get_object_vars($this);
+        $parameters = [];
+        foreach (self::PROPERTY_PARAMETERS as $property => $parameter) {
+            if (isset($state[$property])) {
+                $parameters[$parameter] = $state[$property];
+            }
+        }
+
+        return self::fromParameters($parameters);
+    }
+
+    /**
      * @param list<string> $choices
      *
      * @throws InvalidRequestException
@@ -999,7 +997,9 @@ final class ConversionRequest
 
     /**
      * Rounds $value * $numerator / $denominator half up, with a minimum of 1. Callers keep one factor of the product
-     * at most DIMENSION_MAX and the other at most Capabilities::LIMIT_VALUE_MAX, so it cannot overflow.
+     * at most DIMENSION_MAX (below 2^14) and the other at most Capabilities::LIMIT_VALUE_MAX (below 2^31), so
+     * 2 * $value * $numerator + $denominator stays below 2^47 and cannot overflow a 64-bit integer (32-bit PHP is not
+     * supported: composer.json requires php-64bit).
      */
     private static function scale(int $value, int $numerator, int $denominator): int
     {

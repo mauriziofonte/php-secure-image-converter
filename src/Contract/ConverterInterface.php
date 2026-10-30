@@ -32,10 +32,12 @@ interface ConverterInterface
      *   $request->resolveOutputFormat(), its size with resolveOutputSize() and its frame count with
      *   resolveOutputFrameCount(). The resolved output is checked against the same dimension, pixel and frame limits
      *   (Capabilities::assertOutputWithinLimits()), so a request that would enlarge a small input to a huge output is
-     *   refused with LimitExceededException (image_too_large, 422) and never reaches an encoder.
-     * - When the resolved format cannot be produced, including when the resolved size exceeds what the format can
-     *   encode (WEBP holds at most 16383 x 16383 pixels), the converter falls back from AVIF to WEBP to the input
-     *   format and reports the fallback in the result's warnings; that is never a ConversionFailedException while a
+     *   refused with LimitExceededException (image_too_large, 422) and never reaches an encoder. That check also caps
+     *   the output width and height at Capabilities::OUTPUT_DIMENSION_MAX (16383 px, the WEBP maximum and the
+     *   smallest among the output formats), so a size that no format could hold is refused as image_too_large too
+     *   and never fails an encoder.
+     * - When the resolved format cannot be produced, the converter falls back from AVIF to WEBP to the input format
+     *   and reports the fallback in the result's warnings; that is never a ConversionFailedException while a
      *   fallback format remains.
      * - The output is verified before it is returned: its sniffed format, dimensions and frame count must match the
      *   resolved ones.

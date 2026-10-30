@@ -12,12 +12,15 @@ use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
  * Immutable value object. Format, dimensions and frame count describe the output file as verified after encoding
  * (sniffed from its content), not as requested. A passthrough result means that the output file holds the input
  * bytes unchanged, which a converter does only when the input already satisfies the request (see
- * ConverterInterface::convert()). An unserialized instance is validated again, see __wakeup().
+ * ConverterInterface::convert()). An unserialized instance is validated again and rebuilt by value, see
+ * ValidatedSerializationTrait.
  *
  * toArray() is safe for untrusted clients; toInternalArray() adds the output path and is meant for server logs.
  */
 final class ConversionResult
 {
+    use ValidatedSerializationTrait;
+
     /**
      * Backend name of a passthrough for which no backend ran. Reserved: no backend may use this name.
      */
@@ -308,18 +311,15 @@ final class ConversionResult
     }
 
     /**
-     * Validates an unserialized instance as the constructor would, so that a tampered or outdated serialized string
-     * cannot produce a result outside the documented domain.
+     * Copy of this result rebuilt from its property values by the constructor, so that an unserialized result cannot
+     * hold a value outside the documented domain; see ValidatedSerializationTrait.
      *
-     * @throws InvalidArgumentException when the unserialized state is not valid
+     * @throws InvalidArgumentException when a property value is not valid or not of its documented type
      */
-    public function __wakeup(): void
+    private function validatedCopy(): self
     {
-        $state = get_object_vars($this);
-
         try {
-            // strict_types makes a property of the wrong type a TypeError instead of a silent conversion.
-            $copy = new self(
+            return new self(
                 $this->outputPath,
                 $this->outputFormat,
                 $this->width,
@@ -332,14 +332,9 @@ final class ConversionResult
                 $this->passthrough,
                 $this->warnings
             );
-            $valid = get_object_vars($copy) === $state;
-        } catch (\TypeError $exception) {
-            $valid = false;
-        } catch (InvalidArgumentException $exception) {
-            $valid = false;
-        }
-        if (!$valid) {
-            throw new InvalidArgumentException('The serialized ConversionResult is not valid.');
+        } catch (\TypeError $exception) { // @phpstan-ignore catch.neverThrown (unserialize() can give a property any type, whatever its @var tag says)
+            // strict_types makes a property of the wrong type a TypeError instead of a silent conversion.
+            throw new InvalidArgumentException('A ConversionResult property does not hold a value of its type.');
         }
     }
 

@@ -44,6 +44,14 @@ final class CapabilitiesTest extends TestCase
         ];
     }
 
+    /**
+     * Capabilities whose limits are all LIMIT_VALUE_MAX: every bound then comes from the contract itself.
+     */
+    private static function createWithLargeLimits(): Capabilities
+    {
+        return new Capabilities([], [], [], [], 'none', array_fill_keys(Capabilities::limitNames(), Capabilities::LIMIT_VALUE_MAX));
+    }
+
     private static function create(): Capabilities
     {
         $data = self::validArray();
@@ -647,6 +655,86 @@ final class CapabilitiesTest extends TestCase
     }
 
     /**
+     * Resolved outputs wider or taller than OUTPUT_DIMENSION_MAX, with the limit reported and its actual value.
+     *
+     * @return array<string, array{int, int, string, int}>
+     */
+    public static function outputsAboveTheOutputDimensionMaximum(): array
+    {
+        return [
+            'one pixel too wide' => [16384, 1, 'max_width', 16384],
+            'one pixel too high' => [1, 16384, 'max_height', 16384],
+            'above the JPEG and GIF maximums' => [65536, 100, 'max_width', 65536],
+        ];
+    }
+
+    /**
+     * Whatever max_width and max_height allow, a resolved output above OUTPUT_DIMENSION_MAX (16383 px, the WEBP
+     * maximum) is refused as image_too_large (422) before any encoder runs, so that no encoder can fail on a size
+     * (conversion_failed, 500). An input of that size stays within the limits and may be resized down.
+     *
+     * @dataProvider outputsAboveTheOutputDimensionMaximum
+     */
+    #[DataProvider('outputsAboveTheOutputDimensionMaximum')]
+    public function testOutputAboveTheOutputDimensionMaximumIsImageTooLarge(int $width, int $height, string $limit, int $actual): void
+    {
+        $capabilities = self::createWithLargeLimits();
+        $capabilities->assertInputWithinLimits($width, $height, 1);
+
+        $exception = self::catchLimitExceeded(static function () use ($capabilities, $width, $height): void {
+            $capabilities->assertOutputWithinLimits($width, $height, 1);
+        });
+
+        self::assertSame(ErrorCode::IMAGE_TOO_LARGE, $exception->getErrorCode());
+        self::assertSame([$limit, 16383, $actual, true], [
+            $exception->getLimit(),
+            $exception->getMaximum(),
+            $exception->getActual(),
+            $exception->isOutputLimit(),
+        ]);
+    }
+
+    public function testOutputAtTheOutputDimensionMaximumIsAccepted(): void
+    {
+        self::assertSame(16383, Capabilities::OUTPUT_DIMENSION_MAX);
+        self::assertSame(ConversionRequest::DIMENSION_MAX, Capabilities::OUTPUT_DIMENSION_MAX);
+
+        self::createWithLargeLimits()->assertOutputWithinLimits(16383, 16383, 1);
+    }
+
+    /**
+     * A valid request can resolve to a side above OUTPUT_DIMENSION_MAX: only height is requested and the width
+     * follows the input's 4:1 aspect ratio. The resolved output is refused as image_too_large even where the host
+     * limits would allow it.
+     */
+    public function testRequestResolvingAboveTheOutputDimensionMaximumIsImageTooLarge(): void
+    {
+        $request = ConversionRequest::fromParameters(['height' => '16383', 'enlarge' => '1']);
+        list($width, $height) = $request->resolveOutputSize(4000, 1000);
+        self::assertSame([65532, 16383], [$width, $height]);
+        $capabilities = self::createWithLargeLimits();
+
+        $exception = self::catchLimitExceeded(static function () use ($capabilities, $width, $height): void {
+            $capabilities->assertOutputWithinLimits($width, $height, 1);
+        });
+
+        self::assertSame(ErrorCode::IMAGE_TOO_LARGE, $exception->getErrorCode());
+        self::assertSame('Resolved output width is 65532 px, above the limit of 16383 px (max_width).', $exception->getMessage());
+    }
+
+    /**
+     * A max_width or max_height below OUTPUT_DIMENSION_MAX keeps applying to the resolved output as configured.
+     */
+    public function testLowerOutputLimitsAreReportedAsConfigured(): void
+    {
+        $exception = self::catchLimitExceeded(static function (): void {
+            self::create()->assertOutputWithinLimits(16384, 1, 1);
+        });
+
+        self::assertSame(['max_width', 8192], [$exception->getLimit(), $exception->getMaximum()]);
+    }
+
+    /**
      * An animated output that fits every per-frame limit can still exceed the budget of all frames together.
      */
     public function testAnimatedOutputIsBoundByTheTotalPixelBudget(): void
@@ -704,6 +792,49 @@ final class CapabilitiesTest extends TestCase
         $this->expectException(InvalidArgumentException::class);
 
         unserialize(self::serializedWithState(Capabilities::class, $state), ['allowed_classes' => [Capabilities::class]]);
+    }
+
+    /**
+     * The private properties under their mangled names, in declaration order, on every PHP version. A restored
+     * instance is serialized again to the same string.
+     */
+    public function testSerializedFormIsTheSameOnEveryPhpVersion(): void
+    {
+        $capabilities = self::create();
+        $expected = self::serializedWithState(Capabilities::class, self::stateOf($capabilities));
+
+        self::assertSame($expected, serialize($capabilities));
+        self::assertSame($expected, serialize(unserialize($expected, ['allowed_classes' => [Capabilities::class]])));
+    }
+
+    /**
+     * A crafted string can make two array elements share one PHP reference ("R:" back-reference). unserialize() must
+     * rebuild the arrays by value: otherwise a caller changing the array returned by getLimits() would change the
+     * limits of the restored instance.
+     */
+    public function testUnserializeBreaksAReferenceSharedByTwoArrayElements(): void
+    {
+        $state = self::stateOf(self::create());
+        $limits = ['max_bytes' => 8192, 'max_width' => 8192] + self::validArray()['limits'];
+        $state['limits'] = $limits;
+        $maxBytesNumber = self::referenceNumberOf($state, 'limits') + 1;
+        $raw = sprintf('a:%d:{', count($limits));
+        foreach ($limits as $name => $value) {
+            $raw .= serialize($name) . ($name === 'max_width' ? sprintf('R:%d;', $maxBytesNumber) : serialize($value));
+        }
+        $raw .= '}';
+
+        $restored = unserialize(
+            self::serializedWithState(Capabilities::class, $state, ['limits' => $raw]),
+            ['allowed_classes' => [Capabilities::class]]
+        );
+        self::assertInstanceOf(Capabilities::class, $restored);
+        $copy = $restored->getLimits();
+        $copy['max_width'] = 1;
+
+        self::assertSame(8192, $restored->getLimit(Capabilities::LIMIT_MAX_BYTES));
+        self::assertSame(8192, $restored->getLimit(Capabilities::LIMIT_MAX_WIDTH));
+        self::assertSame($limits, $restored->getLimits());
     }
 
     /**
