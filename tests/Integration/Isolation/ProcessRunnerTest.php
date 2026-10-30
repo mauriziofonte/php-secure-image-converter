@@ -16,6 +16,7 @@ use Mfonte\SecureImageConverter\Isolation\ProcessOptions;
 use Mfonte\SecureImageConverter\Isolation\ProcessResult;
 use Mfonte\SecureImageConverter\Isolation\ProcessRunner;
 use Mfonte\SecureImageConverter\Isolation\ResourceLimits;
+use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\Group;
@@ -522,6 +523,45 @@ final class ProcessRunnerTest extends IsolationTestCase
         self::assertSame("line 1\nline 2\n\0binary", $result->getStdout());
     }
 
+    /**
+     * A program can reopen its standard input for writing through /proc/self/fd/0: the file must be one it may write
+     * anyway, in the working directory, and not reachable from outside through another link.
+     */
+    public function testStandardInputMustBeAFileOfTheWorkingDirectory(): void
+    {
+        $runner = new ProcessRunner(IsolationLevel::NONE);
+        $outside = WorkingDirectory::create();
+        try {
+            $secret = $outside->pathOf('secret.txt');
+            file_put_contents($secret, 'secret');
+            $symbolicLink = $this->workingDirectory()->pathOf('symbolic.txt');
+            symlink($secret, $symbolicLink);
+            $hardLink = $this->workingDirectory()->pathOf('hard.txt');
+            link($secret, $hardLink);
+            $parent = $this->workingDirectory()->getPath() . '/../' . basename($outside->getPath()) . '/secret.txt';
+
+            foreach ([$secret, $symbolicLink, $hardLink, $parent] as $path) {
+                try {
+                    $runner->run(['cat'], $this->workingDirectory(), $path);
+                    self::fail('The standard input must be refused.');
+                } catch (InvalidArgumentException $exception) {
+                    self::assertSame(
+                        'The standard input must be a readable regular file inside the working directory, without '
+                        . 'other hard links.',
+                        $exception->getMessage()
+                    );
+                }
+            }
+        } finally {
+            $outside->remove();
+        }
+
+        file_put_contents($this->workingDirectory()->pathOf('input.txt'), 'input');
+        symlink('input.txt', $this->workingDirectory()->pathOf('alias.txt'));
+        $result = $runner->run(['cat'], $this->workingDirectory(), $this->workingDirectory()->pathOf('alias.txt'));
+        self::assertSame('input', $result->getStdout(), 'a link that stays inside is resolved');
+    }
+
     public function testExplicitProgramPathsAreAccepted(): void
     {
         $result = (new ProcessRunner(IsolationLevel::NONE))->run([PHP_BINARY, '-n', '-r', 'echo 6 * 7;'], $this->workingDirectory());
@@ -541,6 +581,8 @@ final class ProcessRunnerTest extends IsolationTestCase
             'NUL in an argument' => [['echo', "a\0b"], null, []],
             'missing standard input' => [['cat'], '/nonexistent/input', []],
             'directory as standard input' => [['cat'], '/', []],
+            'standard input outside the working directory' => [['cat'], __FILE__, []],
+            'NUL in the standard input path' => [['cat'], "/nonexistent/input\0", []],
             'relative read-only path' => [['true'], null, ['input.png']],
             'missing read-only path' => [['true'], null, ['/nonexistent/input.png']],
         ];

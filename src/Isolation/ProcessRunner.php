@@ -38,10 +38,15 @@ use Mfonte\SecureImageConverter\Contract\IsolationLevel;
  * throws IsolationUnavailableException instead. IsolationDetector tells which level a host supports, and
  * IsolationPolicy decides which one to use.
  *
- * Standard input is /dev/null, or a file; stdout and stderr are captured through non-blocking pipes polled with
- * stream_select(), up to ProcessOptions::getMaxOutputBytes() each; further output is read and discarded (see
- * OutputCapture). When the pipes cannot be polled, because PHP holds 1024 or more descriptors open (FD_SETSIZE), the
- * run fails with ConversionFailedException: a run whose output was not read is never reported as successful.
+ * Standard input is /dev/null, or a regular file inside the working directory: a program can reopen its standard
+ * input for writing through /proc/self/fd/0, so it must never be a file that the program could not write anyway (a
+ * file outside the working directory, also through a symbolic link, or a file with other hard links is refused).
+ * Inputs from elsewhere are passed as read-only paths instead.
+ *
+ * stdout and stderr are captured through non-blocking pipes polled with stream_select(), up to
+ * ProcessOptions::getMaxOutputBytes() each; further output is read and discarded (see OutputCapture). When the pipes
+ * cannot be polled, because PHP holds 1024 or more descriptors open (FD_SETSIZE), the run fails with
+ * ConversionFailedException: a run whose output was not read is never reported as successful.
  *
  * proc_open() lets the child inherit every descriptor PHP holds open without close-on-exec: in PHP-FPM that can be
  * the FastCGI connection, database and cache sockets or open files, which would give a compromised decoder a way
@@ -203,15 +208,18 @@ final class ProcessRunner
      *
      * @param list<string> $command       program and arguments; the program is a name looked up in the search path or
      *                                    an absolute path
-     * @param string|null  $stdinPath     readable regular file to use as standard input; /dev/null when null
+     * @param string|null  $stdinPath     readable regular file inside the working directory, with a single link, to
+     *                                    use as standard input (symbolic links are resolved first); /dev/null when
+     *                                    null
      * @param list<string> $readOnlyPaths existing absolute paths (typically the input file) mounted read-only in the
      *                                    sandbox; ignored below the sandbox level
      *
      * @throws ConversionTimeoutException    when the wall-clock timeout expired (the process group was killed)
      * @throws IsolationUnavailableException when the level of this runner is not available on the host
      * @throws InvalidArgumentException      when the command (a NUL byte, a command line longer than
-     *                                       CommandBuilder::MAX_COMMAND_LINE_BYTES), the input or the working
-     *                                       directory is invalid
+     *                                       CommandBuilder::MAX_COMMAND_LINE_BYTES), the standard input (outside
+     *                                       the working directory), the read-only paths or the working directory
+     *                                       are invalid
      * @throws ConversionFailedException     when the process cannot be started, its output cannot be read, PHP holds
      *                                       too many descriptors for the open files limit, or its status is lost
      */
@@ -258,13 +266,13 @@ final class ProcessRunner
             ));
         }
         $command = $this->checkCommand($command);
-        if ($stdinPath !== null && (!is_file($stdinPath) || !is_readable($stdinPath))) {
-            throw new InvalidArgumentException('The standard input must be a readable regular file.');
-        }
         $readOnlyPaths = self::checkReadOnlyPaths($readOnlyPaths);
         $directory = $workingDirectory->getPath();
         if (is_link($directory) || !is_dir($directory)) {
             throw new InvalidArgumentException('The working directory no longer exists.');
+        }
+        if ($stdinPath !== null) {
+            $stdinPath = self::checkStandardInput($stdinPath, $directory);
         }
 
         $arguments = $this->builder->build($this->level, $command, $requirements['tools'], $directory, $readOnlyPaths);
@@ -676,6 +684,38 @@ final class ProcessRunner
         $checked[0] = $program;
 
         return $checked;
+    }
+
+    /**
+     * @throws InvalidArgumentException when the file is not a readable regular file inside the working directory with
+     *                                  a single link
+     *
+     * @return string the real path of the file
+     */
+    private static function checkStandardInput(string $path, string $directory): string
+    {
+        $message = 'The standard input must be a readable regular file inside the working directory, without other '
+            . 'hard links.';
+        if (strpos($path, "\0") !== false) {
+            throw new InvalidArgumentException($message);
+        }
+        $real = realpath($path);
+        $root = realpath($directory);
+        if (
+            !is_string($real)
+            || !is_string($root)
+            || strpos($real, rtrim($root, '/') . '/') !== 0
+            || !is_file($real)
+            || !is_readable($real)
+        ) {
+            throw new InvalidArgumentException($message);
+        }
+        $status = @stat($real);
+        if (!is_array($status) || $status['nlink'] !== 1) {
+            throw new InvalidArgumentException($message);
+        }
+
+        return $real;
     }
 
     /**
