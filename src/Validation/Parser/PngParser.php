@@ -25,7 +25,8 @@ use Mfonte\SecureImageConverter\Validation\Limits;
  *   CRC is checked) must describe a non-empty region inside the canvas, and their number must equal the declared
  *   frame count.
  *
- * Metadata: iCCP is the colour profile, eXIf is EXIF (and gives the orientation); tEXt, zTXt, iTXt, tIME and every
+ * Metadata: iCCP is the colour profile, eXIf is EXIF (and gives the orientation); tEXt, zTXt, iTXt, tIME, sPLT (a
+ * suggested palette of any length, which decoders do not render), animation chunks outside an animated PNG and every
  * unknown ancillary chunk are other metadata. Colour, transparency and animation chunks are not metadata. Bytes
  * after IEND are trailing data.
  *
@@ -63,7 +64,7 @@ final class PngParser implements ParserInterface
      */
     private const RENDERING_CHUNKS = [
         'acTL', 'fcTL', 'fdAT', 'bKGD', 'cHRM', 'cICP', 'cLLI', 'cLLi', 'gAMA', 'hIST', 'mDCV', 'mDCv', 'pHYs', 'sBIT',
-        'sPLT', 'sRGB', 'tRNS',
+        'sRGB', 'tRNS',
     ];
 
     private const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
@@ -150,6 +151,10 @@ final class PngParser implements ParserInterface
                     self::checkFrameControl(self::readCheckedPayload($reader, $type, $length), $width, $height);
 
                     continue 2;
+                case 'fdAT':
+                    // Frame data outside an animated PNG: ignored by decoders, an unknown ancillary chunk here.
+                    $otherMetadata = $otherMetadata || $declaredFrames === null;
+                    break;
                 case 'iCCP':
                     $iccProfile = true;
                     break;
