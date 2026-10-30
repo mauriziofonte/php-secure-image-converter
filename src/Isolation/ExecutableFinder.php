@@ -10,6 +10,9 @@ use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
  * Locates executables in a fixed list of directories, the way a shell searches PATH, but in PHP: the command that is
  * eventually run is always an absolute path, so neither the inherited PATH nor the current directory can substitute
  * another program.
+ *
+ * Under an open_basedir, programs outside it are not found: PHP cannot look at them. The checks are silenced, so
+ * that an error handler that turns warnings into exceptions (as frameworks install) does not break the search.
  */
 final class ExecutableFinder
 {
@@ -105,6 +108,6 @@ final class ExecutableFinder
 
     private static function isExecutableFile(string $path): bool
     {
-        return is_file($path) && is_executable($path);
+        return @is_file($path) && @is_executable($path);
     }
 }

@@ -380,7 +380,7 @@ final class IsolationDetector
         }
         $kernel = [];
         foreach (self::KERNEL_SETTINGS as $setting) {
-            $value = is_readable($setting) ? @file_get_contents($setting, false, null, 0, 64) : false;
+            $value = @is_readable($setting) ? @file_get_contents($setting, false, null, 0, 64) : false;
             $kernel[$setting] = is_string($value) ? trim($value) : null;
         }
 

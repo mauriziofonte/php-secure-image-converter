@@ -82,7 +82,8 @@ final class WorkingDirectory
 
     /**
      * Removes the directory and everything in it, never following symbolic links, and also when a process left
-     * entries without write or search permission. Calling it again does nothing.
+     * entries without write or search permission. Calling it again does nothing. With scandir() disabled
+     * (disable_functions), only an empty directory can be removed.
      *
      * @return bool whether the directory no longer exists
      */
@@ -99,7 +100,7 @@ final class WorkingDirectory
     private static function removeTree(string $directory): void
     {
         @chmod($directory, 0700);
-        $entries = @scandir($directory);
+        $entries = function_exists('scandir') ? @scandir($directory) : false;
         if (is_array($entries)) {
             foreach ($entries as $entry) {
                 if ($entry === '.' || $entry === '..') {

@@ -11,6 +11,7 @@ use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
 use Mfonte\SecureImageConverter\Contract\Exception\IsolationUnavailableException;
 use Mfonte\SecureImageConverter\Contract\IsolationLevel;
 use Mfonte\SecureImageConverter\Isolation\CommandBuilder;
+use Mfonte\SecureImageConverter\Isolation\IsolationDetector;
 use Mfonte\SecureImageConverter\Isolation\OutputCapture;
 use Mfonte\SecureImageConverter\Isolation\ProcessOptions;
 use Mfonte\SecureImageConverter\Isolation\ProcessResult;
@@ -650,7 +651,7 @@ final class ProcessRunnerTest extends IsolationTestCase
             IsolationLevel::NONE . ': ran 0',
             IsolationLevel::PROCESS . ': ' . ConversionFailedException::class . ': The open descriptors of this process'
                 . ' cannot be listed (neither /proc/self/fd nor /dev/fd is readable, for example because of'
-                . ' open_basedir), so the child could inherit them.',
+                . ' open_basedir, or scandir() is disabled), so the child could inherit them.',
         ], $output);
     }
 
@@ -680,6 +681,65 @@ final class ProcessRunnerTest extends IsolationTestCase
 
         self::assertNotSame([], preg_grep('/ 0 -> \/dev\/null$/', $output), implode("\n", $output));
         self::assertSame([], preg_grep('/' . preg_quote(basename(__FILE__), '/') . '/', $output));
+    }
+
+    /**
+     * Hosting panels disable functions such as scandir() and readlink(): the runner then fails closed with the
+     * library's exceptions or does without them, never with an \Error.
+     */
+    public function testDisabledScandirAndReadlinkFailClosed(): void
+    {
+        $this->requireLevel(IsolationLevel::PROCESS);
+        $output = $this->runPhp(
+            '-d',
+            'disable_functions=scandir,readlink',
+            '-r',
+            'require $argv[1]; $directory = ' . WorkingDirectory::class . '::create();'
+                . ' foreach (["' . IsolationLevel::NONE . '", "' . IsolationLevel::PROCESS . '"] as $level) {'
+                . ' try { $result = (new ' . ProcessRunner::class . '($level))->run(["true"], $directory);'
+                . ' echo $level, ": ran ", $result->getExitCode(), "\n"; }'
+                . ' catch (\Throwable $e) { echo $level, ": ", get_class($e), "\n"; } }'
+                // Without readlink() a linked system path is mounted at its own path instead of being recreated.
+                . ' mkdir($directory->pathOf("usr")); symlink($directory->pathOf("usr"), $directory->pathOf("lib"));'
+                . ' $options = (new ' . ProcessOptions::class . '())->withSandboxReadOnlyPaths([$directory->pathOf("lib")]);'
+                . ' $arguments = (new ' . CommandBuilder::class . '($options))->bubblewrapArguments("/tmp/job", []);'
+                . ' echo implode(" ", array_slice($arguments, 5, 3)) === "--ro-bind " . $directory->pathOf("lib") . " "'
+                . ' . $directory->pathOf("lib") ? "bound" : "not bound", "\n";'
+                . ' unlink($directory->pathOf("lib")); rmdir($directory->pathOf("usr")); var_dump($directory->remove());',
+            self::projectDirectory() . '/vendor/autoload.php'
+        );
+
+        self::assertSame([
+            IsolationLevel::NONE . ': ran 0',
+            IsolationLevel::PROCESS . ': ' . ConversionFailedException::class,
+            'bound',
+            'bool(true)',
+        ], $output);
+    }
+
+    /**
+     * Under an open_basedir that excludes the system directories (Plesk's default), programs cannot be found: the
+     * detection and the runner say so with the library's results and exceptions, without warnings that an error
+     * handler (as frameworks install) would turn into exceptions.
+     */
+    public function testAnOpenBasedirThatHidesProgramsRaisesNoWarning(): void
+    {
+        $output = $this->runPhp(
+            '-r',
+            'require $argv[1]; error_reporting(E_ALL);'
+                . ' set_error_handler(function ($severity, $message) {'
+                . ' if ((error_reporting() & $severity) === 0) { return false; } echo "warning: ", $message, "\n"; return true; });'
+                . ' ini_set("open_basedir", $argv[2] . ":" . sys_get_temp_dir());'
+                . ' echo "detected: ", (new ' . IsolationDetector::class . '(null, null, 0))->detect()->getLevel(), "\n";'
+                . ' $directory = ' . WorkingDirectory::class . '::create();'
+                . ' try { (new ' . ProcessRunner::class . '("' . IsolationLevel::NONE . '"))->run(["true"], $directory);'
+                . ' echo "ran\n"; } catch (\Throwable $e) { echo get_class($e), "\n"; }'
+                . ' $directory->remove();',
+            self::projectDirectory() . '/vendor/autoload.php',
+            self::projectDirectory()
+        );
+
+        self::assertSame(['detected: ' . IsolationLevel::NONE, InvalidArgumentException::class], $output);
     }
 
     /**

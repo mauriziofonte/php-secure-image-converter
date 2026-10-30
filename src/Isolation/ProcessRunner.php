@@ -56,7 +56,8 @@ use Mfonte\SecureImageConverter\Contract\IsolationLevel;
  * around the sandbox's network isolation. proc_open() cannot close a descriptor in the child, so every descriptor
  * above 2 that is open in PHP without close-on-exec when the run starts (read from /proc/self/fdinfo; without it,
  * every listed descriptor) is replaced with /dev/null in the child instead. When neither /proc/self/fd nor /dev/fd can
- * be listed (for example under an open_basedir that excludes them), the open descriptors are unknown: at the process
+ * be listed (for example under an open_basedir that excludes them, or with scandir() disabled), the open descriptors
+ * are unknown: at the process
  * level and above the run fails with ConversionFailedException before anything starts; at the none level, which
  * promises no isolation, they are inherited. These replacements occupy descriptor numbers in the child, and at the
  * rlimit and sandbox levels the open files limit (ResourceLimits::getOpenFiles()) caps those numbers: the run fails
@@ -292,7 +293,8 @@ final class ProcessRunner
             if (IsolationLevel::isAtLeast($this->level, IsolationLevel::PROCESS)) {
                 throw new ConversionFailedException(
                     'The open descriptors of this process cannot be listed (neither /proc/self/fd nor /dev/fd is '
-                    . 'readable, for example because of open_basedir), so the child could inherit them.'
+                    . 'readable, for example because of open_basedir, or scandir() is disabled), so the child could '
+                    . 'inherit them.'
                 );
             }
             $inherited = [];
@@ -414,6 +416,10 @@ final class ProcessRunner
      */
     private static function inheritedDescriptors(): ?array
     {
+        // A disabled scandir() (disable_functions) leaves the descriptors unlisted, like an open_basedir would.
+        if (!function_exists('scandir')) {
+            return null;
+        }
         $fromProc = true;
         $entries = @scandir('/proc/self/fd');
         if (!is_array($entries)) {

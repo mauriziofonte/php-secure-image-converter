@@ -110,11 +110,11 @@ final class CommandBuilder
     {
         $arguments = ['--unshare-all', '--die-with-parent', '--new-session', '--cap-drop', 'ALL'];
         foreach ($this->options->getSandboxReadOnlyPaths() as $path) {
-            if (is_link($path)) {
-                $target = readlink($path);
-                if (is_string($target)) {
-                    array_push($arguments, '--symlink', $target, $path);
-                }
+            // A link (such as /lib to usr/lib) is recreated as a link; without readlink() (disable_functions) its
+            // target is mounted at its path instead.
+            $target = is_link($path) && function_exists('readlink') ? @readlink($path) : false;
+            if (is_string($target)) {
+                array_push($arguments, '--symlink', $target, $path);
             } elseif (file_exists($path)) {
                 array_push($arguments, '--ro-bind', $path, $path);
             }
