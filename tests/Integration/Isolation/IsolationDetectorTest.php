@@ -4,11 +4,14 @@ declare(strict_types=1);
 
 namespace Mfonte\SecureImageConverter\Tests\Integration\Isolation;
 
+use Mfonte\SecureImageConverter\Contract\ConversionResult;
 use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
+use Mfonte\SecureImageConverter\Contract\Exception\IsolationUnavailableException;
 use Mfonte\SecureImageConverter\Contract\IsolationLevel;
 use Mfonte\SecureImageConverter\Isolation\DetectionResult;
 use Mfonte\SecureImageConverter\Isolation\ExecutableFinder;
 use Mfonte\SecureImageConverter\Isolation\IsolationDetector;
+use Mfonte\SecureImageConverter\Isolation\IsolationPolicy;
 use Mfonte\SecureImageConverter\Isolation\ProcessOptions;
 use Mfonte\SecureImageConverter\Isolation\ProcessRunner;
 use Mfonte\SecureImageConverter\Isolation\ResourceLimits;
@@ -18,7 +21,7 @@ use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\Group;
 
 /**
- * Detection by real probes, and the file cache and its defences.
+ * Detection by real probes, the file cache and its defences, and the policies applied to a real detection.
  *
  * @covers \Mfonte\SecureImageConverter\Isolation\IsolationDetector
  *
@@ -165,6 +168,37 @@ final class IsolationDetectorTest extends IsolationTestCase
         $detection = DetectionResult::fromArray($data);
         self::assertSame(IsolationLevel::NONE, $detection->getLevel());
         self::assertSame('proc_open() is disabled', $detection->getReason());
+    }
+
+    public function testStrictPolicyRefusesAndBestEffortDegradesOnARealHost(): void
+    {
+        $this->requireLevel(IsolationLevel::RLIMIT);
+        $options = (new ProcessOptions())->withToolPath(ProcessOptions::TOOL_BWRAP, self::program('false'));
+        $detection = (new IsolationDetector($options, null, 0))->detect();
+
+        try {
+            IsolationPolicy::strict(IsolationLevel::SANDBOX)->resolve($detection);
+            self::fail('The strict policy must refuse to run without the sandbox.');
+        } catch (IsolationUnavailableException $exception) {
+            self::assertSame(
+                'The strict isolation policy requires the sandbox level, but this host provides only rlimit: '
+                . 'bubblewrap (bwrap) failed to run a test command (exit code 1).',
+                $exception->getMessage()
+            );
+        }
+
+        self::assertSame(IsolationLevel::RLIMIT, IsolationPolicy::strict(IsolationLevel::RLIMIT)->resolve($detection)->getLevel());
+
+        $decision = IsolationPolicy::bestEffort(IsolationLevel::SANDBOX)->resolve($detection);
+        self::assertSame(IsolationLevel::RLIMIT, $decision->getLevel());
+        self::assertTrue($decision->isDegraded());
+        self::assertSame(
+            ['Isolation degraded to the rlimit level, below the expected sandbox level: '
+                . 'bubblewrap (bwrap) failed to run a test command (exit code 1).'],
+            $decision->getWarnings()
+        );
+        $result = new ConversionResult('/tmp/out.webp', 'webp', 1, 1, 1, 1, 'cwebp', 1, $decision->getLevel(), false, $decision->getWarnings());
+        self::assertSame($decision->getWarnings(), $result->getWarnings());
     }
 
     public function testTheResultIsCachedInMemory(): void
