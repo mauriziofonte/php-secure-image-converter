@@ -19,22 +19,25 @@ use Mfonte\SecureImageConverter\Validation\Limits;
  *   refused. At most MAX_BOXES boxes are visited, MAX_ENTRIES entries read from any table and MAX_ASSOCIATIONS property
  *   associations (ipma) and item extents (iloc) read in all; the ftyp box is at most 4 KiB and must list an "avif" or
  *   "avis" brand. A box that a decoder reads once (ftyp, meta and moov at the top; hdlr, pitm, iloc, iinf, iprp, iref,
- *   idat and dinf in meta; ipco and ipma in iprp; the boxes of a track's media and sample tables) may not appear twice,
- *   an item may not be described or associated twice, and an image item may not have two ispe, av1C, irot or imir
- *   properties: decoders disagree on which copy wins.
+ *   idat and dinf in meta; ipco and ipma in iprp; the boxes of a track's media and sample tables, and av1C in its AV1
+ *   sample entry) may not appear twice, an item may not be described or associated twice, and an image item may not
+ *   have two ispe, av1C, irot or imir properties: decoders disagree on which copy wins.
  * - Still image (meta box): the handler must be "pict" and the primary item (pitm) an AV1 image ("av01"); grids and
  *   other derived or coded items are refused as unsupported. Every AV1 image item (the primary image, its alpha plane,
  *   thumbnails; at most MAX_IMAGES) needs one "ispe" property whose size is checked against the limits, and its data
  *   (located through iloc, in the file or in idat, in a single extent; several extents are refused as unsupported) may
- *   not hold an AV1 sequence header that allows frames larger than that ispe. The primary item gives the dimensions;
- *   its "av1C" (or else "pixi") property the bit depth, a "colr" property of type "prof" or "rICC" the colour profile,
- *   its "irot" then "imir" properties the orientation. "Exif" items are EXIF, "mime" items (XMP) other metadata.
+ *   not hold an AV1 sequence header that allows frames larger than that ispe, nor may the configuration OBUs of its
+ *   "av1C" property, which libheif feeds to the decoder before the item data. The iinf box must hold exactly as many
+ *   infe boxes as its entry count: libheif reads every infe box, whatever the count. The primary item gives the
+ *   dimensions; its "av1C" (or else "pixi") property the bit depth, a "colr" property of type "prof" or "rICC" the
+ *   colour profile, its "irot" then "imir" properties the orientation. "Exif" items are EXIF, "mime" items (XMP) other
+ *   metadata.
  * - Image sequence (moov box): every track with an AV1 sample entry ("av01", whatever its handler; at most MAX_IMAGES)
  *   is checked; a track that holds it among other sample entries is refused as unsupported. Its sample entry size and
  *   sample count (the header of stsz or stz2, never its entries) are checked against the limits, its track header
  *   (tkhd, which decoders size the frames from) must declare the sample entry size, and no sequence header of its first
- *   sample may allow frames larger than it. The first such track gives the dimensions and the frame count; the still
- *   primary item, when present, is checked too.
+ *   sample or of the configuration OBUs of its av1C box may allow frames larger than it. The first such track gives
+ *   the dimensions and the frame count; the still primary item, when present, is checked too.
  * - Not read: the samples after the first one, and the AV1 frame headers, which can override the frame size (see
  *   Av1SequenceHeader). AVIF decoders must run with their own frame size limits.
  * - Top-level boxes other than ftyp, meta, moov and mdat are trailing data. Bytes inside mdat that no item or sample
@@ -65,6 +68,11 @@ final class AvifParser implements ParserInterface
     public const MAX_IMAGES = 16;
 
     private const FTYP_SIZE_MAX = 4096;
+
+    /**
+     * Size of the fields of a VisualSampleEntry, before its boxes.
+     */
+    private const VISUAL_SAMPLE_ENTRY_SIZE = 78;
 
     /**
      * @var list<string>
@@ -222,10 +230,13 @@ final class AvifParser implements ParserInterface
 
         $description = ['width' => 0, 'height' => 0, 'bitDepth' => 8, 'icc' => false, 'exif' => false, 'metadata' => false, 'orientation' => ImageInfo::ORIENTATION_NORMAL];
         $sizes = [];
+        $configurations = [];
         foreach ($images as $item) {
             $image = $this->readImageProperties($reader, $properties, $associations[$item] ?? []);
             $limits->assertImage($image['width'], $image['height'], 1);
             $sizes[$item] = [$image['width'], $image['height']];
+            $configurations[$item] = $image['configuration'];
+            unset($image['configuration']);
             if ($item === $primary) {
                 $description = ['exif' => false, 'metadata' => false] + $image;
             }
@@ -237,7 +248,7 @@ final class AvifParser implements ParserInterface
             if (!isset($locations[$item])) {
                 throw self::invalid('an image item has no data location');
             }
-            list($codedWidth, $codedHeight) = Av1SequenceHeader::maxFrameSize($reader, $locations[$item][0], $locations[$item][1], $this->obus, $this->sequenceHeaders);
+            list($codedWidth, $codedHeight) = $this->maxFrameSize($reader, $locations[$item], $configurations[$item]);
             if ($codedWidth > $size[0] || $codedHeight > $size[1]) {
                 throw self::invalid('the AV1 data of an image item allows frames larger than its ispe property');
             }
@@ -257,12 +268,13 @@ final class AvifParser implements ParserInterface
      *
      * @throws InvalidImageException
      *
-     * @return array{width: int, height: int, bitDepth: int, icc: bool, orientation: int}
+     * @return array{width: int, height: int, bitDepth: int, icc: bool, orientation: int, configuration: array{0: int, 1: int}}
      */
     private function readImageProperties(ByteReader $reader, array $properties, array $indices): array
     {
         $size = null;
         $configurations = 0;
+        $configuration = [0, 0];
         $codecBits = 0;
         $pixelBits = 0;
         $icc = false;
@@ -286,8 +298,7 @@ final class AvifParser implements ParserInterface
                     if (++$configurations > 1) {
                         throw self::invalid('an image item has more than one av1C property');
                     }
-                    $flags = ord(self::readBytes($reader, $end, 3)[2]);
-                    $codecBits = ($flags & 0x40) === 0 ? 8 : (($flags & 0x20) === 0 ? 10 : 12);
+                    $configuration = self::readCodecConfiguration($reader, $end, $codecBits);
                     break;
                 case 'pixi':
                     self::readFullBoxHeader($reader, $end, 0);
@@ -325,7 +336,46 @@ final class AvifParser implements ParserInterface
             'bitDepth' => $codecBits > 0 ? $codecBits : min(64, max(8, $pixelBits)),
             'icc' => $icc,
             'orientation' => self::orientation($angle, $mirror),
+            'configuration' => $configuration,
         ];
+    }
+
+    /**
+     * Reads the payload of an av1C box: marker and version, profile and level, then the tier, bit depth and chroma
+     * flags, the presentation delay, and the configuration OBUs up to the end of the box.
+     *
+     * @param int|null $bitDepth set to 8, 10 or 12
+     *
+     * @param-out int $bitDepth
+     *
+     * @throws InvalidImageException
+     *
+     * @return array{0: int, 1: int} offset and length of the configuration OBUs
+     */
+    private static function readCodecConfiguration(ByteReader $reader, int $end, ?int &$bitDepth = null): array
+    {
+        $flags = ord(self::readBytes($reader, $end, 4)[2]);
+        $bitDepth = ($flags & 0x40) === 0 ? 8 : (($flags & 0x20) === 0 ? 10 : 12);
+
+        return [$reader->getPosition(), $end - $reader->getPosition()];
+    }
+
+    /**
+     * Largest frame width and height that the AV1 data and the configuration OBUs of an item or track allow.
+     *
+     * @param array{0: int, 1: int} $data          offset and length of the AV1 data
+     * @param array{0: int, 1: int} $configuration offset and length of the configuration OBUs
+     *
+     * @throws InvalidImageException
+     *
+     * @return array{0: int, 1: int}
+     */
+    private function maxFrameSize(ByteReader $reader, array $data, array $configuration): array
+    {
+        $coded = Av1SequenceHeader::maxFrameSize($reader, $data[0], $data[1], $this->obus, $this->sequenceHeaders);
+        $configured = Av1SequenceHeader::configurationFrameSize($reader, $configuration[0], $configuration[1], $this->obus, $this->sequenceHeaders);
+
+        return [max($coded[0], $configured[0]), max($coded[1], $configured[1])];
     }
 
     /**
@@ -423,6 +473,10 @@ final class AvifParser implements ParserInterface
                 $items[$id] = self::readBytes($reader, $entryEnd, 4);
             }
             $reader->seek($entryEnd);
+        }
+        // libheif reads every infe box of iinf, whatever the count: an image item beyond it would go unchecked here.
+        if ($reader->getPosition() !== $end) {
+            throw self::invalid('the iinf box holds more than its entry count');
         }
 
         return $items;
@@ -654,14 +708,23 @@ final class AvifParser implements ParserInterface
             return null;
         }
         list($entryStart, $entryEnd) = $av1Entry;
+        if ($entryEnd - $entryStart < self::VISUAL_SAMPLE_ENTRY_SIZE) {
+            throw self::invalid('the AV1 sample entry is too short');
+        }
         // VisualSampleEntry: 6 reserved bytes, data reference index, 16 bytes of pre-defined and reserved fields,
         // then width and height.
-        $reader->seek($entryStart);
-        $reader->skip(min(24, $entryEnd - $entryStart));
+        $reader->seek($entryStart + 24);
         $width = self::readUint16($reader, $entryEnd);
         $height = self::readUint16($reader, $entryEnd);
         if ($width === 0 || $height === 0) {
             throw self::invalid('an image sequence track declares a zero width or height');
+        }
+        // The boxes of the sample entry follow its fields: av1C among them.
+        $entryBoxes = $this->findChildren($reader, $entryStart + self::VISUAL_SAMPLE_ENTRY_SIZE, $entryEnd, ['av1C']);
+        $configuration = [0, 0];
+        if (isset($entryBoxes['av1C'])) {
+            $reader->seek($entryBoxes['av1C'][0]);
+            $configuration = self::readCodecConfiguration($reader, $entryBoxes['av1C'][1]);
         }
 
         if (isset($table['stsz']) === isset($table['stz2'])) {
@@ -697,7 +760,7 @@ final class AvifParser implements ParserInterface
         if ($sample > $reader->getSize() || $firstSampleSize > $reader->getSize() - $sample) {
             throw ByteReader::truncated();
         }
-        list($codedWidth, $codedHeight) = Av1SequenceHeader::maxFrameSize($reader, $sample, $firstSampleSize, $this->obus, $this->sequenceHeaders);
+        list($codedWidth, $codedHeight) = $this->maxFrameSize($reader, [$sample, $firstSampleSize], $configuration);
         if ($codedWidth > $width || $codedHeight > $height) {
             throw self::invalid('the AV1 data of a track allows frames larger than its sample entry');
         }

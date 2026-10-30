@@ -110,14 +110,84 @@ final class Av1SequenceHeaderTest extends TestCase
         self::assertSame([16, 16], self::maxFrameSize($data));
     }
 
-    public function testAnUnboundedUvlcIsSkipped(): void
+    public function testReadsTheLongestBoundedUvlc(): void
     {
         $bits = '000' . '0' . '0' . '1' . self::field(1, 32) . self::field(25, 32)
-            . '1' . str_repeat('0', 32) . '1' // uvlc with 32 leading zeros: no value bits follow
+            . '1' . str_repeat('0', 31) . '1' . str_repeat('1', 31) // uvlc with 31 leading zeros and 31 value bits
             . '0' . '0' . self::field(0, 5) . self::field(0, 12) . self::field(1, 5)
             . self::field(3, 4) . self::field(3, 4) . self::field(9, 4) . self::field(7, 4);
 
         self::assertSame([10, 8], self::maxFrameSize(self::obu(self::OBU_SEQUENCE_HEADER, $bits)));
+    }
+
+    /**
+     * @return array<string, array{int}>
+     */
+    public static function unboundedUvlcLeadingZeros(): array
+    {
+        return ['32 leading zeros' => [32], '200 leading zeros' => [200]];
+    }
+
+    /**
+     * The specification reads a uvlc() of 32 leading zeros as 2^32 - 1 after its one bit, and some decoders stop
+     * before that bit: the fields that follow differ, so the value is refused, and so is any longer one.
+     *
+     * @dataProvider unboundedUvlcLeadingZeros
+     */
+    #[DataProvider('unboundedUvlcLeadingZeros')]
+    public function testRefusesAnUnboundedUvlc(int $leadingZeros): void
+    {
+        $bits = '000' . '0' . '0' . '1' . self::field(1, 32) . self::field(25, 32)
+            . '1' . str_repeat('0', $leadingZeros) . '1'
+            . '0' . '0' . self::field(0, 5) . self::field(0, 12) . self::field(1, 5)
+            . self::field(3, 4) . self::field(3, 4) . self::field(9, 4) . self::field(7, 4);
+
+        $this->expectException(InvalidImageException::class);
+        $this->expectExceptionMessage('too many leading zeros');
+
+        self::maxFrameSize(self::obu(self::OBU_SEQUENCE_HEADER, $bits));
+    }
+
+    /**
+     * The configuration OBUs of av1C reach the decoder before the image data: their sequence headers count, a frame
+     * among them needs one, and each needs a size field.
+     */
+    public function testReadsTheConfigurationObus(): void
+    {
+        $data = self::obu(self::OBU_SEQUENCE_HEADER, self::reducedHeader(8200, 8200))
+            . self::obu(self::OBU_FRAME, '00000000');
+        $reader = new ByteReader(CountingStreamWrapper::open($data), strlen($data));
+        $obus = 0;
+        $sequenceHeaders = 0;
+
+        self::assertSame([8200, 8200], Av1SequenceHeader::configurationFrameSize($reader, 0, strlen($data), $obus, $sequenceHeaders));
+        self::assertSame([2, 1], [$obus, $sequenceHeaders]);
+        self::assertSame([0, 0], Av1SequenceHeader::configurationFrameSize($reader, 0, 0));
+        $padding = self::obu(self::OBU_PADDING, '00000000');
+        self::assertSame([0, 0], Av1SequenceHeader::configurationFrameSize(new ByteReader(CountingStreamWrapper::open($padding), strlen($padding)), 0, strlen($padding)));
+    }
+
+    /**
+     * @return array<string, array{string}>
+     */
+    public static function invalidConfigurations(): array
+    {
+        return [
+            'frame before the sequence header' => [self::obu(self::OBU_FRAME, '00000000') . self::obu(self::OBU_SEQUENCE_HEADER, self::reducedHeader(8, 8))],
+            'OBU without size field' => [pack('C', self::OBU_SEQUENCE_HEADER << 3) . self::bytes(self::reducedHeader(8200, 8200))],
+            'OBU larger than the data' => [pack('C', (self::OBU_PADDING << 3) | 0x02) . "\x05\x00"],
+        ];
+    }
+
+    /**
+     * @dataProvider invalidConfigurations
+     */
+    #[DataProvider('invalidConfigurations')]
+    public function testRefusesInvalidConfigurationObus(string $data): void
+    {
+        $this->expectException(InvalidImageException::class);
+
+        Av1SequenceHeader::configurationFrameSize(new ByteReader(CountingStreamWrapper::open($data), strlen($data)), 0, strlen($data));
     }
 
     /**

@@ -28,8 +28,9 @@ use Mfonte\SecureImageConverter\Validation\Parser\WebpParser;
  * structures holding dimensions, frames and metadata markers and skips everything else; every loop is bounded by a
  * constant or by the file size, and the file size itself is checked against max_bytes before anything is read. The
  * parsers check the dimensions as soon as the header declares them and the frame count as soon as it exceeds the
- * limits, so a dimension, decompression or frame bomb is refused after reading a few bytes. One gap remains for AVIF:
- * the sequence headers bound the AV1 frame size, but a frame header can override it (see Av1SequenceHeader), so
+ * limits, so a dimension, decompression or frame bomb is refused after reading a few bytes. Gaps remain for AVIF: the
+ * sequence headers (in the item or sample data and in the av1C configuration OBUs) bound the AV1 frame size, but a
+ * frame header can override it (see Av1SequenceHeader), and only the first sample of an image sequence is read, so
  * AVIF input, which is opt-in, also relies on the decoder and process limits of the conversion backend. See each
  * parser in the Parser namespace for the exact checks.
  *

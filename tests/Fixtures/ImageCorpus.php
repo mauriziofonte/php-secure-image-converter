@@ -6,6 +6,7 @@ namespace Mfonte\SecureImageConverter\Tests\Fixtures;
 
 use Mfonte\SecureImageConverter\Contract\Exception\ErrorCode;
 use Mfonte\SecureImageConverter\Contract\ImageFormat;
+use Mfonte\SecureImageConverter\Validation\Parser\Av1SequenceHeader;
 use Mfonte\SecureImageConverter\Validation\Parser\AvifParser;
 use Mfonte\SecureImageConverter\Validation\Parser\GifParser;
 use Mfonte\SecureImageConverter\Validation\Parser\PngParser;
@@ -370,6 +371,7 @@ final class ImageCorpus
     {
         $still = ImageBuilder::avifStill();
         $sequence = ImageBuilder::avifSequence();
+        $large = ImageBuilder::avifReproducer('ispe-below-av1');
         $ispe = ImageBuilder::find($still, 'ispe');
         $sampleEntry = ImageBuilder::find($sequence, 'av01', ImageBuilder::find($sequence, 'stsd'));
         $sampleSizes = ImageBuilder::find($sequence, 'stsz');
@@ -435,6 +437,21 @@ final class ImageCorpus
                 self::reject(ErrorCode::INVALID_IMAGE)
             ),
             'avif/unsupported-second-sample-entry.avif' => self::committed(self::avifSecondSampleEntry(), self::reject(ErrorCode::UNSUPPORTED_FORMAT)),
+            // libavif writes the sequence header in av1C too; libheif feeds those configuration OBUs to the decoder
+            // before the data of the item, so they may not hold a larger sequence header or frame.
+            'avif/valid-av1c-sequence-header.avif' => self::committed(self::avifWithConfiguration(self::avifSequenceHeaderObu($still)), self::accept(ImageFormat::AVIF, 8, 8, 1, ['trailing_data' => false])),
+            'avif/spoof-av1c-frame-4000x4000.avif' => self::committed(
+                self::avifWithConfiguration((string) substr($large, ImageBuilder::find($large, 'mdat') + 4)),
+                self::reject(ErrorCode::INVALID_IMAGE)
+            ),
+            'avif/spoof-track-av1c-sequence-header-4000x4000.avif' => self::committed(self::avifSequenceWithConfiguration(self::avifSequenceHeaderObu($large)), self::reject(ErrorCode::INVALID_IMAGE)),
+            // libheif reads every infe box, whatever the entry count of iinf: an item beyond it would go unchecked.
+            'avif/spoof-item-beyond-iinf-count.avif' => self::committed(self::avifItemBeyondCount(), self::reject(ErrorCode::INVALID_IMAGE)),
+            // The most OBUs and sequence headers a file may have, then one too many.
+            'avif/valid-most-obus.avif' => self::generated(self::avifWithObus(1, Av1SequenceHeader::MAX_OBUS - 3), self::accept(ImageFormat::AVIF, 8, 8)),
+            'avif/spoof-too-many-obus.avif' => self::generated(self::avifWithObus(1, Av1SequenceHeader::MAX_OBUS - 2), self::reject(ErrorCode::INVALID_IMAGE)),
+            'avif/valid-most-sequence-headers.avif' => self::generated(self::avifWithObus(Av1SequenceHeader::MAX_SEQUENCE_HEADERS, 0), self::accept(ImageFormat::AVIF, 8, 8)),
+            'avif/spoof-too-many-sequence-headers.avif' => self::generated(self::avifWithObus(Av1SequenceHeader::MAX_SEQUENCE_HEADERS + 1, 0), self::reject(ErrorCode::INVALID_IMAGE)),
             // The most property associations and item extents a file may have, then one too many.
             'avif/valid-most-associations.avif' => self::generated(self::avifOfAssociations(AvifParser::MAX_ASSOCIATIONS), self::accept(ImageFormat::AVIF, 8, 8)),
             'avif/spoof-too-many-associations.avif' => self::generated(self::avifOfAssociations(AvifParser::MAX_ASSOCIATIONS + 1), self::reject(ErrorCode::INVALID_IMAGE)),
@@ -590,18 +607,96 @@ final class ImageCorpus
      */
     private static function avifTwoSequenceHeaders(): string
     {
-        $small = ImageBuilder::avifStill();
+        $header = self::avifSequenceHeaderObu(ImageBuilder::avifStill());
         $large = ImageBuilder::avifReproducer('ispe-below-av1');
-        // Both start their data with a temporal delimiter (2 bytes), then the sequence header OBU: a header byte, a
-        // size byte and the payload.
-        $smallHeader = ImageBuilder::find($small, 'mdat') + 4 + 2;
-        $header = (string) substr($small, $smallHeader, 2 + ord($small[$smallHeader + 1]));
         $at = ImageBuilder::find($large, 'mdat') + 4 + 2;
         $bytes = substr($large, 0, $at) . $header . substr($large, $at);
         // The mdat box and the extent of the item (its length follows the offset in iloc) grow with the data.
         $bytes = ImageBuilder::addToUint32($bytes, ImageBuilder::find($bytes, 'mdat') - 4, strlen($header));
 
         return ImageBuilder::addToUint32($bytes, ImageBuilder::find($bytes, 'iloc') + 4 + 18, strlen($header));
+    }
+
+    /**
+     * The sequence header OBU of the still sample or of a reproducer: their data starts with a temporal delimiter (2
+     * bytes), then the sequence header OBU, made of a header byte, a size byte and the payload.
+     */
+    private static function avifSequenceHeaderObu(string $avif): string
+    {
+        $at = ImageBuilder::find($avif, 'mdat') + 4 + 2;
+
+        return (string) substr($avif, $at, 2 + ord($avif[$at + 1]));
+    }
+
+    /**
+     * The 8 x 8 still sample whose av1C property carries $obus as configuration OBUs.
+     */
+    private static function avifWithConfiguration(string $obus): string
+    {
+        // av1C holds 4 bytes of fields before its configuration OBUs.
+        list($bytes, $delta) = self::avifWithBox('av1C', "\x81\x00\x0C\x00" . $obus, ['meta', 'iprp', 'ipco']);
+
+        // iloc precedes iprp: the extent offset of the image item moves with mdat.
+        return ImageBuilder::addToUint32($bytes, ImageBuilder::find($bytes, 'iloc') + 4 + 14, $delta);
+    }
+
+    /**
+     * The 3-frame sequence sample whose av01 sample entry has an av1C box that carries $obus as configuration OBUs.
+     */
+    private static function avifSequenceWithConfiguration(string $obus): string
+    {
+        $sequence = ImageBuilder::avifSequence();
+        $box = ImageBuilder::find($sequence, 'av1C', ImageBuilder::find($sequence, 'stsd')) - 4;
+        $size = ImageBuilder::readUint32($sequence, $box);
+        $payload = "\x81\x00\x0C\x00" . $obus;
+        $delta = 8 + strlen($payload) - $size;
+        $bytes = substr($sequence, 0, $box) . pack('N', 8 + strlen($payload)) . 'av1C' . $payload . substr($sequence, $box + $size);
+        $at = 0;
+        foreach (['moov', 'trak', 'mdia', 'minf', 'stbl', 'stsd'] as $type) {
+            $at = ImageBuilder::find($bytes, $type, $at);
+            $bytes = ImageBuilder::addToUint32($bytes, $at - 4, $delta);
+        }
+        // The av01 entry follows the type, the version and flags, and the entry count of stsd.
+        $bytes = ImageBuilder::addToUint32($bytes, $at + 12, $delta);
+        // mdat follows moov: the chunk offset of the track and the extent offset of the still item move with it.
+        $bytes = ImageBuilder::addToUint32($bytes, ImageBuilder::find($bytes, 'stco') + 12, $delta);
+
+        return ImageBuilder::addToUint32($bytes, ImageBuilder::find($bytes, 'iloc') + 4 + 14, $delta);
+    }
+
+    /**
+     * The 8 x 8 still sample whose iinf box says it holds one entry, and holds a second infe box for another AV1 item.
+     */
+    private static function avifItemBeyondCount(): string
+    {
+        $still = ImageBuilder::avifStill();
+        $iinf = ImageBuilder::find($still, 'iinf') - 4;
+        $payload = (string) substr($still, $iinf + 8, ImageBuilder::readUint32($still, $iinf) - 8);
+        // The infe box of item 1 follows the version and flags and the entry count; its version 2 item ID follows its
+        // own header and version and flags.
+        $infe = (string) substr($payload, 6);
+        list($bytes, $delta) = self::avifWithBox('iinf', $payload . ImageBuilder::patch($infe, 12, pack('n', 2)), ['meta']);
+
+        // iloc precedes iinf: the extent offset of the image item moves with mdat.
+        return ImageBuilder::addToUint32($bytes, ImageBuilder::find($bytes, 'iloc') + 4 + 14, $delta);
+    }
+
+    /**
+     * The 8 x 8 still sample whose AV1 data holds $sequenceHeaders copies of its sequence header, then its frame and
+     * $padding empty padding OBUs.
+     */
+    private static function avifWithObus(int $sequenceHeaders, int $padding): string
+    {
+        $still = ImageBuilder::avifStill();
+        $header = self::avifSequenceHeaderObu($still);
+        // The data fills mdat: a temporal delimiter (2 bytes), the sequence header, the frame.
+        $data = (string) substr($still, ImageBuilder::find($still, 'mdat') + 4);
+        $data = substr($data, 0, 2) . ImageBuilder::repeat($header, $sequenceHeaders) . substr($data, 2 + strlen($header))
+            . ImageBuilder::repeat("\x7A\x00", $padding);
+        list($bytes) = self::avifWithBox('mdat', $data, []);
+
+        // The extent length of the item follows its offset in iloc.
+        return ImageBuilder::patch($bytes, ImageBuilder::find($bytes, 'iloc') + 4 + 18, pack('N', strlen($data)));
     }
 
     /**

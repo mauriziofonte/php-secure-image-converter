@@ -7,16 +7,17 @@ namespace Mfonte\SecureImageConverter\Validation\Parser;
 use Mfonte\SecureImageConverter\Contract\Exception\InvalidImageException;
 
 /**
- * Walks the OBUs of AV1 data (an AVIF image item or the first sample of a track) and reads, from every sequence header
- * among them, the largest frame size it allows: an AV1 decoder accepts a later sequence header that differs from the
- * first one, so each of them bounds the frames it will allocate.
+ * Walks the OBUs of AV1 data (an AVIF image item or the first sample of a track, and the configuration OBUs of its
+ * av1C box) and reads, from every sequence header among them, the largest frame size it allows: an AV1 decoder accepts
+ * a later sequence header that differs from the first one, so each of them bounds the frames it will allocate.
  *
  * Only OBU headers and sizes are read to skip from one OBU to the next, and the fields of each sequence header up to
  * max_frame_height_minus_1 (a sequence header may hold at most MAX_SEQUENCE_HEADER_BYTES): no frame or tile data is
  * touched. The caller counts the OBUs and sequence headers across all the AV1 data of a file, at most MAX_OBUS and
- * MAX_SEQUENCE_HEADERS, so that items or tracks sharing the same data cannot multiply the cost. Every OBU must fit in the data, and only temporal
- * delimiter, metadata and padding OBUs may precede the first sequence header: AV1 data without one, or with a frame
- * before it, is invalid, as an AV1 decoder cannot decode it.
+ * MAX_SEQUENCE_HEADERS, so that items or tracks sharing the same data cannot multiply the cost. Every OBU must fit in
+ * the data, and only temporal delimiter, metadata and padding OBUs may precede the first sequence header: AV1 data
+ * without one, or with a frame before it, is invalid, as an AV1 decoder cannot decode it. A sequence header whose
+ * uvlc() field has 32 leading zeros or more is invalid too: decoders disagree on how many bits such a value takes.
  *
  * Not covered, because it needs the frame headers: a frame header can override the frame size with values up to
  * 2^frame_width_bits by 2^frame_height_bits, beyond max_frame_width and max_frame_height, unless the sequence header
@@ -28,14 +29,20 @@ use Mfonte\SecureImageConverter\Contract\Exception\InvalidImageException;
 final class Av1SequenceHeader
 {
     /**
-     * Largest number of OBUs walked in all the AV1 data of a file.
+     * Largest number of OBUs walked in all the AV1 data of a file; real data holds a few per image or track.
      */
-    public const MAX_OBUS = 16384;
+    public const MAX_OBUS = 8192;
 
     /**
-     * Largest number of sequence headers read in all the AV1 data of a file; real data holds one per image or track.
+     * Largest number of sequence headers read in all the AV1 data of a file; real data holds one per image or track,
+     * and one in its av1C box: at most 4 x AvifParser::MAX_IMAGES for the items and the tracks of a file.
      */
-    public const MAX_SEQUENCE_HEADERS = 256;
+    public const MAX_SEQUENCE_HEADERS = 64;
+
+    /**
+     * Leading zeros from which uvlc() values are refused.
+     */
+    private const UVLC_LEADING_ZEROS_MAX = 32;
 
     /**
      * Largest size of a sequence header OBU payload; real ones hold a few dozen bytes.
@@ -88,6 +95,45 @@ final class Av1SequenceHeader
      */
     public static function maxFrameSize(ByteReader $reader, int $offset, int $length, int &$obus = 0, int &$sequenceHeaders = 0): array
     {
+        $size = self::walk($reader, $offset, $length, false, $obus, $sequenceHeaders);
+        if ($size[0] === 0) {
+            throw self::invalid('the data has no sequence header');
+        }
+
+        return $size;
+    }
+
+    /**
+     * Largest frame width and height that any sequence header among the configuration OBUs of an av1C box declares,
+     * or [0, 0] when there is none. Some decoders (libheif among them) feed these OBUs to the AV1 decoder before the
+     * data of the image, so they are AV1 data like any other: a frame among them must follow a sequence header. Each
+     * OBU must have a size field, as the av1C box requires: without one, it would run into the image data.
+     *
+     * @param int $offset          offset of the configuration OBUs in the image
+     * @param int $length          bytes of configuration OBUs from that offset, 0 when there are none
+     * @param int $obus            OBUs already walked in the other AV1 data of the file, updated
+     * @param int $sequenceHeaders sequence headers already read in the other AV1 data of the file, updated
+     *
+     * @throws InvalidImageException when an OBU has no size field, does not fit in the data, or there are too many
+     *
+     * @return array{0: int, 1: int}
+     */
+    public static function configurationFrameSize(ByteReader $reader, int $offset, int $length, int &$obus = 0, int &$sequenceHeaders = 0): array
+    {
+        return $length === 0 ? [0, 0] : self::walk($reader, $offset, $length, true, $obus, $sequenceHeaders);
+    }
+
+    /**
+     * Walks the OBUs of the data and reads every sequence header.
+     *
+     * @param bool $sizedObus whether every OBU must have a size field
+     *
+     * @throws InvalidImageException
+     *
+     * @return array{0: int, 1: int} the largest frame width and height, [0, 0] without a sequence header
+     */
+    private static function walk(ByteReader $reader, int $offset, int $length, bool $sizedObus, int &$obus, int &$sequenceHeaders): array
+    {
         if ($offset < 0 || $length < 1 || $offset > $reader->getSize() || $length > $reader->getSize() - $offset) {
             throw ByteReader::truncated();
         }
@@ -113,6 +159,8 @@ final class Av1SequenceHeader
             }
             if (($header & 0x02) !== 0) {
                 list($size, $cursor) = self::readLeb128($head, $cursor);
+            } elseif ($sizedObus) {
+                throw self::invalid('an av1C configuration OBU has no size field');
             } else {
                 // Without a size field the OBU runs to the end of the data.
                 $size = $end - $position - $cursor;
@@ -136,9 +184,6 @@ final class Av1SequenceHeader
                 throw self::invalid('the data has no sequence header before its first frame');
             }
             $position += $cursor + $size;
-        }
-        if ($width === 0) {
-            throw self::invalid('the data has no sequence header');
         }
 
         return [$width, $height];
@@ -223,23 +268,24 @@ final class Av1SequenceHeader
     }
 
     /**
-     * Skips a uvlc() value: leading zero bits, a one bit, then as many bits as leading zeros (at most 32 are read).
+     * Skips a uvlc() value: leading zero bits, a one bit, then as many value bits as leading zeros.
      *
-     * @throws InvalidImageException
+     * @throws InvalidImageException when the value has UVLC_LEADING_ZEROS_MAX leading zeros or more, which the
+     *                               specification reads as 2^32 - 1 after the one bit and some decoders without it
      */
     private function skipUvlc(): void
     {
         $leadingZeros = 0;
         while ($this->bits(1) === 0) {
-            ++$leadingZeros;
+            if (++$leadingZeros >= self::UVLC_LEADING_ZEROS_MAX) {
+                throw self::invalid('a sequence header holds a uvlc() value with too many leading zeros');
+            }
         }
-        if ($leadingZeros < 32) {
-            $this->bits($leadingZeros);
-        }
+        $this->bits($leadingZeros);
     }
 
     /**
-     * Reads $count bits (0 to 32), most significant first.
+     * Reads $count bits (0 to 32), most significant first, a byte at a time.
      *
      * @phpstan-impure
      *
@@ -251,8 +297,13 @@ final class Av1SequenceHeader
             throw self::invalid('the sequence header is cut');
         }
         $value = 0;
-        for ($index = 0; $index < $count; ++$index, ++$this->bit) {
-            $value = ($value << 1) | ((ord($this->payload[$this->bit >> 3]) >> (7 - ($this->bit & 7))) & 1);
+        while ($count > 0) {
+            $available = 8 - ($this->bit & 7);
+            $taken = min($available, $count);
+            $byte = ord($this->payload[$this->bit >> 3]);
+            $value = ($value << $taken) | (($byte >> ($available - $taken)) & ((1 << $taken) - 1));
+            $this->bit += $taken;
+            $count -= $taken;
         }
 
         return $value;
