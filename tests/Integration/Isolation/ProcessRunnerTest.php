@@ -626,6 +626,53 @@ final class ProcessRunnerTest extends IsolationTestCase
         (new ProcessRunner(IsolationLevel::NONE))->run(['cat'], $this->workingDirectory(), $input);
     }
 
+    /**
+     * Under an open_basedir that excludes /proc and /dev/fd, the descriptors that the child would inherit cannot be
+     * listed: from the process level up the run must fail instead of letting them through.
+     */
+    public function testUnlistableDescriptorsFailClosedFromTheProcessLevelUp(): void
+    {
+        $this->requireLevel(IsolationLevel::PROCESS);
+        $output = $this->runPhp(
+            '-d',
+            'open_basedir=' . implode(':', [self::projectDirectory(), sys_get_temp_dir(), '/usr', '/bin', '/dev/null']),
+            '-r',
+            'require $argv[1]; $directory = ' . WorkingDirectory::class . '::create();'
+                . ' foreach (["' . IsolationLevel::NONE . '", "' . IsolationLevel::PROCESS . '"] as $level) {'
+                . ' try { $result = (new ' . ProcessRunner::class . '($level))->run(["true"], $directory);'
+                . ' echo $level, ": ran ", $result->getExitCode(), "\n"; }'
+                . ' catch (\Throwable $e) { echo $level, ": ", get_class($e), ": ", $e->getMessage(), "\n"; } }'
+                . ' $directory->remove();',
+            self::projectDirectory() . '/vendor/autoload.php'
+        );
+
+        self::assertSame([
+            IsolationLevel::NONE . ': ran 0',
+            IsolationLevel::PROCESS . ': ' . ConversionFailedException::class . ': The open descriptors of this process'
+                . ' cannot be listed (neither /proc/self/fd nor /dev/fd is readable, for example because of'
+                . ' open_basedir), so the child could inherit them.',
+        ], $output);
+    }
+
+    /**
+     * With php_uname() disabled the architecture is unknown, so every open descriptor is replaced: the run works and
+     * throws nothing outside the library's exceptions.
+     */
+    public function testDisabledPhpUnameStillRuns(): void
+    {
+        $output = $this->runPhp(
+            '-d',
+            'disable_functions=php_uname',
+            '-r',
+            'require $argv[1]; $directory = ' . WorkingDirectory::class . '::create();'
+                . ' $result = (new ' . ProcessRunner::class . '("' . IsolationLevel::NONE . '"))'
+                . '->run(["sh", "-c", "echo ok"], $directory); $directory->remove(); echo trim($result->getStdout());',
+            self::projectDirectory() . '/vendor/autoload.php'
+        );
+
+        self::assertSame(['ok'], $output);
+    }
+
     public function testExplicitProgramPathsAreAccepted(): void
     {
         $result = (new ProcessRunner(IsolationLevel::NONE))->run([PHP_BINARY, '-n', '-r', 'echo 6 * 7;'], $this->workingDirectory());
@@ -745,5 +792,26 @@ final class ProcessRunnerTest extends IsolationTestCase
             return $result->getExitCode();
         }, $results));
         self::assertSame("4\n", $results[4]->getStdout());
+    }
+
+    private static function projectDirectory(): string
+    {
+        return \dirname(__DIR__, 3);
+    }
+
+    /**
+     * Runs PHP_BINARY with the given arguments in a new process and returns its output lines (stdout and stderr).
+     *
+     * @return list<string>
+     */
+    private function runPhp(string ...$arguments): array
+    {
+        $command = implode(' ', array_map('escapeshellarg', array_merge([PHP_BINARY], $arguments)));
+        $output = [];
+        $status = 0;
+        exec($command . ' 2>&1', $output, $status);
+        self::assertSame(0, $status, implode("\n", $output));
+
+        return $output;
     }
 }

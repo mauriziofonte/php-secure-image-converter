@@ -55,12 +55,15 @@ use Mfonte\SecureImageConverter\Contract\IsolationLevel;
  * the FastCGI connection, database and cache sockets or open files, which would give a compromised decoder a way
  * around the sandbox's network isolation. proc_open() cannot close a descriptor in the child, so every descriptor
  * above 2 that is open in PHP without close-on-exec when the run starts (read from /proc/self/fdinfo; without it,
- * every open descriptor) is replaced with /dev/null in the child instead. These replacements occupy descriptor
- * numbers in the child, and at the rlimit and sandbox levels the open files limit (ResourceLimits::getOpenFiles())
- * caps those numbers: the run fails with ConversionFailedException, before anything starts, when the standard
- * streams and the replacements below the limit would leave the program fewer than MIN_FREE_DESCRIPTORS free (half
- * the limit, for a limit below 32), instead of letting it fail to load its libraries. Raise the limit with
- * ResourceLimits::withOpenFiles() if PHP keeps many descriptors open.
+ * every open descriptor) is replaced with /dev/null in the child instead. When neither /proc/self/fd nor /dev/fd can
+ * be listed (for example under an open_basedir that excludes them), the open descriptors are unknown: at the process
+ * level and above the run fails with ConversionFailedException before anything starts; at the none level, which
+ * promises no isolation, they are inherited. These replacements occupy descriptor numbers in the child, and at the
+ * rlimit and sandbox levels the open files limit (ResourceLimits::getOpenFiles()) caps those numbers: the run fails
+ * with ConversionFailedException, before anything starts, when the standard streams and the replacements below the
+ * limit would leave the program fewer than MIN_FREE_DESCRIPTORS free (half the limit, for a limit below 32), instead
+ * of letting it fail to load its libraries. Raise the limit with ResourceLimits::withOpenFiles() if PHP keeps many
+ * descriptors open.
  *
  * Usage, for a backend:
  *
@@ -223,7 +226,8 @@ final class ProcessRunner
      *                                       regular file directly inside the working directory), the read-only paths
      *                                       or the working directory are invalid
      * @throws ConversionFailedException     when the process cannot be started, its output cannot be read, PHP holds
-     *                                       too many descriptors for the open files limit, or its status is lost
+     *                                       too many descriptors for the open files limit or they cannot be listed,
+     *                                       or its status is lost
      */
     public function run(
         array $command,
@@ -251,7 +255,8 @@ final class ProcessRunner
      * @throws IsolationUnavailableException when the level of this runner is not available on the host
      * @throws InvalidArgumentException      when the command, the input or the working directory is invalid
      * @throws ConversionFailedException     when the process cannot be started, its output cannot be read, PHP holds
-     *                                       too many descriptors for the open files limit, or its status is lost
+     *                                       too many descriptors for the open files limit or they cannot be listed,
+     *                                       or its status is lost
      */
     public function execute(
         array $command,
@@ -283,6 +288,15 @@ final class ProcessRunner
             ));
         }
         $inherited = self::inheritedDescriptors();
+        if ($inherited === null) {
+            if (IsolationLevel::isAtLeast($this->level, IsolationLevel::PROCESS)) {
+                throw new ConversionFailedException(
+                    'The open descriptors of this process cannot be listed (neither /proc/self/fd nor /dev/fd is '
+                    . 'readable, for example because of open_basedir), so the child could inherit them.'
+                );
+            }
+            $inherited = [];
+        }
         if (IsolationLevel::isAtLeast($this->level, IsolationLevel::RLIMIT)) {
             $this->checkOpenFilesLimit(array_keys($inherited));
         }
@@ -395,9 +409,10 @@ final class ProcessRunner
      * /proc/self/fd (Linux) or /dev/fd; descriptors with close-on-exec, which the child never receives, are left out
      * where /proc/self/fdinfo tells.
      *
-     * @return array<int, list<string>> keyed by descriptor number
+     * @return array<int, list<string>>|null keyed by descriptor number; null when the open descriptors cannot be
+     *                                       listed
      */
-    private static function inheritedDescriptors(): array
+    private static function inheritedDescriptors(): ?array
     {
         $fromProc = true;
         $entries = @scandir('/proc/self/fd');
@@ -405,11 +420,16 @@ final class ProcessRunner
             $fromProc = false;
             $entries = @scandir('/dev/fd');
         }
-        // O_CLOEXEC has another value on a few rare architectures: there every open descriptor is replaced.
+        if (!is_array($entries)) {
+            return null;
+        }
+        // O_CLOEXEC has another value on a few rare architectures: there, and when php_uname() is disabled so that
+        // the architecture is unknown, every open descriptor is replaced.
         $checkFlags = $fromProc
+            && function_exists('php_uname')
             && preg_match('/\A(x86_64|i[3-6]86|aarch64|arm|riscv|ppc|s390|mips)/', php_uname('m')) === 1;
         $descriptors = [];
-        foreach (is_array($entries) ? $entries : [] as $entry) {
+        foreach ($entries as $entry) {
             if (preg_match('/\A[0-9]{1,9}\z/', $entry) !== 1 || (int) $entry <= 2) {
                 continue;
             }
