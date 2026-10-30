@@ -155,6 +155,10 @@ final class ImageCorpus
                 $afterScan(ImageBuilder::repeat("\xFF\xFE\x00\x02", JpegParser::MAX_SEGMENTS - 5)),
                 self::reject(ErrorCode::INVALID_IMAGE)
             ),
+            // Decoders go over the whole image once per scan: the most scans allowed (a DC scan and AC scans), then one
+            // too many.
+            'jpeg/valid-most-scans.jpg' => self::committed(ImageBuilder::progressiveJpeg(8, 8, JpegParser::MAX_SCANS - 1), self::accept(ImageFormat::JPEG, 8, 8)),
+            'jpeg/bomb-too-many-scans.jpg' => self::committed(ImageBuilder::progressiveJpeg(8, 8, JpegParser::MAX_SCANS), self::reject(ErrorCode::UNSUPPORTED_FORMAT)),
             'jpeg/bomb-65535x65535.jpg' => self::committed(ImageBuilder::patch($grey, $greySof + 5, pack('nn', 65535, 65535)), self::reject(ErrorCode::IMAGE_TOO_LARGE, true)),
             'jpeg/bomb-exif-flood.jpg' => self::committed(
                 ImageBuilder::jpeg(8, 8, 1, ImageBuilder::repeat(ImageBuilder::jpegSegment(0xE1, "Exif\0\0"), 1100)),

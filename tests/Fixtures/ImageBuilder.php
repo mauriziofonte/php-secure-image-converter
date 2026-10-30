@@ -312,9 +312,10 @@ final class ImageBuilder
     }
 
     /**
-     * A mid-grey progressive greyscale JPEG: a DC scan and one AC scan, each one bit per block.
+     * A mid-grey progressive greyscale JPEG: a DC scan and $acScans AC scans, each one bit per block. Decoders warn
+     * about the AC scans after the first one, which code the same coefficients again, and decode them all.
      */
-    public static function progressiveJpeg(int $width, int $height): string
+    public static function progressiveJpeg(int $width, int $height, int $acScans = 1): string
     {
         $blocks = intdiv($width + 7, 8) * intdiv($height + 7, 8);
 
@@ -323,7 +324,7 @@ final class ImageBuilder
             . self::jpegSegment(0xC4, "\x00" . self::oneSymbolHuffmanTable())
             . self::jpegSegment(0xDA, "\x01\x01\x00\x00\x00\x00") . self::jpegZeroBits($blocks)
             . self::jpegSegment(0xC4, "\x10" . self::oneSymbolHuffmanTable())
-            . self::jpegSegment(0xDA, "\x01\x01\x00\x01\x3F\x00") . self::jpegZeroBits($blocks) . "\xFF\xD9";
+            . self::repeat(self::jpegSegment(0xDA, "\x01\x01\x00\x01\x3F\x00") . self::jpegZeroBits($blocks), $acScans) . "\xFF\xD9";
     }
 
     /**

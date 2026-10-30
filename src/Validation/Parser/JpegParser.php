@@ -26,8 +26,10 @@ use Mfonte\SecureImageConverter\Validation\Limits;
  *   must end with an EOI marker (FF D9). The entropy-coded data of a scan holds no marker but RSTn (FF D0 to FF D7)
  *   and stuffed FF 00 bytes: the parser searches it for the next marker, without decoding it, and skips the segments
  *   that come between scans (tables, further scan headers, APPn and comments, which decoders read wherever they
- *   are), up to MAX_SEGMENTS segments in all. A file without EOI is truncated; bytes after the EOI (the video of a
- *   motion photo, an appended archive) are trailing data.
+ *   are), up to MAX_SEGMENTS segments in all. An image of more than MAX_SCANS scans is refused as unsupported. A file
+ *   without EOI is truncated; bytes after the EOI (the video of a motion photo, an appended archive) are trailing data.
+ * - The search runs PCRE on chunks of the scan data: with the JIT compiler (pcre.jit=1, the default) it takes about
+ *   30 ms for 20 MiB on PHP 7.2, and several times longer without it.
  *
  * Metadata, before or after the first scan: APP1 "Exif" is EXIF, APP2 "ICC_PROFILE" is the colour profile; APP0 JFIF
  * and APP14 Adobe carry decoding parameters, not metadata; every other APPn segment (XMP, IPTC, MPF, FlashPix...) and
@@ -42,6 +44,12 @@ final class JpegParser implements ParserInterface
      * with an ICC profile split over many APP2 segments, extended XMP or the scans of a progressive image.
      */
     public const MAX_SEGMENTS = 1024;
+
+    /**
+     * Largest number of scans. Decoders go over the whole image once per scan, so a small image of many scans takes
+     * long to decode; progressive encoders write about ten.
+     */
+    public const MAX_SCANS = 100;
 
     /**
      * Largest number of FF fill bytes before one marker.
@@ -171,10 +179,12 @@ final class JpegParser implements ParserInterface
      * @param int $segments segments walked before it
      *
      * @throws InvalidImageException
+     * @throws UnsupportedFormatException
      */
     private function findEndOfImage(ByteReader $reader, int $from, int $segments): int
     {
         $position = $from;
+        $scans = 1;
         while (true) {
             $markerStart = self::findMarker($reader, $position);
             if ($markerStart < 0) {
@@ -187,6 +197,9 @@ final class JpegParser implements ParserInterface
             }
             if (++$segments > self::MAX_SEGMENTS) {
                 throw self::tooManySegments();
+            }
+            if ($marker === self::MARKER_SOS && ++$scans > self::MAX_SCANS) {
+                throw new UnsupportedFormatException(sprintf('JPEG images of more than %d scans are not supported.', self::MAX_SCANS));
             }
             if (self::isStandalone($marker)) {
                 $position = $markerStart + 2;
