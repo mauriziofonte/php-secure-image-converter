@@ -9,21 +9,30 @@ use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
 /**
  * The private directory that holds the lock files of Semaphore and KeyedLock.
  *
- * A missing directory is created, with its missing parents, and set to mode 0700. The directory is then accepted
- * only when it is owned by the effective user of this process, is readable, writable and searchable by that user,
- * and is not writable by its group or by other users: a user who can create, replace or delete lock files could hold
- * every slot forever, or break mutual exclusion by deleting a held lock file so that the next process locks a new
- * one. Every ancestor of the directory, up to "/", must in turn be owned by root or by the effective user, and must
- * not be writable by its group or by other users unless its sticky bit is set: otherwise another user could rename
- * the lock directory away and put a directory of their own in its place. The checks run once, in the constructor,
- * on the resolved path (symbolic links followed).
+ * The constructor resolves the path one component at a time, as the kernel does, following symbolic links itself
+ * (at most 40, as Linux allows), and checks every entry it looks up on the way:
+ * - the directory that holds the entry must be owned by root or by the effective user of this process, and must not
+ *   be writable by its group or by other users unless its sticky bit is set: otherwise another user could rename the
+ *   entry away and put one of their own in its place, so that two processes given the same path would lock files in
+ *   different directories;
+ * - a symbolic link must be owned by root or by the effective user: in a sticky directory such as /tmp, the owner of
+ *   a link can still delete it and create another one that points elsewhere.
+ * This covers the path as given and every directory that its symbolic links lead through, so a link kept in a
+ * directory of another user, or owned by another user, is refused even when its target is safe.
+ *
+ * A missing component is created with mode 0700 inside a directory that passed these checks. The lock directory
+ * itself is then accepted only when it is owned by the effective user, is readable, writable and searchable by that
+ * user, and is not writable by its group or by other users: a user who can create, replace or delete lock files
+ * could hold every slot forever, or break mutual exclusion by deleting a held lock file so that the next process
+ * locks a new one. The checks run once, in the constructor; the resolved path is kept, so a symbolic link of the path
+ * as given is never followed again.
  *
  * Safe locations are directories reserved for the application and its user: /run/<app> (tmpfs, created for example
  * by systemd's RuntimeDirectory=), /var/lib/<app>/locks, or a directory that the application creates itself directly
  * in the system temporary directory, whose sticky bit stops other users from renaming it (another user who creates
  * that name first makes the constructor refuse it, so /run or /var/lib are preferable). Never nest the directory
  * deeper under a shared temporary path such as /tmp/shared/<app>: other users may own or write to the intermediate
- * directories, and the ancestor check refuses them.
+ * directories, and the checks refuse them.
  *
  * Limitations, shared by everything built on this class:
  * - Local filesystems only. flock() on NFS is emulated with byte-range locks (Linux) or not supported at all, and
@@ -31,6 +40,9 @@ use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
  *   or user-space filesystems are equally unsupported. Put the directory on a local disk or on tmpfs (/run).
  * - POSIX systems only (Linux, macOS, BSD): the constructor refuses to run on Windows, where neither the ownership
  *   nor the permission checks are meaningful.
+ * - Every directory from "/" down to the lock directory must be inspectable: under an open_basedir setting that
+ *   excludes any of them, "/" included, the constructor refuses every path and says so.
+ * - Only the owner and the permission bits are checked; access control lists are not.
  * - Locks coordinate the processes of one host that share the directory and run as the same user. They do not span
  *   hosts or containers that do not share the directory.
  * - Lock files must not be deleted while the application runs: exclude the directory from temporary-file cleaners
@@ -47,18 +59,36 @@ final class LockDirectory
     private const FILE_NAME_PATTERN = '/\A[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*\z/';
 
     /**
-     * @var string resolved absolute path, as realpath() returns it
+     * Most symbolic links followed while resolving the path, as on Linux (MAXSYMLINKS).
+     */
+    private const MAX_SYMBOLIC_LINKS = 40;
+
+    /**
+     * File type bits of a stat() mode, and the types this class tells apart.
+     */
+    private const TYPE_MASK = 0170000;
+
+    private const TYPE_DIRECTORY = 0040000;
+
+    private const TYPE_REGULAR_FILE = 0100000;
+
+    private const TYPE_SYMBOLIC_LINK = 0120000;
+
+    /**
+     * @var string resolved absolute path: every symbolic link followed, no "." or ".." component
      */
     private $path;
 
     /**
-     * @param string $path absolute path of the directory; created with mode 0700 when missing
+     * @param string $path absolute path of the directory; missing components are created with mode 0700
      *
-     * @throws InvalidArgumentException when the path is not absolute, cannot be created or resolved, is not a
-     *                                  directory, is not owned by the effective user, lacks owner permissions, or is
-     *                                  writable by its group or by other users; when an ancestor is owned by another
+     * @throws InvalidArgumentException when the path is not absolute, cannot be inspected, created or resolved, or
+     *                                  does not name a directory; when a directory on the way is owned by another
      *                                  user than root or the effective user, or is writable by its group or by other
-     *                                  users without the sticky bit; or on Windows
+     *                                  users without the sticky bit; when a symbolic link on the way is owned by
+     *                                  another user than root or the effective user; when the directory is not owned
+     *                                  by the effective user, lacks owner permissions, or is writable by its group or
+     *                                  by other users; or on Windows
      */
     public function __construct(string $path)
     {
@@ -69,35 +99,10 @@ final class LockDirectory
             throw new InvalidArgumentException('The lock directory must be an absolute path.');
         }
 
-        if (!is_dir($path)) {
-            // Another process may create the directory at the same time: only a failure that leaves no directory
-            // behind is an error.
-            error_clear_last();
-            $created = @mkdir($path, 0700, true);
-            if (!$created && !is_dir($path)) {
-                throw new InvalidArgumentException(sprintf(
-                    'The lock directory cannot be created (%s).',
-                    self::lastErrorReason()
-                ));
-            }
-            if ($created) {
-                // mkdir() applies the umask; the mode of the directory itself must be exactly 0700.
-                @chmod($path, 0700);
-            }
-        }
-
-        $resolved = realpath($path);
-        if ($resolved === false) {
-            throw new InvalidArgumentException('The lock directory cannot be resolved.');
-        }
-        clearstatcache(true, $resolved);
-        $stat = @stat($resolved);
-        if ($stat === false || ($stat['mode'] & 0170000) !== 0040000) {
-            throw new InvalidArgumentException('The lock directory path does not name a directory.');
-        }
+        $effectiveUser = self::effectiveUserId();
+        list($resolved, $stat) = self::resolve($path, $effectiveUser);
 
         $owner = $stat['uid'];
-        $effectiveUser = self::effectiveUserId();
         if ($owner !== $effectiveUser) {
             throw new InvalidArgumentException(sprintf(
                 'The lock directory is owned by user %d, not by the effective user %d of this process.',
@@ -119,13 +124,11 @@ final class LockDirectory
             ));
         }
 
-        self::assertAncestorsAreSafe($resolved, $effectiveUser);
-
         $this->path = $resolved;
     }
 
     /**
-     * Resolved absolute path of the directory, as realpath() returns it: without trailing slash, except for "/".
+     * Resolved absolute path of the directory, every symbolic link followed: without trailing slash, except for "/".
      */
     public function getPath(): string
     {
@@ -152,7 +155,7 @@ final class LockDirectory
         $path = rtrim($this->path, '/') . '/' . $fileName;
         clearstatcache(true, $path);
         $stat = @lstat($path);
-        if ($stat !== false && ($stat['mode'] & 0170000) !== 0100000) {
+        if ($stat !== false && ($stat['mode'] & self::TYPE_MASK) !== self::TYPE_REGULAR_FILE) {
             // A symbolic link could point anywhere, and opening a FIFO for writing blocks until a reader shows up.
             throw new InvalidArgumentException('An entry in the lock directory is not a regular file.');
         }
@@ -171,43 +174,169 @@ final class LockDirectory
     }
 
     /**
-     * Checks every ancestor of the resolved lock directory, up to "/": none may let a user other than root or the
-     * effective user rename or replace its entries.
+     * Resolves the path one component at a time and checks every entry looked up on the way (see the class
+     * description), creating missing components with mode 0700.
      *
-     * @throws InvalidArgumentException when an ancestor cannot be inspected, is owned by another user than root or the
-     *                                  effective user, or is writable by its group or by other users without the
-     *                                  sticky bit
+     * @return array{string, array<int|string, int>} the resolved path, and lstat() of the directory it names
+     *
+     * @throws InvalidArgumentException when an entry cannot be inspected, created or read, does not name a directory
+     *                                  where one is needed, or fails a check; or when too many symbolic links are met
      */
-    private static function assertAncestorsAreSafe(string $resolved, int $effectiveUser): void
+    private static function resolve(string $path, int $effectiveUser): array
     {
-        $ancestor = $resolved;
-        for ($level = 1; $ancestor !== '/'; ++$level) {
-            $ancestor = \dirname($ancestor);
-            clearstatcache(true, $ancestor);
-            $stat = @stat($ancestor);
-            if ($stat === false) {
-                throw new InvalidArgumentException(sprintf(
-                    'A parent directory of the lock directory (%d level(s) up) cannot be inspected.',
-                    $level
-                ));
+        $pending = self::components($path);
+        $current = '/';
+        $currentStat = self::inspect($current);
+        $links = 0;
+
+        while ($pending !== []) {
+            $component = array_shift($pending);
+            if ($component === '..') {
+                // $current never contains a symbolic link, so its parent is the lexical one.
+                $current = \dirname($current);
+                $currentStat = self::inspect($current);
+
+                continue;
             }
-            $owner = $stat['uid'];
-            if ($owner !== 0 && $owner !== $effectiveUser) {
-                throw new InvalidArgumentException(sprintf(
-                    'A parent directory of the lock directory (%d level(s) up) is owned by user %d, who could replace the lock directory.',
-                    $level,
-                    $owner
-                ));
+
+            self::assertHolderIsSafe($current, $currentStat, $effectiveUser);
+            $entry = ($current === '/' ? '' : $current) . '/' . $component;
+            $entryStat = self::inspectOrCreate($entry);
+            $type = $entryStat['mode'] & self::TYPE_MASK;
+
+            if ($type === self::TYPE_SYMBOLIC_LINK) {
+                $linkOwner = $entryStat['uid'];
+                if ($linkOwner !== 0 && $linkOwner !== $effectiveUser) {
+                    throw new InvalidArgumentException(sprintf(
+                        'A symbolic link on the path to the lock directory is owned by user %d, who could replace it.',
+                        $linkOwner
+                    ));
+                }
+                if (++$links > self::MAX_SYMBOLIC_LINKS) {
+                    throw new InvalidArgumentException('The path to the lock directory has too many levels of symbolic links.');
+                }
+                $target = @readlink($entry);
+                if ($target === false) {
+                    throw new InvalidArgumentException('A symbolic link on the path to the lock directory cannot be read.');
+                }
+                if ($target[0] === '/') {
+                    $current = '/';
+                    $currentStat = self::inspect($current);
+                }
+                $pending = array_merge(self::components($target), $pending);
+
+                continue;
             }
-            $mode = $stat['mode'] & 07777;
-            if (($mode & 0022) !== 0 && ($mode & 01000) === 0) {
-                throw new InvalidArgumentException(sprintf(
-                    'A parent directory of the lock directory (%d level(s) up) is writable by its group or by other users without the sticky bit (mode %04o), so they could replace the lock directory.',
-                    $level,
-                    $mode
-                ));
+            if ($type !== self::TYPE_DIRECTORY) {
+                throw new InvalidArgumentException('The lock directory path does not name a directory.');
+            }
+            $current = $entry;
+            $currentStat = $entryStat;
+        }
+
+        return [$current, $currentStat];
+    }
+
+    /**
+     * Non-empty components of a path, without ".".
+     *
+     * @return list<string>
+     */
+    private static function components(string $path): array
+    {
+        $components = [];
+        foreach (explode('/', $path) as $component) {
+            if ($component !== '' && $component !== '.') {
+                $components[] = $component;
             }
         }
+
+        return $components;
+    }
+
+    /**
+     * Checks a directory in which an entry of the path is looked up: no user other than root or the effective user
+     * may rename or replace its entries.
+     *
+     * @param array<int|string, int> $stat lstat() of the directory
+     *
+     * @throws InvalidArgumentException when the directory is owned by another user than root or the effective user,
+     *                                  or is writable by its group or by other users without the sticky bit
+     */
+    private static function assertHolderIsSafe(string $directory, array $stat, int $effectiveUser): void
+    {
+        $depth = $directory === '/' ? 0 : substr_count($directory, '/');
+        $owner = $stat['uid'];
+        if ($owner !== 0 && $owner !== $effectiveUser) {
+            throw new InvalidArgumentException(sprintf(
+                'A directory on the path to the lock directory (depth %d) is owned by user %d, who could replace the lock directory.',
+                $depth,
+                $owner
+            ));
+        }
+        $mode = $stat['mode'] & 07777;
+        if (($mode & 0022) !== 0 && ($mode & 01000) === 0) {
+            throw new InvalidArgumentException(sprintf(
+                'A directory on the path to the lock directory (depth %d) is writable by its group or by other users without the sticky bit (mode %04o), so they could replace the lock directory.',
+                $depth,
+                $mode
+            ));
+        }
+    }
+
+    /**
+     * lstat() of an entry that must exist.
+     *
+     * @return array<int|string, int>
+     *
+     * @throws InvalidArgumentException when the entry cannot be inspected
+     */
+    private static function inspect(string $entry): array
+    {
+        clearstatcache(true, $entry);
+        error_clear_last();
+        $stat = @lstat($entry);
+        if ($stat === false) {
+            throw new InvalidArgumentException(sprintf(
+                'A directory on the path to the lock directory cannot be inspected (%s).',
+                self::lastErrorReason()
+            ));
+        }
+
+        return $stat;
+    }
+
+    /**
+     * lstat() of an entry, which is created as a directory with mode 0700 when missing.
+     *
+     * @return array<int|string, int>
+     *
+     * @throws InvalidArgumentException when the entry is missing and cannot be created
+     */
+    private static function inspectOrCreate(string $entry): array
+    {
+        clearstatcache(true, $entry);
+        $stat = @lstat($entry);
+        if ($stat !== false) {
+            return $stat;
+        }
+
+        // Another process may create the entry at the same time: only a failure that leaves nothing behind is an
+        // error, and whatever was created is checked as any existing entry.
+        error_clear_last();
+        $created = @mkdir($entry, 0700);
+        $reason = self::lastErrorReason();
+        if ($created) {
+            // mkdir() applies the umask; a created directory must be exactly 0700.
+            @chmod($entry, 0700);
+        }
+        clearstatcache(true, $entry);
+        $stat = @lstat($entry);
+        if ($stat === false) {
+            throw new InvalidArgumentException(sprintf('The lock directory cannot be created (%s).', $reason));
+        }
+
+        return $stat;
     }
 
     /**
@@ -236,13 +365,17 @@ final class LockDirectory
 
     /**
      * Reason of the last PHP warning, without the file path that PHP puts before it ("mkdir(): Permission denied"
-     * becomes "Permission denied").
+     * becomes "Permission denied"). An open_basedir refusal, whose message names paths, gets a fixed explanation.
      */
     private static function lastErrorReason(): string
     {
         $error = error_get_last();
         if ($error === null) {
             return 'unknown error';
+        }
+        if (strpos($error['message'], 'open_basedir restriction in effect') !== false) {
+            return 'open_basedir restriction in effect: every directory from "/" down to the lock directory is checked,'
+                . ' so open_basedir must not exclude any of them';
         }
         $position = strrpos($error['message'], ': ');
 

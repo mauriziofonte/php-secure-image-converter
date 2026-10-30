@@ -10,6 +10,7 @@ use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
 use Mfonte\SecureImageConverter\Tests\Fixtures\Concurrency\TemporaryDirectory;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\Attributes\Group;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
@@ -152,7 +153,7 @@ final class LockDirectoryTest extends TestCase
 
         if ($message !== null) {
             $this->expectException(InvalidArgumentException::class);
-            $this->expectExceptionMessage('A parent directory of the lock directory (1 level(s) up) is ' . $message);
+            $this->expectExceptionMessage(self::holderMessage($this->root . '/parent', $message));
         }
 
         $directory = new LockDirectory($this->root . '/parent/locks');
@@ -166,11 +167,15 @@ final class LockDirectoryTest extends TestCase
         chmod($this->root . '/shared', 0777);
 
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('A parent directory of the lock directory (2 level(s) up) is writable by its group or by other users without the sticky bit (mode 0777)');
+        $this->expectExceptionMessage(self::holderMessage($this->root . '/shared', 'writable by its group or by other users without the sticky bit (mode 0777)'));
 
         new LockDirectory($this->root . '/shared/private/locks');
     }
 
+    /**
+     * @group root
+     */
+    #[Group('root')]
     public function testParentOwnedByAnotherUserIsRefused(): void
     {
         if (TemporaryDirectory::effectiveUserId() !== 0) {
@@ -181,7 +186,7 @@ final class LockDirectoryTest extends TestCase
         mkdir($this->root . '/foreign/locks', 0700);
 
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('A parent directory of the lock directory (1 level(s) up) is owned by user 65534, who could replace the lock directory.');
+        $this->expectExceptionMessage(self::holderMessage($this->root . '/foreign', 'owned by user 65534, who could replace the lock directory.'));
 
         new LockDirectory($this->root . '/foreign/locks');
     }
@@ -189,7 +194,10 @@ final class LockDirectoryTest extends TestCase
     /**
      * Another user creates a world-writable directory in a sticky shared directory (as /tmp), and the victim nests its
      * lock directory in it: the other user could swap the lock directory for their own and hold every key forever.
+     *
+     * @group root
      */
+    #[Group('root')]
     public function testLockDirectoryNestedInAnotherUsersDirectoryUnderASharedTmpIsRefused(): void
     {
         if (TemporaryDirectory::effectiveUserId() !== 0) {
@@ -202,9 +210,150 @@ final class LockDirectoryTest extends TestCase
         chown($this->root . '/shared/sic', 65534);
 
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('A parent directory of the lock directory (1 level(s) up) is owned by user 65534');
+        $this->expectExceptionMessage(self::holderMessage($this->root . '/shared/sic', 'owned by user 65534'));
 
         new LockDirectory($this->root . '/shared/sic/locks');
+    }
+
+    /**
+     * The link is safe to follow only while nobody else can replace it: another user who owns the directory that
+     * holds it could point it at a second directory, and two processes given the same path would then lock files in
+     * different directories, both holding the only slot.
+     *
+     * @group root
+     */
+    #[Group('root')]
+    public function testLinkInAnotherUsersDirectoryIsRefusedEvenWhenItsTargetIsSafe(): void
+    {
+        if (TemporaryDirectory::effectiveUserId() !== 0) {
+            self::markTestSkipped('Only root can give a directory to another user.');
+        }
+        mkdir($this->root . '/victim/a', 0700, true);
+        mkdir($this->root . '/shared', 0700);
+        chmod($this->root . '/shared', 01777);
+        mkdir($this->root . '/shared/sic', 0755);
+        chown($this->root . '/shared/sic', 65534);
+        symlink($this->root . '/victim/a', $this->root . '/shared/sic/locks');
+        self::assertSame($this->root . '/victim/a', (new LockDirectory($this->root . '/victim/a'))->getPath());
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(self::holderMessage($this->root . '/shared/sic', 'owned by user 65534, who could replace the lock directory.'));
+
+        new LockDirectory($this->root . '/shared/sic/locks');
+    }
+
+    /**
+     * In a sticky directory such as /tmp, another user can create the link before the application does, and can
+     * later delete it and create another one that points elsewhere.
+     *
+     * @group root
+     */
+    #[Group('root')]
+    public function testLinkOwnedByAnotherUserInAStickyDirectoryIsRefused(): void
+    {
+        if (TemporaryDirectory::effectiveUserId() !== 0) {
+            self::markTestSkipped('Only root can give a symbolic link to another user.');
+        }
+        mkdir($this->root . '/victim', 0700);
+        mkdir($this->root . '/sticky', 0700);
+        chmod($this->root . '/sticky', 01777);
+        symlink($this->root . '/victim', $this->root . '/sticky/app-locks');
+        self::assertTrue(lchown($this->root . '/sticky/app-locks', 65534));
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('A symbolic link on the path to the lock directory is owned by user 65534, who could replace it.');
+
+        new LockDirectory($this->root . '/sticky/app-locks');
+    }
+
+    public function testLinkOwnedByTheEffectiveUserInAStickyDirectoryIsAccepted(): void
+    {
+        mkdir($this->root . '/target', 0700);
+        mkdir($this->root . '/sticky', 0700);
+        chmod($this->root . '/sticky', 01777);
+        symlink($this->root . '/target', $this->root . '/sticky/app-locks');
+
+        self::assertSame($this->root . '/target', (new LockDirectory($this->root . '/sticky/app-locks'))->getPath());
+    }
+
+    public function testLinkInADirectoryOthersCanWriteIsRefusedEvenWhenItsTargetIsSafe(): void
+    {
+        mkdir($this->root . '/target', 0700);
+        mkdir($this->root . '/open', 0700);
+        chmod($this->root . '/open', 0777);
+        symlink($this->root . '/target', $this->root . '/open/locks');
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(self::holderMessage($this->root . '/open', 'writable by its group or by other users without the sticky bit (mode 0777)'));
+
+        new LockDirectory($this->root . '/open/locks');
+    }
+
+    public function testEveryLinkOfAChainIsChecked(): void
+    {
+        mkdir($this->root . '/target', 0700);
+        mkdir($this->root . '/open', 0700);
+        chmod($this->root . '/open', 0777);
+        symlink($this->root . '/target', $this->root . '/open/second');
+        symlink($this->root . '/open/second', $this->root . '/first');
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(self::holderMessage($this->root . '/open', 'writable by its group or by other users without the sticky bit (mode 0777)'));
+
+        new LockDirectory($this->root . '/first');
+    }
+
+    public function testRelativeLinksAndDotDotAreResolvedAsTheKernelDoes(): void
+    {
+        mkdir($this->root . '/a/b', 0700, true);
+        mkdir($this->root . '/target', 0700);
+        symlink('../../target', $this->root . '/a/b/up');
+
+        // ".." after a link leaves the link's target, not the directory that holds the link.
+        $physical = new LockDirectory($this->root . '/a/b/up/../a/./b//');
+        $created = new LockDirectory($this->root . '/a/b/up/new/locks');
+
+        self::assertSame($this->root . '/a/b', $physical->getPath());
+        self::assertSame($this->root . '/target/new/locks', $created->getPath());
+        self::assertSame(0700, self::mode($this->root . '/target/new'));
+        self::assertSame(0700, self::mode($this->root . '/target/new/locks'));
+    }
+
+    public function testSymbolicLinkLoopIsRefused(): void
+    {
+        symlink($this->root . '/loop', $this->root . '/loop');
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('The path to the lock directory has too many levels of symbolic links.');
+
+        new LockDirectory($this->root . '/loop/locks');
+    }
+
+    public function testOpenBasedirThatHidesADirectoryOnTheWayIsNamed(): void
+    {
+        $project = \dirname(__DIR__, 3);
+        $script = 'require $argv[1];'
+            . ' try { new ' . LockDirectory::class . '($argv[2]); echo "accepted"; }'
+            . ' catch (' . InvalidArgumentException::class . ' $e) { echo $e->getMessage(); }';
+        $command = implode(' ', array_map('escapeshellarg', [
+            \PHP_BINARY,
+            '-d',
+            'open_basedir=' . $project . ':' . $this->root,
+            '-r',
+            $script,
+            $project . '/vendor/autoload.php',
+            $this->root . '/locks',
+        ]));
+
+        $output = [];
+        $status = 0;
+        exec($command . ' 2>&1', $output, $status);
+
+        self::assertSame(0, $status, implode("\n", $output));
+        self::assertSame(
+            ['A directory on the path to the lock directory cannot be inspected (open_basedir restriction in effect: every directory from "/" down to the lock directory is checked, so open_basedir must not exclude any of them).'],
+            $output
+        );
     }
 
     /**
@@ -237,7 +386,7 @@ final class LockDirectoryTest extends TestCase
         touch($this->root . '/file');
 
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('The lock directory cannot be created');
+        $this->expectExceptionMessage('The lock directory path does not name a directory.');
 
         new LockDirectory($this->root . '/file');
     }
@@ -427,6 +576,14 @@ final class LockDirectoryTest extends TestCase
 
         self::assertNotNull($flags, 'the lock file descriptor was not found');
         self::assertSame(02000000, $flags & 02000000, 'O_CLOEXEC is not set');
+    }
+
+    /**
+     * Message for a directory on the way that lets other users replace its entries.
+     */
+    private static function holderMessage(string $directory, string $problem): string
+    {
+        return sprintf('A directory on the path to the lock directory (depth %d) is %s', substr_count($directory, '/'), $problem);
     }
 
     private static function mode(string $path): int
