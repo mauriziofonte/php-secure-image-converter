@@ -403,13 +403,25 @@ final class IsolationDetectorTest extends IsolationTestCase
         if (!function_exists('posix_geteuid')) {
             self::markTestSkipped('The file cache needs the posix extension.');
         }
-        (new IsolationDetector())->detect();
         $directory = rtrim(sys_get_temp_dir(), '/') . '/secure-image-converter-' . posix_geteuid();
+        $existed = is_dir($directory);
+        $before = $existed ? (glob($directory . '/*') ?: []) : [];
+        try {
+            (new IsolationDetector())->detect();
 
-        self::assertDirectoryExists($directory);
-        self::assertSame(posix_geteuid(), fileowner($directory));
-        self::assertSame(0, fileperms($directory) & 0022);
-        self::assertTrue((new IsolationDetector())->detect()->isFromCache());
+            self::assertDirectoryExists($directory);
+            self::assertSame(posix_geteuid(), fileowner($directory));
+            self::assertSame(0, fileperms($directory) & 0022);
+            self::assertTrue((new IsolationDetector())->detect()->isFromCache());
+        } finally {
+            // Only what this test created goes: the directory may be shared with real detections.
+            foreach (array_diff(glob($directory . '/*') ?: [], $before) as $file) {
+                @unlink($file);
+            }
+            if (!$existed) {
+                @rmdir($directory);
+            }
+        }
     }
 
     /**
