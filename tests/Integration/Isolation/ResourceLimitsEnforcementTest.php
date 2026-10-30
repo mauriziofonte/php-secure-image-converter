@@ -84,7 +84,9 @@ final class ResourceLimitsEnforcementTest extends IsolationTestCase
 
     public function testOpenFileCapIsEnforced(): void
     {
-        $limits = (new ResourceLimits())->withOpenFiles(16);
+        // PHP passes its own descriptors on, replaced with /dev/null (under Composer and PHPUnit 10 or later, eight
+        // or more): the cap leaves room for them, and stays below the 100 opens of the script.
+        $limits = (new ResourceLimits())->withOpenFiles(64);
         // Opens /dev/null up to 100 times; without the cap every open succeeds.
         $script = '$handles = []; for ($i = 0; $i < 100; ++$i) { $handle = @fopen("/dev/null", "r"); '
             . 'if ($handle === false) { echo count($handles); exit(0); } $handles[] = $handle; } echo "all opened";';
@@ -93,7 +95,7 @@ final class ResourceLimitsEnforcementTest extends IsolationTestCase
         self::assertTrue($result->isSuccessful());
         self::assertMatchesRegularExpression('/\A[0-9]+\z/', $result->getStdout());
         self::assertGreaterThan(0, (int) $result->getStdout());
-        self::assertLessThanOrEqual(13, (int) $result->getStdout(), 'at most 16 descriptors, 3 of them standard');
+        self::assertLessThanOrEqual(61, (int) $result->getStdout(), 'at most 64 descriptors, 3 of them standard');
     }
 
     public function testEveryLimitIsAppliedToTheCommandAndItsChildren(): void
