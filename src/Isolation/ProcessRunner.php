@@ -55,7 +55,7 @@ use Mfonte\SecureImageConverter\Contract\IsolationLevel;
  * the FastCGI connection, database and cache sockets or open files, which would give a compromised decoder a way
  * around the sandbox's network isolation. proc_open() cannot close a descriptor in the child, so every descriptor
  * above 2 that is open in PHP without close-on-exec when the run starts (read from /proc/self/fdinfo; without it,
- * every open descriptor) is replaced with /dev/null in the child instead. When neither /proc/self/fd nor /dev/fd can
+ * every listed descriptor) is replaced with /dev/null in the child instead. When neither /proc/self/fd nor /dev/fd can
  * be listed (for example under an open_basedir that excludes them), the open descriptors are unknown: at the process
  * level and above the run fails with ConversionFailedException before anything starts; at the none level, which
  * promises no isolation, they are inherited. These replacements occupy descriptor numbers in the child, and at the
@@ -442,17 +442,15 @@ final class ProcessRunner
     }
 
     /**
-     * Whether a descriptor listed in /proc/self/fd is still open without close-on-exec. Its flags are read from
-     * /proc/self/fdinfo; when they cannot be read or parsed, an open descriptor counts as inheritable.
+     * Whether a descriptor listed in /proc/self/fd may be open without close-on-exec. Its flags are read from
+     * /proc/self/fdinfo; when they cannot be read or parsed it counts as inheritable, even if it was closed since it
+     * was listed (such as the descriptor scandir() used): /dev/null over a closed descriptor number is harmless, while
+     * an open one whose fdinfo is out of reach (under an open_basedir that allows /proc/self/fd only) must not leak.
      */
     private static function isInheritable(int $descriptor): bool
     {
         $info = @file_get_contents('/proc/self/fdinfo/' . $descriptor);
-        if (!is_string($info)) {
-            // Closed since it was listed (such as the descriptor scandir() used), or fdinfo is unreadable.
-            return is_string(@readlink('/proc/self/fd/' . $descriptor));
-        }
-        if (preg_match('/^flags:\s*([0-7]{1,11})\s*$/m', $info, $match) !== 1) {
+        if (!is_string($info) || preg_match('/^flags:\s*([0-7]{1,11})\s*$/m', $info, $match) !== 1) {
             return true;
         }
 

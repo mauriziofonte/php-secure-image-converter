@@ -655,6 +655,34 @@ final class ProcessRunnerTest extends IsolationTestCase
     }
 
     /**
+     * Under an open_basedir that allows /proc/self/fd but not /proc/self/fdinfo, the flags of a descriptor cannot be
+     * read: it counts as inheritable, so that a file PHP holds open outside open_basedir never reaches the child.
+     *
+     * @dataProvider levels
+     */
+    #[DataProvider('levels')]
+    public function testDescriptorsWhoseFlagsCannotBeReadAreNotInherited(string $level): void
+    {
+        $this->requireLevel($level);
+        $output = $this->runPhp(
+            '-r',
+            'require $argv[1]; $held = fopen($argv[2], "r");'
+                . ' ini_set("open_basedir", implode(":", [$argv[3] . "/src", $argv[3] . "/vendor", sys_get_temp_dir(),'
+                . ' "/proc/self/fd", "/usr", "/bin", "/dev/null"]));'
+                . ' $directory = ' . WorkingDirectory::class . '::create();'
+                . ' $result = (new ' . ProcessRunner::class . '($argv[4]))->run(["ls", "-l", "/proc/self/fd"], $directory);'
+                . ' $directory->remove(); echo $result->getStdout();',
+            self::projectDirectory() . '/vendor/autoload.php',
+            __FILE__,
+            self::projectDirectory(),
+            $level
+        );
+
+        self::assertNotSame([], preg_grep('/ 0 -> \/dev\/null$/', $output), implode("\n", $output));
+        self::assertSame([], preg_grep('/' . preg_quote(basename(__FILE__), '/') . '/', $output));
+    }
+
+    /**
      * With php_uname() disabled the architecture is unknown, so every open descriptor is replaced: the run works and
      * throws nothing outside the library's exceptions.
      */
