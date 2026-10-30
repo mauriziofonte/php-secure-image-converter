@@ -156,3 +156,81 @@ jobs:
 
       - name: PHPStan (as PHP 7.2.5 and as PHP 8.5)
         run: composer analyse
+
+  # The tests and static jobs run the isolation tests too, but without
+  # bubblewrap, so there the sandbox tests skip. This job installs bubblewrap
+  # and lifts Ubuntu 24.04's AppArmor restriction on unprivileged user
+  # namespaces, so that every sandbox test really runs: with
+  # SIC_EXPECTED_ISOLATION_LEVEL set, a test that needs a level the host
+  # lacks fails instead of skipping. It then disables user namespaces and
+  # checks that detection falls back to the rlimit level.
+  isolation:
+    name: Isolation (PHP ${{ matrix.php }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # proc_open() takes a command string on PHP 7.2 and an argument list
+        # on PHP 7.4+: both paths run in the sandbox.
+        php: ['7.2', '8.5']
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+          ini-file: development
+          tools: composer:v2
+
+      - name: Install bubblewrap and allow unprivileged user namespaces
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          bwrap --version
+          prlimit --version
+
+      - name: Install dependencies (highest)
+        run: composer update --no-progress
+
+      # Prints what the detector finds, and the stderr of a sandboxed command,
+      # so that a failure below can be diagnosed from the log.
+      - name: Report the detected isolation level
+        run: |
+          php <<'PHP'
+          <?php
+          require 'vendor/autoload.php';
+          use Mfonte\SecureImageConverter\Isolation\IsolationDetector;
+          use Mfonte\SecureImageConverter\Isolation\ProcessRunner;
+          use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
+          $detection = (new IsolationDetector(null, null, 0))->detect();
+          echo json_encode($detection->toArray(), JSON_PRETTY_PRINT), PHP_EOL;
+          $directory = WorkingDirectory::create();
+          try {
+              $result = (new ProcessRunner('sandbox'))->execute(['true'], $directory);
+              printf("sandboxed true: exit %s, signal %s\n%s\n", var_export($result->getExitCode(), true), var_export($result->getSignal(), true), $result->getStderr());
+          } catch (Exception $exception) {
+              echo get_class($exception), ': ', $exception->getMessage(), PHP_EOL;
+          } finally {
+              $directory->remove();
+          }
+          PHP
+
+      - name: Run the isolation tests (sandbox expected)
+        env:
+          SIC_EXPECTED_ISOLATION_LEVEL: sandbox
+        run: vendor/bin/phpunit --group isolation
+
+      - name: Disable unprivileged user namespaces
+        run: sudo sysctl -w user.max_user_namespaces=0
+
+      - name: Run the isolation tests (rlimit expected without user namespaces)
+        env:
+          SIC_EXPECTED_ISOLATION_LEVEL: rlimit
+        run: vendor/bin/phpunit --group isolation
