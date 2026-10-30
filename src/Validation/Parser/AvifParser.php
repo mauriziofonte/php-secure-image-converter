@@ -16,8 +16,9 @@ use Mfonte\SecureImageConverter\Validation\Limits;
  * each image item and of the first sample of each track, without decoding any AV1 frame.
  *
  * - Boxes must nest inside their parent and the top-level boxes must tile the file up to its end: a truncated file is
- *   refused. At most MAX_BOXES boxes are visited, MAX_ITEMS entries read from the item information (iinf), location
- *   (iloc) and property association (ipma) tables, MAX_ENTRIES from the property and sample description tables,
+ *   refused. A file of more than MAX_ITEMS items (iinf entries) is refused as unsupported, like the grids of many
+ *   tiles that hold that many. At most MAX_BOXES boxes are visited, MAX_ITEMS entries read from the location (iloc)
+ *   and property association (ipma) tables, MAX_ENTRIES from the property and sample description tables,
  *   MAX_REFERENCES item references (iref), and MAX_ASSOCIATIONS property associations (ipma) and item extents (iloc)
  *   in all; the ftyp box is at most 4 KiB and must list an "avif" or "avis" brand, and an infe box is at most 1 KiB. A
  *   box that a decoder reads once (ftyp, meta and moov at the top; hdlr, pitm, iloc, iinf, iprp, iref, idat and dinf
@@ -488,6 +489,7 @@ final class AvifParser implements ParserInterface
      * Item types by item ID, from the infe boxes of iinf (versions 2 and 3; older entries have no type).
      *
      * @throws InvalidImageException
+     * @throws UnsupportedFormatException
      *
      * @return array<int, string>
      */
@@ -497,7 +499,8 @@ final class AvifParser implements ParserInterface
         $version = self::readFullBoxHeader($reader, $end, 1);
         $count = $version === 0 ? self::readUint16($reader, $end) : self::readUint32($reader, $end);
         if ($count > self::MAX_ITEMS) {
-            throw self::invalid('the iinf box has too many entries');
+            // Grids of many tiles hold that many items: refused as unsupported, as grids are.
+            throw new UnsupportedFormatException(sprintf('AVIF files of more than %d items are not supported.', self::MAX_ITEMS));
         }
 
         $items = [];

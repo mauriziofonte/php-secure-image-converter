@@ -708,9 +708,9 @@ final class ImageCorpus
                 ImageBuilder::avifOfItems([1 => "av01\0"] + array_fill(2, AvifParser::MAX_ITEMS - 1, "Exif\0")),
                 self::accept(ImageFormat::AVIF, 8, 8, 1, ['exif' => true, 'metadata' => true])
             ),
-            'avif/spoof-too-many-items.avif' => self::committed(
+            'avif/unsupported-too-many-items.avif' => self::committed(
                 ImageBuilder::avifOfItems([1 => "av01\0"] + array_fill(2, AvifParser::MAX_ITEMS, "Exif\0")),
-                self::reject(ErrorCode::INVALID_IMAGE)
+                self::reject(ErrorCode::UNSUPPORTED_FORMAT)
             ),
             // Decoders read the first copy of a box or property, so a second copy must not hide a large first one.
             'avif/spoof-two-pixi.avif' => self::committed(
