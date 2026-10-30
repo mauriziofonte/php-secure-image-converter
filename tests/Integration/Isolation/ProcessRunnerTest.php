@@ -55,7 +55,12 @@ final class ProcessRunnerTest extends IsolationTestCase
     #[DataProvider('levels')]
     public function testArgumentsReachTheProgramVerbatimWithoutAShell(string $level): void
     {
-        $arguments = ['a b', '$(id)', '`id`', '; touch injected', "it's", '"quoted"', '*', '', "tab\tand\nnewline"];
+        $arguments = [
+            'a b', '$(id)', '`id`', '; touch injected', "it's", "'", "''", "'\\''", '"quoted"', '\\', '*', '',
+            "tab\tand\nnewline", '-n', '--',
+            // Non-ASCII and invalid UTF-8 bytes, which escapeshellarg() drops on PHP 7.2 and 7.3 in the C locale.
+            'é', "\x80\xff", "x\x80\xff\xc3(y", "\xc3", "\x7f\x01\x1b[0m",
+        ];
         $result = $this->runner($level)->run(
             array_merge(['printf', '[%s]'], $arguments),
             $this->workingDirectory()
@@ -65,6 +70,74 @@ final class ProcessRunnerTest extends IsolationTestCase
         self::assertSame('[' . implode('][', $arguments) . ']', $result->getStdout());
         self::assertFileDoesNotExist($this->workingDirectory()->pathOf('injected'));
         self::assertSame($level, $result->getIsolationLevel());
+    }
+
+    /**
+     * @dataProvider levels
+     */
+    #[DataProvider('levels')]
+    public function testALongArgumentWithEveryByteReachesTheProgramVerbatim(string $level): void
+    {
+        // Every byte value but NUL, single quotes included, close to the command line limit once quoted.
+        $argument = str_repeat(implode('', array_map('chr', range(1, 255))), 470);
+        self::assertGreaterThan(119000, strlen($argument));
+        $command = ['printf', '%s', $argument];
+        self::assertLessThan(
+            CommandBuilder::MAX_COMMAND_LINE_BYTES - 1000,
+            strlen(CommandBuilder::toShellCommand($command))
+        );
+
+        $result = $this->runner($level)->run($command, $this->workingDirectory());
+
+        self::assertTrue($result->isSuccessful());
+        self::assertSame(strlen($argument), strlen($result->getStdout()));
+        self::assertSame(sha1($argument), sha1($result->getStdout()), 'the output is byte for byte the argument');
+    }
+
+    /**
+     * @return array<string, array{list<string>}>
+     */
+    public static function oversizedCommands(): array
+    {
+        return [
+            'one long argument' => [['printf', '%s', str_repeat('x', CommandBuilder::MAX_COMMAND_LINE_BYTES)]],
+            'many arguments' => [array_merge(['printf', '%s'], array_fill(0, 20000, 'abcdef'))],
+            'quotes count four times' => [['printf', '%s', str_repeat("'", 40000)]],
+        ];
+    }
+
+    /**
+     * The limit is the same on every PHP version, also where proc_open() receives the argument list itself.
+     *
+     * @dataProvider oversizedCommands
+     *
+     * @param list<string> $command
+     */
+    #[DataProvider('oversizedCommands')]
+    public function testCommandLinesOverTheLimitAreRejected(array $command): void
+    {
+        try {
+            (new ProcessRunner(IsolationLevel::NONE))->run($command, $this->workingDirectory());
+            self::fail('An oversized command line must be rejected.');
+        } catch (InvalidArgumentException $exception) {
+            self::assertSame(ErrorCode::INTERNAL_ERROR, $exception->getErrorCode());
+            self::assertSame(
+                'The command line must not be longer than 131071 bytes once quoted, isolation wrappers included.',
+                $exception->getMessage()
+            );
+        }
+    }
+
+    public function testTheLimitCountsTheIsolationWrappers(): void
+    {
+        $this->requireLevel(IsolationLevel::RLIMIT);
+        $command = ['printf', '%s', str_repeat('x', CommandBuilder::MAX_COMMAND_LINE_BYTES - 100)];
+        $result = (new ProcessRunner(IsolationLevel::NONE))->run($command, $this->workingDirectory());
+        self::assertTrue($result->isSuccessful(), 'the command fits without wrappers');
+
+        $this->expectException(InvalidArgumentException::class);
+
+        (new ProcessRunner(IsolationLevel::RLIMIT))->run($command, $this->workingDirectory());
     }
 
     /**

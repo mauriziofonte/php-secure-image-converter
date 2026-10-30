@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Mfonte\SecureImageConverter\Tests\Unit\Isolation;
 
+use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
 use Mfonte\SecureImageConverter\Contract\IsolationLevel;
 use Mfonte\SecureImageConverter\Isolation\CommandBuilder;
 use Mfonte\SecureImageConverter\Isolation\ProcessOptions;
@@ -177,8 +178,26 @@ final class CommandBuilderTest extends TestCase
     public function testShellCommandQuotesEveryArgumentAndExecs(): void
     {
         self::assertSame(
-            "exec '/usr/bin/cwebp' '-q' '80' 'in put.png' '-o' '\$(out).webp' 'it'\\''s' ''",
-            CommandBuilder::toShellCommand(array_merge(self::COMMAND, ["it's", '']))
+            "exec '/usr/bin/cwebp' '-q' '80' 'in put.png' '-o' '\$(out).webp' 'it'\\''s' '' ''\\'''\\'''",
+            CommandBuilder::toShellCommand(array_merge(self::COMMAND, ["it's", '', "''"]))
         );
+    }
+
+    public function testShellCommandKeepsEveryByte(): void
+    {
+        $bytes = implode('', array_map('chr', range(1, 255)));
+
+        self::assertSame(
+            "exec 'é' '\x80\xff' 'x\x80\xff\xc3(y' '" . str_replace("'", "'\\''", $bytes) . "'",
+            CommandBuilder::toShellCommand(['é', "\x80\xff", "x\x80\xff\xc3(y", $bytes])
+        );
+    }
+
+    public function testShellCommandRejectsNulBytes(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Command arguments must be strings without NUL bytes.');
+
+        CommandBuilder::toShellCommand(['/bin/echo', "a\0b"]);
     }
 }

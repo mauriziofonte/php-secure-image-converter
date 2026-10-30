@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Mfonte\SecureImageConverter\Isolation;
 
+use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
 use Mfonte\SecureImageConverter\Contract\IsolationLevel;
 
 /**
@@ -24,6 +25,15 @@ use Mfonte\SecureImageConverter\Contract\IsolationLevel;
  */
 final class CommandBuilder
 {
+    /**
+     * Longest accepted command line, in bytes: the length of toShellCommand() for the full argument list, isolation
+     * wrappers included. Linux limits every single string passed to execve() to MAX_ARG_STRLEN, 131072 bytes with
+     * the terminating NUL, and on PHP 7.2 and 7.3 the whole command line is one such string (the argument of
+     * /bin/sh -c). ProcessRunner applies the same limit on every PHP version, so that a command accepted on one
+     * version runs on all of them. Note that a single quote counts as four bytes once quoted.
+     */
+    public const MAX_COMMAND_LINE_BYTES = 131071;
+
     /**
      * @var ProcessOptions
      */
@@ -135,14 +145,29 @@ final class CommandBuilder
     }
 
     /**
-     * The argument list as a /bin/sh command line for PHP 7.2 and 7.3, whose proc_open() accepts only a string: each
-     * argument is quoted with escapeshellarg(), and "exec" replaces the shell with the command, so that no shell
-     * process remains and the process ID that PHP reports is the command's own.
+     * The argument list as a /bin/sh command line for PHP 7.2 and 7.3, whose proc_open() accepts only a string, and
+     * the measure of MAX_COMMAND_LINE_BYTES on every version. "exec" replaces the shell with the command, so that no
+     * shell process remains and the process ID that PHP reports is the command's own.
+     *
+     * Each argument is enclosed in single quotes, inside which a POSIX shell gives no byte a special meaning; a
+     * single quote is written as '\''. Unlike escapeshellarg(), which on PHP 7.2 and 7.3 drops every byte above
+     * 0x7F that is not valid in the current locale (all of them in the default C locale) and stops the script with a
+     * fatal error for an argument longer than the system's ARG_MAX, this keeps every byte as it is.
      *
      * @param list<string> $arguments
+     *
+     * @throws InvalidArgumentException when an argument contains a NUL byte, which no command line can carry
      */
     public static function toShellCommand(array $arguments): string
     {
-        return 'exec ' . implode(' ', array_map('escapeshellarg', $arguments));
+        $quoted = [];
+        foreach ($arguments as $argument) {
+            if (strpos($argument, "\0") !== false) {
+                throw new InvalidArgumentException('Command arguments must be strings without NUL bytes.');
+            }
+            $quoted[] = "'" . str_replace("'", "'\\''", $argument) . "'";
+        }
+
+        return 'exec ' . implode(' ', $quoted);
     }
 }

@@ -15,9 +15,12 @@ use Mfonte\SecureImageConverter\Contract\IsolationLevel;
  * output capture, a sanitised environment and a private working directory.
  *
  * The command is a list of arguments and never goes through a shell: PHP 7.4+ receives the list itself
- * (proc_open() executes it directly); PHP 7.2 and 7.3 can only pass a string to /bin/sh, so every argument is quoted
- * with escapeshellarg() and the line starts with "exec", which replaces the shell with the command. The first
- * argument is resolved to an absolute path with ExecutableFinder before the run.
+ * (proc_open() executes it directly); PHP 7.2 and 7.3 can only pass a string to /bin/sh, so every argument is
+ * enclosed in single quotes, byte for byte (see CommandBuilder::toShellCommand()), and the line starts with "exec",
+ * which replaces the shell with the command. Either way the program receives exactly the bytes it was given. The
+ * first argument is resolved to an absolute path with ExecutableFinder before the run. Arguments must not contain NUL
+ * bytes, and the quoted command line, isolation wrappers included, must not exceed
+ * CommandBuilder::MAX_COMMAND_LINE_BYTES (just under 128 KiB) on any PHP version.
  *
  * What each level adds (see IsolationLevel and CommandBuilder):
  *
@@ -188,7 +191,9 @@ final class ProcessRunner
      *
      * @throws ConversionTimeoutException    when the wall-clock timeout expired (the process group was killed)
      * @throws IsolationUnavailableException when the level of this runner is not available on the host
-     * @throws InvalidArgumentException      when the command, the input or the working directory is invalid
+     * @throws InvalidArgumentException      when the command (a NUL byte, a command line longer than
+     *                                       CommandBuilder::MAX_COMMAND_LINE_BYTES), the input or the working
+     *                                       directory is invalid
      * @throws ConversionFailedException     when the process cannot be started or its status is lost
      */
     public function run(
@@ -243,32 +248,46 @@ final class ProcessRunner
         }
 
         $arguments = $this->builder->build($this->level, $command, $requirements['tools'], $directory, $readOnlyPaths);
+        $commandLine = CommandBuilder::toShellCommand($arguments);
+        if (strlen($commandLine) > CommandBuilder::MAX_COMMAND_LINE_BYTES) {
+            throw new InvalidArgumentException(sprintf(
+                'The command line must not be longer than %d bytes once quoted, isolation wrappers included.',
+                CommandBuilder::MAX_COMMAND_LINE_BYTES
+            ));
+        }
         $descriptors = [
             0 => ['file', $stdinPath === null ? '/dev/null' : $stdinPath, 'r'],
             1 => ['pipe', 'w'],
             2 => ['pipe', 'w'],
         ] + self::inheritedDescriptors();
 
-        return $this->spawn($arguments, $descriptors, $directory, $this->builder->environment($directory));
+        $environment = $this->builder->environment($directory);
+
+        return $this->spawn($arguments, $commandLine, $descriptors, $directory, $environment);
     }
 
     /**
-     * @param list<string>             $arguments
+     * @param list<string>             $arguments   the argument list, for PHP 7.4+
+     * @param string                   $commandLine the same as a /bin/sh command line, for PHP 7.2 and 7.3
      * @param array<int, list<string>> $descriptors
      * @param array<string, string>    $environment
      *
      * @throws ConversionFailedException when the process cannot be started or its status is lost
      */
-    private function spawn(array $arguments, array $descriptors, string $directory, array $environment): ProcessResult
-    {
+    private function spawn(
+        array $arguments,
+        string $commandLine,
+        array $descriptors,
+        string $directory,
+        array $environment
+    ): ProcessResult {
         $pipes = [];
         $start = self::now();
         // proc_open() warns when fork() fails; the failure is reported by the exception below instead.
         if (PHP_VERSION_ID >= 70400) {
             $process = @proc_open($arguments, $descriptors, $pipes, $directory, $environment);
         } else {
-            $command = CommandBuilder::toShellCommand($arguments);
-            $process = @proc_open($command, $descriptors, $pipes, $directory, $environment);
+            $process = @proc_open($commandLine, $descriptors, $pipes, $directory, $environment);
         }
         if (!is_resource($process)) {
             throw new ConversionFailedException('The process could not be started.');
