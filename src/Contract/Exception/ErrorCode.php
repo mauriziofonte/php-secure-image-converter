@@ -16,7 +16,9 @@ namespace Mfonte\SecureImageConverter\Contract\Exception;
  * | ---------------------------- | ------ | ----------------------------- | --------------------------------------------- |
  * | `invalid_request`            | 400    | InvalidRequestException       | parameter unknown, malformed or out of the    |
  * |                              |        |                               | contract's static range                       |
- * | `unsupported_format`         | 415    | UnsupportedFormatException    | input format unidentifiable or not enabled    |
+ * | `unsupported_format`         | 415    | UnsupportedFormatException    | input format unidentifiable or not enabled,   |
+ * |                              |        |                               | or a variant of it that is not accepted (see  |
+ * |                              |        |                               | UnsupportedFormatException)                   |
  * | `invalid_image`              | 422    | InvalidImageException         | identified but malformed, truncated, spoofed  |
  * | `animation_rejected`         | 422    | InvalidImageException         | animated input with animation policy reject   |
  * | `file_too_large`             | 413    | LimitExceededException        | input byte size above max_bytes               |
