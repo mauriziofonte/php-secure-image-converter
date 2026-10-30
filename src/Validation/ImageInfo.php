@@ -18,8 +18,8 @@ use Mfonte\SecureImageConverter\Contract\ValidatedSerializationTrait;
  * - The frame count is 1 for a still image, and the number of frames of an animation (GIF images, APNG frames,
  *   WEBP ANMF frames, samples of an AVIF image sequence). Only ImageFormat::animatable() formats have more than one.
  * - The bit depth is the precision per colour channel a decoder produces at most: 8 for every 8-bit or lower depth
- *   (paletted images, 1-bit PNG, 5-6-5 BMP included), 10 or 12 for high-precision AVIF, 12 or 16 for JPEG of that
- *   sample precision, 16 for 16-bit PNG and 64-bit BMP, the bits per sample of TIFF (from 8 to 64).
+ *   (paletted images, 1-bit PNG, 5-6-5 BMP and every accepted JPEG included), 10 or 12 for high-precision AVIF, 16
+ *   for 16-bit PNG and 64-bit BMP, the bits per sample of TIFF (from 8 to 64).
  * - hasIccProfile() reports an embedded colour profile, hasExif() an EXIF block, and hasMetadata() any metadata
  *   other than the colour profile: EXIF, XMP, IPTC, comments, text chunks and unknown ancillary data, which
  *   metadata stripping removes.

@@ -69,7 +69,6 @@ final class ImageCorpus
             'jpeg/valid-grey.jpg' => self::committed(ImageBuilder::jpeg(16, 8), self::accept(ImageFormat::JPEG, 16, 8, 1, ['bit_depth' => 8, 'icc_profile' => false, 'exif' => false, 'metadata' => false])),
             'jpeg/valid-colour.jpg' => self::committed($valid, self::accept(ImageFormat::JPEG, 33, 17)),
             'jpeg/valid-progressive.jpg' => self::committed(ImageBuilder::progressiveJpeg(20, 12), self::accept(ImageFormat::JPEG, 20, 12)),
-            'jpeg/valid-12-bit.jpg' => self::committed(ImageBuilder::jpeg(8, 8, 1, '', 0xC1, 12), self::accept(ImageFormat::JPEG, 8, 8, 1, ['bit_depth' => 12])),
             'jpeg/valid-exif-icc.jpg' => self::committed(
                 ImageBuilder::jpeg(8, 8, 3, ImageBuilder::jpegExif() . ImageBuilder::jpegIcc()),
                 self::accept(ImageFormat::JPEG, 8, 8, 1, ['icc_profile' => true, 'exif' => true, 'metadata' => true])
@@ -97,6 +96,13 @@ final class ImageCorpus
             'jpeg/spoof-two-frame-headers.jpg' => self::committed(str_replace($frameHeader, $frameHeader . $frameHeader, $valid), self::reject(ErrorCode::INVALID_IMAGE)),
             'jpeg/spoof-zero-height.jpg' => self::committed(ImageBuilder::patch($grey, $greySof + 5, pack('n', 0)), self::reject(ErrorCode::INVALID_IMAGE)),
             'jpeg/spoof-precision-7.jpg' => self::committed(ImageBuilder::patch($grey, $greySof + 4, "\x07"), self::reject(ErrorCode::INVALID_IMAGE)),
+            // libjpeg decodes neither lossless nor hierarchical JPEG, nor 12 or 16 bits per sample as built by GD.
+            'jpeg/unsupported-12-bit.jpg' => self::committed(ImageBuilder::jpeg(8, 8, 1, '', 0xC1, 12), self::reject(ErrorCode::UNSUPPORTED_FORMAT, true)),
+            'jpeg/unsupported-lossless.jpg' => self::committed(ImageBuilder::jpeg(8, 8, 1, '', 0xC3), self::reject(ErrorCode::UNSUPPORTED_FORMAT, true)),
+            'jpeg/unsupported-hierarchical.jpg' => self::committed(
+                ImageBuilder::jpeg(8, 8, 1, ImageBuilder::jpegSegment(0xDE, pack('CnnC', 8, 8, 8, 1) . "\x01\x11\x00"), 0xC5),
+                self::reject(ErrorCode::UNSUPPORTED_FORMAT, true)
+            ),
             'jpeg/truncated-scan.jpg' => self::committed((string) substr($valid, 0, -4), self::reject(ErrorCode::INVALID_IMAGE)),
             'jpeg/truncated-header.jpg' => self::committed((string) substr($valid, 0, $sof + 6), self::reject(ErrorCode::INVALID_IMAGE)),
         ];

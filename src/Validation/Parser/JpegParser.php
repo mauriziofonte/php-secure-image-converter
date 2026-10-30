@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Mfonte\SecureImageConverter\Validation\Parser;
 
 use Mfonte\SecureImageConverter\Contract\Exception\InvalidImageException;
+use Mfonte\SecureImageConverter\Contract\Exception\UnsupportedFormatException;
 use Mfonte\SecureImageConverter\Contract\ImageFormat;
 use Mfonte\SecureImageConverter\Validation\ImageInfo;
 use Mfonte\SecureImageConverter\Validation\Limits;
@@ -15,9 +16,12 @@ use Mfonte\SecureImageConverter\Validation\Limits;
  *
  * - At most MAX_SEGMENTS segments are accepted before the first scan, and at most MAX_FILL_BYTES fill bytes before a
  *   marker: a flood of EXIF or other segments is refused instead of walked.
- * - Exactly one frame header must precede the first scan: sample precision 8, 12 or 16, width and height from 1
- *   (a zero height announcing a later DNL marker is refused), 1 to 4 components with sampling factors from 1 to 4.
- *   The dimensions are checked against the limits as soon as the frame header is read.
+ * - Exactly one frame header must precede the first scan, of a process 8-bit libjpeg decodes: baseline, extended
+ *   sequential or progressive, Huffman or arithmetic coded (SOF0, SOF1, SOF2, SOF9, SOF10), with a sample precision
+ *   of 8. Lossless (SOF3, SOF11) and hierarchical (SOF5 to SOF7, SOF13 to SOF15) processes and 12 or 16-bit
+ *   precision are refused as unsupported. Width and height from 1 (a zero height announcing a later DNL marker is
+ *   refused), 1 to 4 components with sampling factors from 1 to 4. The dimensions are checked against the limits as
+ *   soon as the frame header is read.
  * - Every segment must fit in the file; a truncated header is refused. Once the first scan is reached, the image
  *   must end with an EOI marker (FF D9): either the file ends with it (the usual case, checked by reading the last
  *   two bytes), or it occurs somewhere after the scan, followed by appended data such as the video of a motion
@@ -43,7 +47,15 @@ final class JpegParser implements ParserInterface
     private const MAX_FILL_BYTES = 64;
 
     /**
-     * Sample precisions of the frame header: baseline and extended 8-bit, extended 12-bit, lossless 16-bit.
+     * Frame header markers of the processes an 8-bit libjpeg decodes: baseline, extended sequential and progressive,
+     * with Huffman (C0 to C2) or arithmetic (C9, CA) coding.
+     *
+     * @var list<int>
+     */
+    private const SUPPORTED_FRAMES = [0xC0, 0xC1, 0xC2, 0xC9, 0xCA];
+
+    /**
+     * Sample precisions a frame header may declare; only 8 is supported.
      *
      * @var list<int>
      */
@@ -90,6 +102,9 @@ final class JpegParser implements ParserInterface
             if (self::isFrameHeader($marker)) {
                 if ($frame !== null) {
                     throw self::invalid('the image has more than one frame header');
+                }
+                if (!in_array($marker, self::SUPPORTED_FRAMES, true)) {
+                    throw new UnsupportedFormatException('Lossless and hierarchical JPEG images are not supported.');
                 }
                 $frame = self::readFrameHeader($reader, $payloadLength);
                 $limits->assertImage($frame[0], $frame[1], 1);
@@ -159,6 +174,7 @@ final class JpegParser implements ParserInterface
 
     /**
      * @throws InvalidImageException
+     * @throws UnsupportedFormatException
      *
      * @return array{0: int, 1: int, 2: int} width, height and sample precision
      */
@@ -173,7 +189,10 @@ final class JpegParser implements ParserInterface
         $components = $reader->readUint8();
 
         if (!in_array($precision, self::PRECISIONS, true)) {
-            throw self::invalid('the frame header has an unsupported sample precision');
+            throw self::invalid('the frame header declares an invalid sample precision');
+        }
+        if ($precision !== 8) {
+            throw new UnsupportedFormatException('JPEG images of 12 or 16 bits per sample are not supported.');
         }
         if ($width === 0 || $height === 0) {
             throw self::invalid('the frame header declares a zero width or height');
