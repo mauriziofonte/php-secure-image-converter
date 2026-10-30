@@ -14,7 +14,9 @@ use Mfonte\SecureImageConverter\Contract\Exception\InvalidRequestException;
  * Immutable value object: every with*() method validates its argument and returns a modified copy, leaving the
  * original untouched; an invalid argument throws InvalidRequestException and creates nothing. A new instance holds
  * the defaults (webp, default quality, effort 4, no resize, metadata stripped but ICC profile kept, animation
- * preserved). An unserialized instance is validated again and rebuilt by value, see ValidatedSerializationTrait.
+ * preserved). An unserialized instance is validated again and rebuilt by value, see ValidatedSerializationTrait. Every
+ * property has a default, and the defaults form the default request, so that an instance created without the
+ * constructor is the default request too.
  *
  * This class is the single source of truth for conversion parameters across the library, the conversion API and the
  * proxy: the API maps HTTP parameters with fromParameters(), the proxy sends toParameters() to the API, and caches
@@ -204,7 +206,7 @@ final class ConversionRequest
     /**
      * @var string
      */
-    private $format;
+    private $format = self::DEFAULT_FORMAT;
 
     /**
      * @var int|null

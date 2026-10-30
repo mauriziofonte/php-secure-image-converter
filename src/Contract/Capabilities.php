@@ -21,7 +21,10 @@ use Mfonte\SecureImageConverter\Contract\Exception\LimitExceededException;
  * 64-bit PHP (php-64bit).
  *
  * Immutable value object. Format lists are normalised to the canonical order of ImageFormat::all(); backends keep
- * their order, which is the order of preference. The conversion API publishes toArray() as JSON on /healthz and the
+ * their order, which is the order of preference. Every property has a default, and the defaults form the most
+ * restrictive valid capabilities (no format, no backend, isolation level none, every limit 1), so that an instance
+ * created without the constructor refuses everything instead of holding a value outside the documented domain; see
+ * ValidatedSerializationTrait. The conversion API publishes toArray() as JSON on /healthz and the
  * proxy reads it back with fromArray(), which is strict and versioned: the array carries a "schema" key whose value
  * is SCHEMA_VERSION, and any other version, missing key, unknown key or invalid value is rejected. Shape of schema 1:
  *
@@ -127,32 +130,39 @@ final class Capabilities
     /**
      * @var list<string>
      */
-    private $inputFormats;
+    private $inputFormats = [];
 
     /**
      * @var list<string>
      */
-    private $outputFormats;
+    private $outputFormats = [];
 
     /**
      * @var list<string>
      */
-    private $animatedOutputFormats;
+    private $animatedOutputFormats = [];
 
     /**
      * @var list<string>
      */
-    private $backends;
+    private $backends = [];
 
     /**
      * @var string
      */
-    private $isolationLevel;
+    private $isolationLevel = IsolationLevel::NONE;
 
     /**
      * @var array<string, int>
      */
-    private $limits;
+    private $limits = [
+        self::LIMIT_MAX_BYTES => 1,
+        self::LIMIT_MAX_WIDTH => 1,
+        self::LIMIT_MAX_HEIGHT => 1,
+        self::LIMIT_MAX_MEGAPIXELS => 1,
+        self::LIMIT_MAX_FRAMES => 1,
+        self::LIMIT_MAX_TOTAL_MEGAPIXELS => 1,
+    ];
 
     /**
      * @param list<string>       $inputFormats          ImageFormat values accepted as input

@@ -13,7 +13,9 @@ use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
  * (sniffed from its content), not as requested. A passthrough result means that the output file holds the input
  * bytes unchanged, which a converter does only when the input already satisfies the request (see
  * ConverterInterface::convert()). An unserialized instance is validated again and rebuilt by value, see
- * ValidatedSerializationTrait.
+ * ValidatedSerializationTrait. Every property has a default, and the defaults form a valid placeholder (a one-pixel
+ * WEBP passthrough at /dev/null for which no backend ran, isolation level none), so that an instance created
+ * without the constructor never holds a value outside the documented domain.
  *
  * toArray() is safe for untrusted clients; toInternalArray() adds the output path and is meant for server logs.
  */
@@ -34,57 +36,57 @@ final class ConversionResult
     /**
      * @var string
      */
-    private $outputPath;
+    private $outputPath = '/dev/null';
 
     /**
      * @var string
      */
-    private $outputFormat;
+    private $outputFormat = ImageFormat::WEBP;
 
     /**
      * @var int
      */
-    private $width;
+    private $width = 1;
 
     /**
      * @var int
      */
-    private $height;
+    private $height = 1;
 
     /**
      * @var int
      */
-    private $byteSize;
+    private $byteSize = 1;
 
     /**
      * @var int
      */
-    private $frameCount;
+    private $frameCount = 1;
 
     /**
      * @var string
      */
-    private $backend;
+    private $backend = self::BACKEND_NONE;
 
     /**
      * @var int
      */
-    private $durationMs;
+    private $durationMs = 0;
 
     /**
      * @var string
      */
-    private $isolationLevel;
+    private $isolationLevel = IsolationLevel::NONE;
 
     /**
      * @var bool
      */
-    private $passthrough;
+    private $passthrough = true;
 
     /**
      * @var list<string>
      */
-    private $warnings;
+    private $warnings = [];
 
     /**
      * @param string       $outputPath     path of the output file, as passed to ConverterInterface::convert()

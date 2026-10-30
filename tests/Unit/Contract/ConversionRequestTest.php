@@ -1098,19 +1098,31 @@ final class ConversionRequestTest extends TestCase
         unserialize(self::serializedWithState(ConversionRequest::class, $state), ['allowed_classes' => [ConversionRequest::class]]);
     }
 
-    public function testUnserializeRejectsAMissingOrUnknownProperty(): void
+    /**
+     * PHP 7.4 and later restore through __unserialize(), which requires every declared property. PHP 7.2 and 7.3
+     * restore natively and leave a missing property at its default, which is valid (see
+     * ConstructorlessInstanceTest): the instance is then the request with that parameter at its default value.
+     */
+    public function testUnserializeRejectsOrDefaultsAMissingProperty(): void
     {
-        $state = self::stateOf(new ConversionRequest());
+        $request = (new ConversionRequest('avif'))->withQuality(55);
+        $state = self::stateOf($request);
         unset($state['format']);
-        try {
-            unserialize(self::serializedWithState(ConversionRequest::class, $state), ['allowed_classes' => [ConversionRequest::class]]);
-            self::fail('A state without format was accepted');
-        } catch (InvalidArgumentException $exception) {
-            self::assertSame(ErrorCode::INTERNAL_ERROR, $exception->getErrorCode());
+        if (PHP_VERSION_ID >= 70400) {
+            $this->expectException(InvalidArgumentException::class);
         }
 
+        $restored = unserialize(self::serializedWithState(ConversionRequest::class, $state), ['allowed_classes' => [ConversionRequest::class]]);
+
+        self::assertEquals($request->withFormat('webp'), $restored);
+    }
+
+    public function testUnserializeRejectsAnUnknownProperty(): void
+    {
         $state = self::stateOf(new ConversionRequest()) + ['injected' => 'value'];
+
         $this->expectException(InvalidArgumentException::class);
+
         unserialize(self::serializedWithState(ConversionRequest::class, $state), ['allowed_classes' => [ConversionRequest::class]]);
     }
 

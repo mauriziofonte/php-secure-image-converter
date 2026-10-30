@@ -13,7 +13,8 @@ use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
  * serialize() writes the private properties under their mangled names ("\0" . class . "\0" . name), in declaration
  * order, which is what PHP writes natively: the serialized form is the same on every supported PHP version, so a
  * string written by one version is read by any other. unserialize() accepts every declared property exactly once,
- * in any order, under its mangled or its bare name, as PHP itself does, and nothing else.
+ * in any order, under its mangled or its bare name, as PHP itself does, and nothing else; on PHP 7.2 and 7.3, which
+ * restore natively, a property missing from the string keeps its default instead (see below: defaults are valid).
  *
  * The values are then checked by rebuilding the instance through its public validation (validatedCopy() of the
  * using class) and comparing: a tampered, truncated or outdated string throws InvalidArgumentException instead of
@@ -28,6 +29,12 @@ use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
  * and call __wakeup(). The using class implements validatedCopy(): self, which builds a new instance from its current
  * property values through its public constructor or factory, and throws an ExceptionInterface when a value is not
  * valid, whatever its type.
+ *
+ * Two ways of creating an instance bypass every method of this trait and of the constructor: unserialize() of the
+ * "C:" format, meant for classes implementing \Serializable, which PHP 7.2 to 8.5 answer for any other class with a
+ * mere warning ("has no unserializer") and an instance holding the property defaults, and
+ * ReflectionClass::newInstanceWithoutConstructor(). The using class therefore gives every property a default, and
+ * the defaults together form a valid instance.
  *
  * @internal
  */
