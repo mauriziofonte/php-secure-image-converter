@@ -5,10 +5,15 @@ declare(strict_types=1);
 namespace Mfonte\SecureImageConverter\Contract\Exception;
 
 /**
- * The conversion did not complete within its wall-clock timeout and its process was killed.
+ * The conversion did not complete within its wall-clock timeout and its process was killed. The input exceeds the
+ * processing budget of this converter, so a retry of the same request will not help.
  *
- * Expected HTTP status in the API: 504 Gateway Timeout.
+ * Error code ErrorCode::CONVERSION_TIMEOUT; expected HTTP status in the API: 422 Unprocessable Content.
  */
-final class ConversionTimeoutException extends ConversionFailedException
+final class ConversionTimeoutException extends \RuntimeException implements ExceptionInterface
 {
+    public function getErrorCode(): string
+    {
+        return ErrorCode::CONVERSION_TIMEOUT;
+    }
 }

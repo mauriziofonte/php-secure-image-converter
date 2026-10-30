@@ -5,26 +5,16 @@ declare(strict_types=1);
 namespace Mfonte\SecureImageConverter\Contract\Exception;
 
 /**
- * Marker implemented by every exception thrown by this library, so that callers can catch all of them at once.
+ * Implemented by every exception thrown by this library, so that callers can catch all of them at once.
  *
- * Each concrete exception documents the HTTP status the conversion API is expected to answer with when it reaches
- * the HTTP layer; the library itself knows nothing about HTTP. Summary:
- *
- * | Exception                     | Status |
- * | ----------------------------- | ------ |
- * | InvalidRequestException       | 400    |
- * | UnsupportedFormatException    | 415    |
- * | InvalidImageException         | 422    |
- * | LimitExceededException        | 413    |
- * | IsolationUnavailableException | 503    |
- * | ConcurrencyLimitException     | 503    |
- * | ConversionFailedException     | 500    |
- * | ConversionTimeoutException    | 504    |
- * | OutputVerificationException   | 500    |
- * | InvalidArgumentException      | 500    |
- *
- * ConversionTimeoutException extends ConversionFailedException, so a mapper must test it first.
+ * Callers branch on getErrorCode(), never on the class hierarchy or the message: ErrorCode documents every code
+ * and the HTTP status the conversion API is expected to answer with. Messages are for humans; they never contain
+ * file paths or raw input that is not a short, printable token, so they can be logged as they are.
  */
 interface ExceptionInterface extends \Throwable
 {
+    /**
+     * Stable, machine-readable code of this error: one of the ErrorCode constants.
+     */
+    public function getErrorCode(): string;
 }

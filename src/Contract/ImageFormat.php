@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Mfonte\SecureImageConverter\Contract;
 
+use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
 use Mfonte\SecureImageConverter\Contract\Exception\UnsupportedFormatException;
 
 /**
@@ -95,7 +96,8 @@ final class ImageFormat
     /**
      * Canonical MIME type of a format, e.g. "image/svg+xml" for svg.
      *
-     * @throws UnsupportedFormatException when the format is not known
+     * @throws InvalidArgumentException when the format is not known (a programming error: format names come from
+     *                                  this class, never from user input)
      */
     public static function mimeType(string $format): string
     {
@@ -105,7 +107,7 @@ final class ImageFormat
     /**
      * Preferred file extension of a format, without the leading dot, e.g. "jpg" for jpeg.
      *
-     * @throws UnsupportedFormatException when the format is not known
+     * @throws InvalidArgumentException when the format is not known (a programming error)
      */
     public static function extension(string $format): string
     {
@@ -135,7 +137,8 @@ final class ImageFormat
     }
 
     /**
-     * Format named by a MIME type, see tryFromMimeType().
+     * Format named by a MIME type, see tryFromMimeType(). Meant for MIME types received from outside (an upload's
+     * declared type, an origin's Content-Type), hence the 415 exception.
      *
      * @throws UnsupportedFormatException when the MIME type is not an image type known to the library
      */
@@ -150,12 +153,12 @@ final class ImageFormat
     }
 
     /**
-     * @throws UnsupportedFormatException
+     * @throws InvalidArgumentException
      */
     private static function assertKnown(string $format): string
     {
         if (!self::isValid($format)) {
-            throw new UnsupportedFormatException(sprintf(
+            throw new InvalidArgumentException(sprintf(
                 'Unknown image format; expected one of: %s.',
                 implode(', ', self::all())
             ));

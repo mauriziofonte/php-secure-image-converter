@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Mfonte\SecureImageConverter\Tests\Unit\Contract;
 
+use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
 use Mfonte\SecureImageConverter\Contract\Exception\UnsupportedFormatException;
 use Mfonte\SecureImageConverter\Contract\ImageFormat;
 use PHPUnit\Framework\Attributes\CoversClass;
@@ -85,7 +86,7 @@ final class ImageFormatTest extends TestCase
     #[DataProvider('unknownFormats')]
     public function testMimeTypeOfUnknownFormatThrows(string $format): void
     {
-        $this->expectException(UnsupportedFormatException::class);
+        $this->expectException(InvalidArgumentException::class);
 
         ImageFormat::mimeType($format);
     }
@@ -96,7 +97,7 @@ final class ImageFormatTest extends TestCase
     #[DataProvider('unknownFormats')]
     public function testExtensionOfUnknownFormatThrows(string $format): void
     {
-        $this->expectException(UnsupportedFormatException::class);
+        $this->expectException(InvalidArgumentException::class);
 
         ImageFormat::extension($format);
     }

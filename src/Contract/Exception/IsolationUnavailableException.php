@@ -9,8 +9,12 @@ namespace Mfonte\SecureImageConverter\Contract\Exception;
  * missing or unprivileged user namespaces are disabled), so the conversion is refused rather than run with weaker
  * isolation.
  *
- * Expected HTTP status in the API: 503 Service Unavailable.
+ * Error code ErrorCode::ISOLATION_UNAVAILABLE; expected HTTP status in the API: 503 Service Unavailable.
  */
 final class IsolationUnavailableException extends \RuntimeException implements ExceptionInterface
 {
+    public function getErrorCode(): string
+    {
+        return ErrorCode::ISOLATION_UNAVAILABLE;
+    }
 }

@@ -4,8 +4,8 @@ declare(strict_types=1);
 
 namespace Mfonte\SecureImageConverter\Contract;
 
+use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
 use Mfonte\SecureImageConverter\Contract\Exception\InvalidRequestException;
-use Mfonte\SecureImageConverter\Contract\Exception\UnsupportedFormatException;
 
 /**
  * What a conversion must produce: target format, quality, encoder effort, resize box and metadata handling.
@@ -450,7 +450,7 @@ final class ConversionRequest
      *
      * @param string $inputFormat ImageFormat value detected from the input content
      *
-     * @throws UnsupportedFormatException when the input format is not known
+     * @throws InvalidArgumentException when the input format is not known (a programming error)
      */
     public function resolveOutputFormat(string $inputFormat): string
     {
@@ -476,7 +476,7 @@ final class ConversionRequest
      *
      * @param string $outputFormat ImageFormat value of the output being encoded
      *
-     * @throws UnsupportedFormatException when the format is not known
+     * @throws InvalidArgumentException when the format is not known (a programming error)
      */
     public function getEffectiveQuality(string $outputFormat): int
     {
@@ -489,7 +489,7 @@ final class ConversionRequest
      * Default quality of an output format: DEFAULT_QUALITY_WEBP for webp, DEFAULT_QUALITY_AVIF for avif and
      * DEFAULT_QUALITY_JPEG for every other format (lossless formats ignore it).
      *
-     * @throws UnsupportedFormatException when the format is not known
+     * @throws InvalidArgumentException when the format is not known (a programming error)
      */
     public static function defaultQualityFor(string $outputFormat): int
     {
@@ -742,12 +742,12 @@ final class ConversionRequest
     }
 
     /**
-     * @throws UnsupportedFormatException
+     * @throws InvalidArgumentException
      */
     private static function assertKnownFormat(string $format): string
     {
         if (!ImageFormat::isValid($format)) {
-            throw new UnsupportedFormatException(sprintf(
+            throw new InvalidArgumentException(sprintf(
                 'Unknown image format %s; expected one of: %s.',
                 self::describe($format),
                 implode(', ', ImageFormat::all())

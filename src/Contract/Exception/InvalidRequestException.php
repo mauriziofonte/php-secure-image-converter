@@ -5,14 +5,14 @@ declare(strict_types=1);
 namespace Mfonte\SecureImageConverter\Contract\Exception;
 
 /**
- * A conversion request is invalid: a parameter is unknown, malformed or out of range, or the request asks for
- * something the converter's limits do not allow (for example a target width above max_width).
+ * A conversion request is invalid: a parameter is unknown, malformed, or outside the static range documented by
+ * ConversionRequest (for example a width above ConversionRequest::DIMENSION_MAX). A valid request whose resolved
+ * output exceeds the converter's limits is reported with LimitExceededException instead.
  *
- * Thrown by ConversionRequest (constructor, with*() methods and fromParameters()) and by
- * ConverterInterface::convert(). The message never contains raw user input that is not a short, printable token, so
- * it can be returned to the client as is.
+ * Thrown by ConversionRequest (constructor, with*() methods and fromParameters()). The message never contains raw
+ * user input that is not a short, printable token, so it can be returned to the client as is.
  *
- * Expected HTTP status in the API: 400 Bad Request.
+ * Error code ErrorCode::INVALID_REQUEST; expected HTTP status in the API: 400 Bad Request.
  */
 final class InvalidRequestException extends \InvalidArgumentException implements ExceptionInterface
 {
@@ -38,6 +38,11 @@ final class InvalidRequestException extends \InvalidArgumentException implements
         $exception->parameter = $parameter;
 
         return $exception;
+    }
+
+    public function getErrorCode(): string
+    {
+        return ErrorCode::INVALID_REQUEST;
     }
 
     /**

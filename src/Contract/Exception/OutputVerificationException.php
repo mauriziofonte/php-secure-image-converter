@@ -9,8 +9,12 @@ namespace Mfonte\SecureImageConverter\Contract\Exception;
  * dimensions or its frame count differ from the expected ones, or the file is not a valid image. The output is
  * discarded and never returned to the caller.
  *
- * Expected HTTP status in the API: 500 Internal Server Error.
+ * Error code ErrorCode::OUTPUT_VERIFICATION_FAILED; expected HTTP status in the API: 500 Internal Server Error.
  */
 final class OutputVerificationException extends \UnexpectedValueException implements ExceptionInterface
 {
+    public function getErrorCode(): string
+    {
+        return ErrorCode::OUTPUT_VERIFICATION_FAILED;
+    }
 }

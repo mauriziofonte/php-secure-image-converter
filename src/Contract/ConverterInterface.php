@@ -9,7 +9,6 @@ use Mfonte\SecureImageConverter\Contract\Exception\ConversionFailedException;
 use Mfonte\SecureImageConverter\Contract\Exception\ConversionTimeoutException;
 use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
 use Mfonte\SecureImageConverter\Contract\Exception\InvalidImageException;
-use Mfonte\SecureImageConverter\Contract\Exception\InvalidRequestException;
 use Mfonte\SecureImageConverter\Contract\Exception\IsolationUnavailableException;
 use Mfonte\SecureImageConverter\Contract\Exception\LimitExceededException;
 use Mfonte\SecureImageConverter\Contract\Exception\OutputVerificationException;
@@ -37,24 +36,30 @@ interface ConverterInterface
      *   failure an exception implementing Exception\ExceptionInterface is thrown and no partial output is left at
      *   $outputPath.
      *
+     * Every exception implements Exception\ExceptionInterface; the error code returned by its getErrorCode() is
+     * listed in brackets below, with the HTTP status the conversion API answers with (see Exception\ErrorCode).
+     *
      * @param string $inputPath  readable local file holding the untrusted input
      * @param string $outputPath local path to write the output to, in an existing writable directory; must differ
      *                           from $inputPath
      *
-     * @throws InvalidRequestException       the request cannot be honoured within this converter's limits, e.g. a
-     *                                       target size above max_width (400)
-     * @throws UnsupportedFormatException    the format detected from the input content is not enabled for input (415)
-     * @throws InvalidImageException         the input is malformed, truncated or spoofed, or animated while the
-     *                                       animation policy is reject (422)
-     * @throws LimitExceededException        the input exceeds a size, dimension, pixel or frame limit (413)
-     * @throws IsolationUnavailableException the isolation level required by the policy is not available (503)
-     * @throws ConcurrencyLimitException     no conversion slot became free in time (503)
-     * @throws ConversionTimeoutException    the conversion exceeded its wall-clock timeout (504)
-     * @throws ConversionFailedException     no backend could produce the output, or a backend failed (500)
+     * @throws UnsupportedFormatException    the input content matches no identifiable format (e.g. HEIC) or its
+     *                                       format is not enabled for input [unsupported_format, 415]
+     * @throws InvalidImageException         the input is malformed, truncated or spoofed [invalid_image, 422], or
+     *                                       animated while the animation policy is reject [animation_rejected, 422]
+     * @throws LimitExceededException        the input exceeds max_bytes [file_too_large, 413], or the input or the
+     *                                       resolved output exceeds a dimension, pixel or frame limit
+     *                                       [image_too_large, 422]
+     * @throws IsolationUnavailableException the isolation level required by the policy is not available
+     *                                       [isolation_unavailable, 503]
+     * @throws ConcurrencyLimitException     no conversion slot became free in time [concurrency_limit, 503]
+     * @throws ConversionTimeoutException    the conversion exceeded its wall-clock timeout [conversion_timeout, 422]
+     * @throws ConversionFailedException     no backend could produce the output or a fallback, or a backend failed
+     *                                       [conversion_failed, 500]
      * @throws OutputVerificationException   the produced output does not match the expected format, dimensions or
-     *                                       frame count (500)
+     *                                       frame count [output_verification_failed, 500]
      * @throws InvalidArgumentException      the input path is not a readable file or the output path is not usable
-     *                                       (500, an integration error)
+     *                                       [internal_error, 500]
      */
     public function convert(string $inputPath, string $outputPath, ConversionRequest $request): ConversionResult;
 

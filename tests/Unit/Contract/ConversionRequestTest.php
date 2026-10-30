@@ -5,8 +5,8 @@ declare(strict_types=1);
 namespace Mfonte\SecureImageConverter\Tests\Unit\Contract;
 
 use Mfonte\SecureImageConverter\Contract\ConversionRequest;
+use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
 use Mfonte\SecureImageConverter\Contract\Exception\InvalidRequestException;
-use Mfonte\SecureImageConverter\Contract\Exception\UnsupportedFormatException;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
@@ -481,14 +481,14 @@ final class ConversionRequestTest extends TestCase
 
     public function testEffectiveQualityRejectsUnknownFormat(): void
     {
-        $this->expectException(UnsupportedFormatException::class);
+        $this->expectException(InvalidArgumentException::class);
 
         (new ConversionRequest())->withQuality(42)->getEffectiveQuality('original');
     }
 
     public function testDefaultQualityRejectsUnknownFormat(): void
     {
-        $this->expectException(UnsupportedFormatException::class);
+        $this->expectException(InvalidArgumentException::class);
 
         ConversionRequest::defaultQualityFor('heic');
     }
@@ -504,7 +504,7 @@ final class ConversionRequestTest extends TestCase
 
     public function testOutputFormatRejectsUnknownInputFormat(): void
     {
-        $this->expectException(UnsupportedFormatException::class);
+        $this->expectException(InvalidArgumentException::class);
 
         (new ConversionRequest('original'))->resolveOutputFormat('heic');
     }
