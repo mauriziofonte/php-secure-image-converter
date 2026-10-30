@@ -39,10 +39,12 @@ use Mfonte\SecureImageConverter\Contract\IsolationLevel;
  * throws IsolationUnavailableException instead. IsolationDetector tells which level a host supports, and
  * IsolationPolicy decides which one to use.
  *
- * Standard input is /dev/null, or a regular file inside the working directory: a program can reopen its standard
- * input for writing through /proc/self/fd/0, so it must never be a file that the program could not write anyway (a
- * file outside the working directory, also through a symbolic link, or a file with other hard links is refused).
- * Inputs from elsewhere are passed as read-only paths instead.
+ * Standard input is /dev/null, or a regular file directly inside the working directory: a program can reopen its
+ * standard input for writing through /proc/self/fd/0, so it must never be a file that the program could not write
+ * anyway. A symbolic link (even to a file inside), a file in a subdirectory and a file with other hard links are
+ * refused. The checks run on the opened file, comparing lstat() of the name with fstat() of the descriptor that the
+ * child receives, and never on cached path lookups: a program that replaced the file with a link to a host file
+ * cannot have that host file handed to the next run. Inputs from elsewhere are passed as read-only paths instead.
  *
  * stdout and stderr are captured through non-blocking pipes polled with stream_select(), up to
  * ProcessOptions::getMaxOutputBytes() each; further output is read and discarded (see OutputCapture). When the pipes
@@ -209,18 +211,17 @@ final class ProcessRunner
      *
      * @param list<string> $command       program and arguments; the program is a name looked up in the search path or
      *                                    an absolute path
-     * @param string|null  $stdinPath     readable regular file inside the working directory, with a single link, to
-     *                                    use as standard input (symbolic links are resolved first); /dev/null when
-     *                                    null
+     * @param string|null  $stdinPath     readable regular file directly inside the working directory, not a symbolic
+     *                                    link, with a single link, to use as standard input; /dev/null when null
      * @param list<string> $readOnlyPaths existing absolute paths (typically the input file) mounted read-only in the
      *                                    sandbox; ignored below the sandbox level
      *
      * @throws ConversionTimeoutException    when the wall-clock timeout expired (the process group was killed)
      * @throws IsolationUnavailableException when the level of this runner is not available on the host
      * @throws InvalidArgumentException      when the command (a NUL byte, a command line longer than
-     *                                       CommandBuilder::MAX_COMMAND_LINE_BYTES), the standard input (outside
-     *                                       the working directory), the read-only paths or the working directory
-     *                                       are invalid
+     *                                       CommandBuilder::MAX_COMMAND_LINE_BYTES), the standard input (not a
+     *                                       regular file directly inside the working directory), the read-only paths
+     *                                       or the working directory are invalid
      * @throws ConversionFailedException     when the process cannot be started, its output cannot be read, PHP holds
      *                                       too many descriptors for the open files limit, or its status is lost
      */
@@ -272,9 +273,6 @@ final class ProcessRunner
         if (is_link($directory) || !is_dir($directory)) {
             throw new InvalidArgumentException('The working directory no longer exists.');
         }
-        if ($stdinPath !== null) {
-            $stdinPath = self::checkStandardInput($stdinPath, $directory);
-        }
 
         $arguments = $this->builder->build($this->level, $command, $requirements['tools'], $directory, $readOnlyPaths);
         $commandLine = CommandBuilder::toShellCommand($arguments);
@@ -288,22 +286,24 @@ final class ProcessRunner
         if (IsolationLevel::isAtLeast($this->level, IsolationLevel::RLIMIT)) {
             $this->checkOpenFilesLimit(array_keys($inherited));
         }
-        $descriptors = [
-            0 => ['file', $stdinPath === null ? '/dev/null' : $stdinPath, 'r'],
-            1 => ['pipe', 'w'],
-            2 => ['pipe', 'w'],
-        ] + $inherited;
-
         $environment = $this->builder->environment($directory);
 
-        return $this->spawn($arguments, $commandLine, $descriptors, $directory, $environment);
+        $stdin = $stdinPath === null ? ['file', '/dev/null', 'r'] : self::openStandardInput($stdinPath, $directory);
+        $descriptors = [0 => $stdin, 1 => ['pipe', 'w'], 2 => ['pipe', 'w']] + $inherited;
+        try {
+            return $this->spawn($arguments, $commandLine, $descriptors, $directory, $environment);
+        } finally {
+            if (is_resource($stdin)) {
+                fclose($stdin);
+            }
+        }
     }
 
     /**
-     * @param list<string>             $arguments   the argument list, for PHP 7.4+
-     * @param string                   $commandLine the same as a /bin/sh command line, for PHP 7.2 and 7.3
-     * @param array<int, list<string>> $descriptors
-     * @param array<string, string>    $environment
+     * @param list<string>                      $arguments   the argument list, for PHP 7.4+
+     * @param string                            $commandLine the same as a /bin/sh command line, for PHP 7.2 and 7.3
+     * @param array<int, list<string>|resource> $descriptors
+     * @param array<string, string>             $environment
      *
      * @throws ConversionFailedException when the process cannot be started or its status is lost
      */
@@ -688,35 +688,46 @@ final class ProcessRunner
     }
 
     /**
-     * @throws InvalidArgumentException when the file is not a readable regular file inside the working directory with
-     *                                  a single link
+     * Opens the standard input of a run and checks the file through the opened descriptor (see the class
+     * description). The open is non-blocking, so that a FIFO put in place of the file cannot hang it, and
+     * close-on-exec, so that only the copy that proc_open() makes for descriptor 0 reaches the child.
      *
-     * @return string the real path of the file
+     * @throws InvalidArgumentException when the file is not a readable regular file directly inside the working
+     *                                  directory, or is a symbolic link, or has other hard links
+     *
+     * @return resource the open file
      */
-    private static function checkStandardInput(string $path, string $directory): string
+    private static function openStandardInput(string $path, string $directory)
     {
-        $message = 'The standard input must be a readable regular file inside the working directory, without other '
-            . 'hard links.';
-        if (strpos($path, "\0") !== false) {
+        $message = 'The standard input must be a readable regular file directly inside the working directory, not a '
+            . 'symbolic link, without other hard links.';
+        if (strpos($path, "\0") !== false || \dirname($path) !== $directory) {
             throw new InvalidArgumentException($message);
         }
-        $real = realpath($path);
-        $root = realpath($directory);
+        // No cached answer: a previous run may have replaced the file since PHP last looked at this path.
+        clearstatcache(true, $path);
+        $named = @lstat($path);
+        if (!is_array($named) || ($named['mode'] & 0170000) !== 0100000 || $named['nlink'] !== 1) {
+            throw new InvalidArgumentException($message);
+        }
+        $stream = @fopen($path, 'rbne');
+        if ($stream === false) {
+            throw new InvalidArgumentException($message);
+        }
+        $opened = @fstat($stream);
         if (
-            !is_string($real)
-            || !is_string($root)
-            || strpos($real, rtrim($root, '/') . '/') !== 0
-            || !is_file($real)
-            || !is_readable($real)
+            !is_array($opened)
+            || $opened['dev'] !== $named['dev']
+            || $opened['ino'] !== $named['ino']
+            || ($opened['mode'] & 0170000) !== 0100000
+            || $opened['nlink'] !== 1
         ) {
-            throw new InvalidArgumentException($message);
-        }
-        $status = @stat($real);
-        if (!is_array($status) || $status['nlink'] !== 1) {
+            fclose($stream);
+
             throw new InvalidArgumentException($message);
         }
 
-        return $real;
+        return $stream;
     }
 
     /**

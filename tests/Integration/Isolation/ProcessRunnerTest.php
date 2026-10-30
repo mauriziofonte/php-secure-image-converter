@@ -38,6 +38,9 @@ use PHPUnit\Framework\Attributes\Group;
 #[Group('isolation')]
 final class ProcessRunnerTest extends IsolationTestCase
 {
+    private const STANDARD_INPUT_REFUSED = 'The standard input must be a readable regular file directly inside the '
+        . 'working directory, not a symbolic link, without other hard links.';
+
     /**
      * Every level below the sandbox.
      *
@@ -525,7 +528,7 @@ final class ProcessRunnerTest extends IsolationTestCase
 
     /**
      * A program can reopen its standard input for writing through /proc/self/fd/0: the file must be one it may write
-     * anyway, in the working directory, and not reachable from outside through another link.
+     * anyway, directly in the working directory, and not reachable from outside through another link.
      */
     public function testStandardInputMustBeAFileOfTheWorkingDirectory(): void
     {
@@ -539,27 +542,88 @@ final class ProcessRunnerTest extends IsolationTestCase
             $hardLink = $this->workingDirectory()->pathOf('hard.txt');
             link($secret, $hardLink);
             $parent = $this->workingDirectory()->getPath() . '/../' . basename($outside->getPath()) . '/secret.txt';
+            file_put_contents($this->workingDirectory()->pathOf('input.txt'), 'input');
+            symlink('input.txt', $this->workingDirectory()->pathOf('alias.txt'));
+            mkdir($this->workingDirectory()->pathOf('sub'));
+            file_put_contents($this->workingDirectory()->getPath() . '/sub/input.txt', 'input');
+            $dotted = $this->workingDirectory()->getPath() . '/./input.txt';
 
-            foreach ([$secret, $symbolicLink, $hardLink, $parent] as $path) {
+            $refused = [
+                $secret,
+                $symbolicLink,
+                $hardLink,
+                $parent,
+                $this->workingDirectory()->pathOf('alias.txt'),
+                $this->workingDirectory()->getPath() . '/sub/input.txt',
+                $dotted,
+            ];
+            foreach ($refused as $path) {
                 try {
                     $runner->run(['cat'], $this->workingDirectory(), $path);
                     self::fail('The standard input must be refused.');
                 } catch (InvalidArgumentException $exception) {
-                    self::assertSame(
-                        'The standard input must be a readable regular file inside the working directory, without '
-                        . 'other hard links.',
-                        $exception->getMessage()
-                    );
+                    self::assertSame(self::STANDARD_INPUT_REFUSED, $exception->getMessage());
                 }
             }
         } finally {
             $outside->remove();
         }
 
-        file_put_contents($this->workingDirectory()->pathOf('input.txt'), 'input');
-        symlink('input.txt', $this->workingDirectory()->pathOf('alias.txt'));
-        $result = $runner->run(['cat'], $this->workingDirectory(), $this->workingDirectory()->pathOf('alias.txt'));
-        self::assertSame('input', $result->getStdout(), 'a link that stays inside is resolved');
+        $result = $runner->run(['cat'], $this->workingDirectory(), $this->workingDirectory()->pathOf('input.txt'));
+        self::assertSame('input', $result->getStdout());
+    }
+
+    /**
+     * A run can replace its standard input file with a link to a host file. PHP caches path lookups (realpath cache,
+     * stat cache): the next run with the same path must still look at the file itself, never at a cached answer.
+     *
+     * @dataProvider levels
+     */
+    #[DataProvider('levels')]
+    public function testStandardInputReplacedWithALinkBetweenTwoRunsIsRefused(string $level): void
+    {
+        $runner = $this->runner($level);
+        $outside = WorkingDirectory::create();
+        try {
+            $host = $outside->pathOf('host.txt');
+            file_put_contents($host, 'host data');
+            $input = $this->workingDirectory()->pathOf('input.txt');
+            file_put_contents($input, 'input');
+            self::assertSame('input', $runner->run(['cat'], $this->workingDirectory(), $input)->getStdout());
+            // Warm every cache PHP has for this path, as an application that looked at the file would.
+            self::assertIsString(realpath($input));
+            self::assertTrue(is_file($input));
+
+            $replace = $runner->run(
+                ['sh', '-c', 'rm -f input.txt && ln -s "$1" input.txt && echo replaced', 'sh', $host],
+                $this->workingDirectory()
+            );
+            self::assertSame("replaced\n", $replace->getStdout());
+
+            try {
+                $runner->run(['sh', '-c', 'cat; echo pwned > /proc/self/fd/0'], $this->workingDirectory(), $input);
+                self::fail('The link must be refused.');
+            } catch (InvalidArgumentException $exception) {
+                self::assertSame(self::STANDARD_INPUT_REFUSED, $exception->getMessage());
+            }
+            self::assertStringEqualsFile($host, 'host data');
+        } finally {
+            $outside->remove();
+        }
+    }
+
+    public function testStandardInputReplacedWithAFifoIsRefusedWithoutBlocking(): void
+    {
+        if (!function_exists('posix_mkfifo')) {
+            self::markTestSkipped('ext-posix is needed to create a FIFO.');
+        }
+        $input = $this->workingDirectory()->pathOf('input.txt');
+        self::assertTrue(posix_mkfifo($input, 0600));
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(self::STANDARD_INPUT_REFUSED);
+
+        (new ProcessRunner(IsolationLevel::NONE))->run(['cat'], $this->workingDirectory(), $input);
     }
 
     public function testExplicitProgramPathsAreAccepted(): void
