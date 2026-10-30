@@ -507,7 +507,57 @@ final class ImageCorpus
                 ImageBuilder::patch($still, ImageBuilder::find($still, 'av01', ImageBuilder::find($still, 'infe')), 'grid'),
                 self::reject(ErrorCode::UNSUPPORTED_FORMAT)
             ),
+            // libheif decodes every image item that is not a thumbnail or an auxiliary image, ImageMagick each as a frame.
+            'avif/valid-thumbnail.avif' => self::committed(
+                ImageBuilder::avifOfItems([1 => "av01\0", 2 => "av01\0"], ImageBuilder::avifReference('thmb', 2, 1)),
+                self::accept(ImageFormat::AVIF, 8, 8, 1)
+            ),
+            'avif/valid-alpha.avif' => self::committed(
+                ImageBuilder::avifOfItems([1 => "av01\0", 2 => "av01\0"], ImageBuilder::avifReference('auxl', 2, 1), '', [2 => [4]]),
+                self::accept(ImageFormat::AVIF, 8, 8, 1)
+            ),
+            'avif/valid-xmp.avif' => self::committed(
+                ImageBuilder::avifOfItems([1 => "av01\0", 2 => "mime\0application/rdf+xml\0"], ImageBuilder::avifReference('cdsc', 2, 1)),
+                self::accept(ImageFormat::AVIF, 8, 8, 1, ['exif' => false, 'metadata' => true])
+            ),
+            'avif/unsupported-two-images.avif' => self::committed(
+                ImageBuilder::avifOfItems([1 => "av01\0", 2 => "av01\0"]),
+                self::reject(ErrorCode::UNSUPPORTED_FORMAT)
+            ),
+            'avif/unsupported-grid-item.avif' => self::committed(
+                ImageBuilder::avifOfItems([1 => "av01\0", 2 => "grid\0"]),
+                self::reject(ErrorCode::UNSUPPORTED_FORMAT)
+            ),
+            'avif/unsupported-jpeg-item.avif' => self::committed(
+                ImageBuilder::avifOfItems([1 => "av01\0", 2 => "jpeg\0"]),
+                self::reject(ErrorCode::UNSUPPORTED_FORMAT)
+            ),
+            'avif/unsupported-jpeg-in-mime-item.avif' => self::committed(
+                ImageBuilder::avifOfItems([1 => "av01\0", 2 => "mime\0image/jpeg\0"]),
+                self::reject(ErrorCode::UNSUPPORTED_FORMAT)
+            ),
+            'avif/spoof-reference-size.avif' => self::committed(
+                ImageBuilder::avifOfItems([1 => "av01\0", 2 => "av01\0"], ImageBuilder::isoBox('thmb', pack('nnnn', 2, 1, 1, 0))),
+                self::reject(ErrorCode::INVALID_IMAGE)
+            ),
+            'avif/spoof-infe-over-1-kib.avif' => self::committed(
+                ImageBuilder::avifOfItems([1 => 'av01' . str_repeat('n', 1024) . "\0"]),
+                self::reject(ErrorCode::INVALID_IMAGE)
+            ),
+            // The most reference boxes iref may hold, then one too many.
+            'avif/valid-most-references.avif' => self::committed(
+                ImageBuilder::avifOfItems([1 => "av01\0"], ImageBuilder::repeat(ImageBuilder::avifReference('cdsc', 1, 1), AvifParser::MAX_REFERENCES)),
+                self::accept(ImageFormat::AVIF, 8, 8, 1)
+            ),
+            'avif/spoof-too-many-references.avif' => self::committed(
+                ImageBuilder::avifOfItems([1 => "av01\0"], ImageBuilder::repeat(ImageBuilder::avifReference('cdsc', 1, 1), AvifParser::MAX_REFERENCES + 1)),
+                self::reject(ErrorCode::INVALID_IMAGE)
+            ),
             // Decoders read the first copy of a box or property, so a second copy must not hide a large first one.
+            'avif/spoof-two-pixi.avif' => self::committed(
+                ImageBuilder::avifOfItems([1 => "av01\0"], '', ImageBuilder::isoFullBox('pixi', 0, "\x03\x10\x10\x10"), [1 => [5]]),
+                self::reject(ErrorCode::INVALID_IMAGE)
+            ),
             'avif/spoof-two-iprp.avif' => self::committed(ImageBuilder::avifReproducer('two-iprp'), self::reject(ErrorCode::INVALID_IMAGE)),
             'avif/spoof-two-pitm.avif' => self::committed(ImageBuilder::avifReproducer('two-pitm'), self::reject(ErrorCode::INVALID_IMAGE)),
             'avif/spoof-two-ispe.avif' => self::committed(ImageBuilder::avifReproducer('two-ispe'), self::reject(ErrorCode::INVALID_IMAGE)),

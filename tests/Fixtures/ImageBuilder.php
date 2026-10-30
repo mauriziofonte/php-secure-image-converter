@@ -618,6 +618,71 @@ final class ImageBuilder
         return pack('N', 9) . $type . pack('C', $value);
     }
 
+    /**
+     * A still AVIF whose items share the AV1 data of the 8 x 8 still sample. Item 1 is the primary item; every item is
+     * located on that data, and every AV1 item is associated with the 8 x 8 ispe (property 1), the av1C (property 2)
+     * of the sample and an 8-bit pixi (property 3). Property 4 is an alpha auxC, then come $properties.
+     *
+     * @param array<int, string>    $items        item ID => the end of its infe box: type, then name and strings
+     * @param string                $references   the reference boxes of iref (see avifReference()); none omits iref
+     * @param string                $properties   property boxes appended to ipco
+     * @param array<int, list<int>> $associations item ID => property indices associated after the others
+     */
+    public static function avifOfItems(array $items, string $references = '', string $properties = '', array $associations = []): string
+    {
+        $still = self::avifStill();
+        // The still sample has one item, in a single extent whose offset and length follow the 14 bytes of the iloc
+        // version and flags, sizes, item count, item ID, data reference and extent count.
+        $iloc = self::find($still, 'iloc') + 4;
+        $data = (string) substr($still, self::readUint32($still, $iloc + 14), self::readUint32($still, $iloc + 18));
+        $codecConfiguration = self::find($still, 'av1C') - 4;
+        $codecConfiguration = (string) substr($still, $codecConfiguration, self::readUint32($still, $codecConfiguration));
+
+        $infe = '';
+        $ipma = '';
+        foreach ($items as $id => $entry) {
+            $infe .= self::isoFullBox('infe', 2, pack('nn', $id, 0) . $entry);
+            $indices = array_merge(substr($entry, 0, 4) === 'av01' ? [1, 0x82, 3] : [], $associations[$id] ?? []);
+            $ipma .= pack('nC', $id, count($indices)) . pack('C*', ...$indices);
+        }
+        $ipco = self::isoFullBox('ispe', 0, pack('NN', 8, 8)) . $codecConfiguration . self::isoFullBox('pixi', 0, "\x03\x08\x08\x08")
+            . self::isoFullBox('auxC', 0, "urn:mpeg:mpegB:cicp:systems:auxiliary:alpha\0") . $properties;
+        $ftyp = self::isoBox('ftyp', 'avif' . "\0\0\0\0" . 'avifmif1miaf');
+        $head = self::isoFullBox('hdlr', 0, "\0\0\0\0pict" . str_repeat("\0", 13)) . self::isoFullBox('pitm', 0, pack('n', 1));
+        $tail = self::isoFullBox('iinf', 0, pack('n', count($items)) . $infe)
+            . self::isoBox('iprp', self::isoBox('ipco', $ipco) . self::isoFullBox('ipma', 0, pack('N', count($items)) . $ipma))
+            . ($references === '' ? '' : self::isoFullBox('iref', 0, $references));
+        // iloc (version 0, 4-byte offsets and lengths) has the same size whatever the offset of the data in mdat.
+        $meta = static function (int $offset) use ($items, $data, $head, $tail): string {
+            $locations = '';
+            foreach (array_keys($items) as $id) {
+                $locations .= pack('nnnNN', $id, 0, 1, $offset, strlen($data));
+            }
+
+            return self::isoFullBox('meta', 0, $head . self::isoFullBox('iloc', 0, "\x44\x00" . pack('n', count($items)) . $locations) . $tail);
+        };
+
+        return $ftyp . $meta(strlen($ftyp) + strlen($meta(0)) + 8) . self::isoBox('mdat', $data);
+    }
+
+    /**
+     * A single item type reference box of iref version 0: $type from item $from to item $to.
+     */
+    public static function avifReference(string $type, int $from, int $to): string
+    {
+        return self::isoBox($type, pack('nnn', $from, 1, $to));
+    }
+
+    public static function isoBox(string $type, string $payload): string
+    {
+        return pack('N', 8 + strlen($payload)) . $type . $payload;
+    }
+
+    public static function isoFullBox(string $type, int $version, string $payload): string
+    {
+        return self::isoBox($type, pack('N', $version << 24) . $payload);
+    }
+
     // TIFF ----------------------------------------------------------------------------------------------------------
 
     /**

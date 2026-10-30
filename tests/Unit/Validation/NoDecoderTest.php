@@ -29,7 +29,7 @@ final class NoDecoderTest extends TestCase
         'abs', 'array_diff', 'array_intersect', 'array_keys', 'array_unique', 'array_values', 'count', 'crc32',
         'implode', 'in_array', 'intdiv', 'is_array', 'is_int', 'is_resource', 'is_string', 'max', 'min', 'ord',
         'sprintf', 'str_split', 'strlen', 'strncmp', 'strpos', 'strspn', 'substr', 'unpack',
-        // The path check of ImageInspector::inspect().
+        // Pattern checks: the path check of ImageInspector::inspect(), magic numbers and content types.
         'preg_match',
         // Opening, checking and reading the input.
         'clearstatcache', 'fclose', 'fopen', 'fseek', 'fstat', 'get_resource_type', 'lstat', 'stream_get_contents',

@@ -16,22 +16,26 @@ use Mfonte\SecureImageConverter\Validation\Limits;
  * each image item and of the first sample of each track, without decoding any AV1 frame.
  *
  * - Boxes must nest inside their parent and the top-level boxes must tile the file up to its end: a truncated file is
- *   refused. At most MAX_BOXES boxes are visited, MAX_ENTRIES entries read from any table and MAX_ASSOCIATIONS property
- *   associations (ipma) and item extents (iloc) read in all; the ftyp box is at most 4 KiB and must list an "avif" or
- *   "avis" brand. A box that a decoder reads once (ftyp, meta and moov at the top; hdlr, pitm, iloc, iinf, iprp, iref,
- *   idat and dinf in meta; ipco and ipma in iprp; the boxes of a track's media and sample tables, and av1C in its AV1
- *   sample entry) may not appear twice, an item may not be described or associated twice, and an image item may not
- *   have two ispe, av1C, irot or imir properties: decoders disagree on which copy wins.
- * - Still image (meta box): the handler must be "pict" and the primary item (pitm) an AV1 image ("av01"); grids and
- *   other derived or coded items are refused as unsupported. Every AV1 image item (the primary image, its alpha plane,
- *   thumbnails; at most MAX_IMAGES) needs one "ispe" property whose size is checked against the limits, and its data
- *   (located through iloc, in the file or in idat, in a single extent; several extents are refused as unsupported) may
- *   not hold an AV1 sequence header that allows frames larger than that ispe, nor may the configuration OBUs of its
- *   "av1C" property, which libheif feeds to the decoder before the item data. The iinf box must hold exactly as many
- *   infe boxes as its entry count: libheif reads every infe box, whatever the count. The primary item gives the
- *   dimensions; its "av1C" (or else "pixi") property the bit depth, a "colr" property of type "prof" or "rICC" the
- *   colour profile, its "irot" then "imir" properties the orientation. "Exif" items are EXIF, "mime" items (XMP) other
- *   metadata.
+ *   refused. At most MAX_BOXES boxes are visited, MAX_ENTRIES entries read from any table, MAX_REFERENCES item
+ *   references (iref), and MAX_ASSOCIATIONS property associations (ipma) and item extents (iloc) in all; the ftyp box
+ *   is at most 4 KiB and must list an "avif" or "avis" brand, and an infe box is at most 1 KiB. A box that a decoder reads once (ftyp, meta and moov at the top;
+ *   hdlr, pitm, iloc, iinf, iprp, iref, idat and dinf in meta; ipco and ipma in iprp; the boxes of a track's media and
+ *   sample tables, and av1C in its AV1 sample entry) may not appear twice, an item may not be described or associated
+ *   twice, and an image item may not have two ispe, av1C, pixi, irot or imir properties: decoders disagree on which
+ *   copy wins.
+ * - Still image (meta box): the handler must be "pict" and the primary item (pitm) an AV1 image ("av01"). Items other
+ *   than AV1 images, EXIF ("Exif"), URIs ("uri ") and MIME items of a content type other than an image (XMP) are
+ *   refused as unsupported: grids and other derived images, and images coded otherwise, which libheif decodes too.
+ *   libheif decodes every image item that is neither the thumbnail ("thmb" reference) nor the auxiliary image ("auxl",
+ *   such as the alpha plane) of another item, and ImageMagick reads each one as a frame: every AV1 item but the
+ *   primary one must be one or the other. Every AV1 image item (at most MAX_IMAGES) needs one "ispe" property whose
+ *   size is checked against the limits, and its data (located through iloc, in the file or in idat, in a single
+ *   extent; several extents are refused as unsupported) may not hold an AV1 sequence header that allows frames larger
+ *   than that ispe, nor may the configuration OBUs of its "av1C" property, which libheif feeds to the decoder before
+ *   the item data. The iinf box must hold exactly as many infe boxes as its entry count: libheif reads every infe box,
+ *   whatever the count. The primary item gives the dimensions; its "av1C" (or else "pixi") property the bit depth, a
+ *   "colr" property of type "prof" or "rICC" the colour profile, its "irot" then "imir" properties the orientation.
+ *   "Exif" items are EXIF, "mime" items (XMP) other metadata.
  * - Image sequence (moov box): every track with an AV1 sample entry ("av01", whatever its handler; at most MAX_IMAGES)
  *   is checked; a track that holds it among other sample entries is refused as unsupported. Its sample entry size and
  *   sample count (the header of stsz or stz2, never its entries) are checked against the limits, its track header
@@ -67,7 +71,18 @@ final class AvifParser implements ParserInterface
      */
     public const MAX_IMAGES = 16;
 
+    /**
+     * Largest number of item reference boxes in iref: real files link each thumbnail, alpha plane and metadata item
+     * to an image, a few dozen at most.
+     */
+    public const MAX_REFERENCES = 256;
+
     private const FTYP_SIZE_MAX = 4096;
+
+    /**
+     * Largest size of an infe box: its fields and strings take a few dozen bytes.
+     */
+    private const INFE_SIZE_MAX = 1024;
 
     /**
      * Size of the fields of a VisualSampleEntry, before its boxes.
@@ -85,6 +100,13 @@ final class AvifParser implements ParserInterface
      * @var list<string>
      */
     private const IMAGE_BOXES = ['ftyp', 'meta', 'moov', 'mdat'];
+
+    /**
+     * Item types that a still image may describe.
+     *
+     * @var list<string>
+     */
+    private const ITEM_TYPES = ['av01', 'Exif', 'mime', 'uri '];
 
     /**
      * Boxes that the meta box may hold once at most.
@@ -216,9 +238,18 @@ final class AvifParser implements ParserInterface
         if ($items[$primary] !== 'av01') {
             throw new UnsupportedFormatException('AVIF images whose primary item is a grid or not an AV1 image are not supported.');
         }
+        if (array_diff($items, self::ITEM_TYPES) !== []) {
+            throw self::unsupportedItem();
+        }
         $images = array_keys($items, 'av01', true);
         if (count($images) > self::MAX_IMAGES) {
             throw new UnsupportedFormatException(sprintf('AVIF files with more than %d AV1 image items are not supported.', self::MAX_IMAGES));
+        }
+        $dependents = isset($boxes['iref']) ? $this->readDependentItems($reader, $boxes['iref']) : [];
+        foreach ($images as $item) {
+            if ($item !== $primary && !isset($dependents[$item])) {
+                throw new UnsupportedFormatException('AVIF files with more than one image that is not a thumbnail or an auxiliary image are not supported.');
+            }
         }
 
         $propertyBoxes = $this->findChildren($reader, $boxes['iprp'][0], $boxes['iprp'][1], ['ipco', 'ipma']);
@@ -274,6 +305,7 @@ final class AvifParser implements ParserInterface
     {
         $size = null;
         $configurations = 0;
+        $pixelInformation = 0;
         $configuration = [0, 0];
         $codecBits = 0;
         $pixelBits = 0;
@@ -301,6 +333,9 @@ final class AvifParser implements ParserInterface
                     $configuration = self::readCodecConfiguration($reader, $end, $codecBits);
                     break;
                 case 'pixi':
+                    if (++$pixelInformation > 1) {
+                        throw self::invalid('an image item has more than one pixi property');
+                    }
                     self::readFullBoxHeader($reader, $end, 0);
                     $channels = ord(self::readBytes($reader, $end, 1));
                     foreach (str_split(self::readBytes($reader, $end, max(1, $channels))) as $bits) {
@@ -463,6 +498,9 @@ final class AvifParser implements ParserInterface
             if ($type !== 'infe') {
                 throw self::invalid('the iinf box holds a box other than infe');
             }
+            if ($entryEnd - $entryStart > self::INFE_SIZE_MAX) {
+                throw self::invalid('an infe box is larger than 1 KiB');
+            }
             $entryVersion = self::readFullBoxHeader($reader, $entryEnd, 3);
             if ($entryVersion >= 2) {
                 $id = $entryVersion === 2 ? self::readUint16($reader, $entryEnd) : self::readUint32($reader, $entryEnd);
@@ -471,6 +509,9 @@ final class AvifParser implements ParserInterface
                 }
                 $reader->skip(min(2, $entryEnd - $reader->getPosition()));
                 $items[$id] = self::readBytes($reader, $entryEnd, 4);
+                if ($items[$id] === 'mime' && self::isImageContent(self::readBytes($reader, $entryEnd, $entryEnd - $reader->getPosition()))) {
+                    throw self::unsupportedItem();
+                }
             }
             $reader->seek($entryEnd);
         }
@@ -480,6 +521,54 @@ final class AvifParser implements ParserInterface
         }
 
         return $items;
+    }
+
+    /**
+     * Whether the item name and content type that end an infe box of a MIME item name an image type: libheif decodes
+     * a JPEG image held in a MIME item.
+     */
+    private static function isImageContent(string $strings): bool
+    {
+        $name = strpos($strings, "\0");
+        if ($name === false) {
+            return false;
+        }
+
+        return preg_match('~^image/~i', (string) substr($strings, $name + 1)) === 1;
+    }
+
+    /**
+     * Items that the reference boxes of iref declare as the thumbnail ("thmb") or the auxiliary image ("auxl") of
+     * other items.
+     *
+     * @param array{0: int, 1: int} $box payload bounds
+     *
+     * @throws InvalidImageException
+     *
+     * @return array<int, true>
+     */
+    private function readDependentItems(ByteReader $reader, array $box): array
+    {
+        $reader->seek($box[0]);
+        $idSize = self::readFullBoxHeader($reader, $box[1], 1) === 0 ? 2 : 4;
+        $dependents = [];
+        for ($index = 1; $reader->getPosition() < $box[1]; ++$index) {
+            if ($index > self::MAX_REFERENCES) {
+                throw self::invalid('the iref box has too many references');
+            }
+            list($type, $start, $end) = $this->readBoxHeader($reader, $box[1]);
+            $from = $idSize === 2 ? self::readUint16($reader, $end) : self::readUint32($reader, $end);
+            $count = self::readUint16($reader, $end);
+            if ($end - $start !== $idSize + 2 + $count * $idSize) {
+                throw self::invalid('an item reference box has an invalid size');
+            }
+            if ($count > 0 && ($type === 'thmb' || $type === 'auxl')) {
+                $dependents[$from] = true;
+            }
+            $reader->seek($end);
+        }
+
+        return $dependents;
     }
 
     /**
@@ -940,6 +1029,11 @@ final class AvifParser implements ParserInterface
     private static function boxOverflow(ByteReader $reader, int $end): InvalidImageException
     {
         return $end === $reader->getSize() ? ByteReader::truncated() : self::invalid('a box overflows its parent box');
+    }
+
+    private static function unsupportedItem(): UnsupportedFormatException
+    {
+        return new UnsupportedFormatException('AVIF files with grids, other derived images or images not coded in AV1 are not supported.');
     }
 
     private static function invalid(string $problem): InvalidImageException
