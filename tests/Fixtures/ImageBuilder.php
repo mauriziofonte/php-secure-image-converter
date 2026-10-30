@@ -644,6 +644,25 @@ final class ImageBuilder
         return ($bigEndian ? "MM\0*" : "II*\0") . pack($long, 8) . $directory . pack($long, 0) . $overflow . $pixels;
     }
 
+    /**
+     * A little-endian TIFF whose first directory holds $entries in the given order (a tag may repeat), with $data
+     * written at offset $dataOffset.
+     *
+     * @param list<array{0: int, 1: int, 2: int, 3: int|string}> $entries tag, type, count, and the value field: a LONG,
+     *                                                                    or at most 4 bytes
+     */
+    public static function tiffEntries(array $entries, string $data, int $dataOffset): string
+    {
+        $directory = pack('v', count($entries));
+        foreach ($entries as $entry) {
+            $value = is_string($entry[3]) ? str_pad($entry[3], 4, "\0") : pack('V', $entry[3]);
+            $directory .= pack('vvV', $entry[0], $entry[1], $entry[2]) . $value;
+        }
+        $head = "II*\0" . pack('V', 8) . $directory . pack('V', 0);
+
+        return $head . self::repeat("\0", $dataOffset - strlen($head)) . $data;
+    }
+
     // EXIF ----------------------------------------------------------------------------------------------------------
 
     /**

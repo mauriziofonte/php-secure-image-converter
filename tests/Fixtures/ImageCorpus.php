@@ -9,6 +9,7 @@ use Mfonte\SecureImageConverter\Contract\ImageFormat;
 use Mfonte\SecureImageConverter\Validation\Parser\AvifParser;
 use Mfonte\SecureImageConverter\Validation\Parser\GifParser;
 use Mfonte\SecureImageConverter\Validation\Parser\PngParser;
+use Mfonte\SecureImageConverter\Validation\Parser\TiffParser;
 use Mfonte\SecureImageConverter\Validation\Parser\WebpParser;
 
 /**
@@ -20,7 +21,8 @@ use Mfonte\SecureImageConverter\Validation\Parser\WebpParser;
  * inconsistent or forged header), truncated-*, unsupported-* (an identified variant this library does not process),
  * polyglot-* (another file type dressed as an image, or the reverse). Cases larger than 100 KB are not committed and
  * the tests generate them in memory: a GIF of 10,000 frames, and the files that reach a walk cap of a parser (the
- * most chunks, blocks or boxes allowed, then one too many), which bound the time a hostile file costs.
+ * most chunks, blocks, boxes, directory entries or strips allowed, then one too many), which bound the time a
+ * hostile file costs.
  *
  * An accepted case expects a subset of ImageInfo::toArray(); a refused case expects an error code. "max_bytes_read"
  * bounds the bytes the inspector may read from the file: bombs are refused from their header, whatever their size.
@@ -422,6 +424,15 @@ final class ImageCorpus
     {
         $valid = ImageBuilder::tiff(9, 5);
         $tiny = ImageBuilder::tiff(8, 8);
+        $pixels = ImageBuilder::repeat("\x80", 64);
+        $deflated = ImageBuilder::zlibStored(ImageBuilder::repeat("\0", 64));
+        $page = [[256, 4, 1, 8], [257, 4, 1, 8], [258, 3, 1, pack('v', 8)], [259, 3, 1, pack('v', 1)], [262, 3, 1, pack('v', 1)],
+            [273, 4, 1, 256], [277, 3, 1, pack('v', 1)], [278, 4, 1, 8], [279, 4, 1, 64]];
+        $twoPages = ImageBuilder::tiffEntries($page, $pixels, 256);
+        $twoPages = ImageBuilder::patch($twoPages, 8 + 2 + 12 * count($page), pack('V', strlen($twoPages)))
+            . pack('v', 9) . pack('vvVV', 256, 4, 1, 16000) . pack('vvVV', 257, 4, 1, 16000) . pack('vvVv', 258, 3, 1, 8) . "\0\0"
+            . pack('vvVv', 259, 3, 1, 1) . "\0\0" . pack('vvVv', 262, 3, 1, 1) . "\0\0" . pack('vvVV', 273, 4, 1, 256)
+            . pack('vvVv', 277, 3, 1, 1) . "\0\0" . pack('vvVV', 278, 4, 1, 16000) . pack('vvVV', 279, 4, 1, 64) . pack('V', 0);
 
         return [
             'tiff/valid-grey-little-endian.tif' => self::committed($valid, self::accept(ImageFormat::TIFF, 9, 5, 1, ['bit_depth' => 8, 'icc_profile' => false, 'exif' => false, 'metadata' => false, 'orientation' => 1, 'trailing_data' => false])),
@@ -435,9 +446,43 @@ final class ImageCorpus
                 ImageBuilder::patch(ImageBuilder::patch($tiny, 18, pack('V', 100000)), 30, pack('V', 100000)),
                 self::reject(ErrorCode::IMAGE_TOO_LARGE, true)
             ),
+            'tiff/valid-orientation.tif' => self::committed(
+                ImageBuilder::tiff(4, 4, false, 1, 1, [274 => [3, pack('v', 7)]]),
+                self::accept(ImageFormat::TIFF, 4, 4, 1, ['orientation' => 7, 'trailing_data' => false])
+            ),
+            'tiff/valid-tiled.tif' => self::committed(self::tiledTiff(20, 16, 1, ImageBuilder::repeat("\x80", 256)), self::accept(ImageFormat::TIFF, 20, 20)),
+            // libtiff and GDAL use 256 x 256 tiles by default, even for a smaller image.
+            'tiff/valid-tiled-default-size.tif' => self::committed(
+                self::tiledTiff(20, 256, 32773, ImageBuilder::repeat("\x81\x00", 512)),
+                self::accept(ImageFormat::TIFF, 20, 20)
+            ),
+            // Only the first page is inspected, and the second makes the file trailing data: a backend decodes page 0.
+            'tiff/valid-big-second-page.tif' => self::committed($twoPages, self::accept(ImageFormat::TIFF, 8, 8, 1, ['trailing_data' => true])),
+            // The most entries and strips a file may have, then one too many.
+            'tiff/valid-most-entries-and-strips.tif' => self::generated(
+                self::stripedTiff(intdiv(TiffParser::MAX_DATA_BLOCKS, 16), TiffParser::MAX_ENTRIES),
+                self::accept(ImageFormat::TIFF, 1, intdiv(TiffParser::MAX_DATA_BLOCKS, 16))
+            ),
+            'tiff/spoof-too-many-entries.tif' => self::generated(self::stripedTiff(1, TiffParser::MAX_ENTRIES + 1), self::reject(ErrorCode::INVALID_IMAGE, true)),
+            'tiff/spoof-too-many-strips.tif' => self::generated(self::stripedTiff(intdiv(TiffParser::MAX_DATA_BLOCKS, 16) + 1, 10), self::reject(ErrorCode::INVALID_IMAGE)),
             'tiff/unsupported-old-jpeg.tif' => self::committed(ImageBuilder::tiff(4, 4, false, 1, 6), self::reject(ErrorCode::UNSUPPORTED_FORMAT)),
             'tiff/spoof-directory-offset.tif' => self::committed(ImageBuilder::patch($valid, 4, pack('V', 4)), self::reject(ErrorCode::INVALID_IMAGE)),
             'tiff/spoof-zero-width.tif' => self::committed(ImageBuilder::patch($tiny, 18, pack('V', 0)), self::reject(ErrorCode::INVALID_IMAGE)),
+            // Decoders disagree on which copy of a tag wins.
+            'tiff/spoof-duplicate-width.tif' => self::committed(
+                ImageBuilder::tiffEntries(array_merge([[256, 4, 1, 16000], [257, 4, 1, 16000]], $page), $pixels, 256),
+                self::reject(ErrorCode::INVALID_IMAGE, true)
+            ),
+            // An 8 x 8 image in one 30000 x 30000 Deflate tile: the decoder would allocate the tile.
+            'tiff/spoof-tile-30000.tif' => self::committed(
+                ImageBuilder::tiffEntries([[256, 4, 1, 8], [257, 4, 1, 8], [258, 3, 1, pack('v', 8)], [259, 3, 1, pack('v', 8)],
+                    [262, 3, 1, pack('v', 1)], [277, 3, 1, pack('v', 1)], [322, 4, 1, 30000], [323, 4, 1, 30000], [324, 4, 1, 256],
+                    [325, 4, 1, strlen($deflated)]], $deflated, 256),
+                self::reject(ErrorCode::INVALID_IMAGE, true)
+            ),
+            'tiff/spoof-tile-size.tif' => self::committed(self::tiledTiff(20, 8, 1, ImageBuilder::repeat("\x80", 64)), self::reject(ErrorCode::INVALID_IMAGE, true)),
+            // RowsPerStrip (the 8th entry) says 4, so 2 strips are needed and 1 is present.
+            'tiff/spoof-strip-count.tif' => self::committed(ImageBuilder::patch($tiny, 10 + 12 * 7 + 8, pack('V', 4)), self::reject(ErrorCode::INVALID_IMAGE, true)),
             'tiff/truncated.tif' => self::committed((string) substr($tiny, 0, -32), self::reject(ErrorCode::INVALID_IMAGE)),
         ];
     }
@@ -482,6 +527,59 @@ final class ImageCorpus
     {
         return ImageBuilder::riff(ImageBuilder::vp8x(0, 8, 8) . ImageBuilder::webpChunk('VP8L', ImageBuilder::vp8l(8, 8))
             . ImageBuilder::repeat(ImageBuilder::webpChunk('ABCD', ''), $count));
+    }
+
+    /**
+     * A square greyscale TIFF of $size pixels in tiles of $tileSize, each holding the bytes $tile.
+     */
+    private static function tiledTiff(int $size, int $tileSize, int $compression, string $tile): string
+    {
+        $tilesPerSide = intdiv($size + $tileSize - 1, $tileSize);
+        $tiles = $tilesPerSide * $tilesPerSide;
+        $entries = [[256, 3, 1, pack('v', $size)], [257, 3, 1, pack('v', $size)], [258, 3, 1, pack('v', 8)],
+            [259, 3, 1, pack('v', $compression)], [262, 3, 1, pack('v', 1)], [277, 3, 1, pack('v', 1)],
+            [322, 3, 1, pack('v', $tileSize)], [323, 3, 1, pack('v', $tileSize)]];
+        // The tile offsets and byte counts follow the directory (10 entries), in line when there is one tile.
+        $dataOffset = 8 + 2 + 12 * 10 + 4;
+        $firstTile = $dataOffset + ($tiles > 1 ? 8 * $tiles : 0);
+        $offsets = '';
+        for ($index = 0; $index < $tiles; ++$index) {
+            $offsets .= pack('V', $firstTile + $index * strlen($tile));
+        }
+        $counts = ImageBuilder::repeat(pack('V', strlen($tile)), $tiles);
+        $entries[] = [324, 4, $tiles, $tiles > 1 ? $dataOffset : $offsets];
+        $entries[] = [325, 4, $tiles, $tiles > 1 ? $dataOffset + 4 * $tiles : $counts];
+
+        return ImageBuilder::tiffEntries($entries, ($tiles > 1 ? $offsets . $counts : '') . ImageBuilder::repeat($tile, $tiles), $dataOffset);
+    }
+
+    /**
+     * A 1 x $height TIFF of 16 separate sample planes stored in strips of one row: 16 x $height strips of one byte.
+     * Unknown tags fill the directory up to $entries entries.
+     */
+    private static function stripedTiff(int $height, int $entries): string
+    {
+        $strips = 16 * $height;
+        $dataOffset = 8 + 2 + 12 * $entries + 4;
+        $offsetsAt = $dataOffset + 32;
+        $countsAt = $offsetsAt + 4 * $strips;
+        $pixelsAt = $countsAt + 4 * $strips;
+        $directory = [[256, 4, 1, 1], [257, 4, 1, $height], [258, 3, 16, $dataOffset], [259, 3, 1, pack('v', 1)],
+            [262, 3, 1, pack('v', 1)], [273, 4, $strips, $offsetsAt], [277, 3, 1, pack('v', 16)], [278, 4, 1, 1],
+            [279, 4, $strips, $countsAt], [284, 3, 1, pack('v', 2)]];
+        for ($tag = 40000; count($directory) < $entries; ++$tag) {
+            $directory[] = [$tag, 3, 1, pack('v', 0)];
+        }
+        $offsets = '';
+        for ($strip = 0; $strip < $strips; ++$strip) {
+            $offsets .= pack('V', $pixelsAt + $strip);
+        }
+
+        return ImageBuilder::tiffEntries(
+            $directory,
+            ImageBuilder::repeat(pack('v', 8), 16) . $offsets . ImageBuilder::repeat(pack('V', 1), $strips) . ImageBuilder::repeat("\0", $strips),
+            $dataOffset
+        );
     }
 
     /**
