@@ -10,7 +10,7 @@ use PhpCsFixer\Finder;
  * PHP 7.2 (@PHP74Migration, @PHP80Migration, ...) may be enabled: the library supports PHP 7.2.5 to 8.5.
  */
 $finder = Finder::create()
-    ->in([__DIR__ . '/tests'])
+    ->in([__DIR__ . '/src', __DIR__ . '/tests'])
     ->append([__FILE__, __DIR__ . '/tools/ensure-tool.php']);
 
 return (new Config())

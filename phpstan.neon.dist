@@ -9,6 +9,7 @@ parameters:
     level: max
     phpVersion: 70205
     paths:
+        - src
         - tests
         - tools/ensure-tool.php
 
