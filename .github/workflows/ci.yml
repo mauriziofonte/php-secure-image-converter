@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Composer validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.4'
+          coverage: none
+          tools: composer:v2
+
+      - name: Validate composer.json
+        run: |
+          composer validate --strict
+          composer validate --strict --no-check-publish tools/phpstan/composer.json
+          composer validate --strict --no-check-publish tools/php-cs-fixer/composer.json
+
+  tests:
+    name: Tests (PHP ${{ matrix.php }}, ${{ matrix.deps }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['7.2', '7.3', '7.4', '8.0', '8.1', '8.2', '8.3', '8.4', '8.5']
+        deps: ['lowest', 'highest']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+          tools: composer:v2
+          ini-values: error_reporting=-1, display_errors=On, zend.assertions=1
+
+      - name: Install highest dependencies
+        if: matrix.deps == 'highest'
+        run: composer update --prefer-stable --no-interaction --no-progress
+
+      # Lowest versions of the runtime dependencies; test tooling is always resolved to the highest version
+      # available for the running PHP (conventions.md).
+      - name: Install lowest runtime dependencies
+        if: matrix.deps == 'lowest'
+        run: |
+          composer update --prefer-lowest --prefer-stable --no-interaction --no-progress
+          composer update phpunit/phpunit yoast/phpunit-polyfills --with-all-dependencies --no-interaction --no-progress
+
+      - name: Show installed packages
+        run: composer show --direct
+
+      - name: Run tests
+        run: composer test
+
+  static:
+    name: Static analysis
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.4'
+          coverage: none
+          tools: composer:v2
+
+      - name: Install dependencies
+        run: composer update --prefer-stable --no-interaction --no-progress
+
+      - name: Install tools
+        run: |
+          composer install --working-dir=tools/phpstan --no-interaction --no-progress
+          composer install --working-dir=tools/php-cs-fixer --no-interaction --no-progress
+
+      - name: Coding style
+        run: composer cs:check
+
+      - name: PHPStan (PHP 7.2.5 and PHP 8.5)
+        run: composer analyse

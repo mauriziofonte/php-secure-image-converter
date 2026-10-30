@@ -1,0 +1,16 @@
+{
+  "name": "mfonte/secure-image-converter-tools-phpstan",
+  "description": "PHPStan and its deprecation rules for mfonte/secure-image-converter, installed separately because PHPStan 2 does not support PHP 7.2.",
+  "type": "project",
+  "license": "BSD-3-Clause",
+  "require": {
+    "php": "^7.4 || ^8.0",
+    "phpstan/phpstan": "^2.3",
+    "phpstan/phpstan-deprecation-rules": "^2.0.5"
+  },
+  "config": {
+    "sort-packages": true
+  },
+  "minimum-stability": "stable",
+  "prefer-stable": true
+}

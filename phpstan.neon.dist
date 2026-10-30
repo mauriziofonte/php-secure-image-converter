@@ -1,0 +1,22 @@
+# PHPStan at level max, analysed as PHP 7.2.5 (the lowest supported version).
+# phpstan-php85.neon.dist includes this file and analyses as PHP 8.5; `composer analyse` runs both.
+# No baseline: every finding is fixed, or ignored inline with a one-line justification.
+includes:
+    # Reports use of deprecated functions, classes and methods, e.g. curl_close() in the PHP 8.5 run.
+    - tools/phpstan/vendor/phpstan/phpstan-deprecation-rules/rules.neon
+
+parameters:
+    level: max
+    phpVersion: 70205
+    paths:
+        - tests
+        - tools/ensure-tool.php
+
+services:
+    # PHPStan 2 parses the files it does not analyse (vendor/) with the grammar of phpVersion. The PHP 7 grammar
+    # cannot read dependencies written for PHP 8 (PHPUnit 10+, psr/log 2+), which then look as if they did not
+    # exist. Parse those files with the PHP 8 grammar, as PHPStan 1 did; the analysed paths are still parsed and
+    # checked as PHP 7.2.5.
+    currentPhpVersionSimpleDirectParser:
+        arguments:
+            parser: @php8PhpParser
