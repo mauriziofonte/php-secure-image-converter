@@ -25,7 +25,7 @@
   },
   "require-dev": {
     "phpunit/phpunit": "^8.5.52 || ^9.6.33 || ^10.5.62 || ^11.5.50",
-    "yoast/phpunit-polyfills": "^2.0.1 || ^4.0"
+    "yoast/phpunit-polyfills": "^2.0 || ^3.0 || ^4.0"
   },
   "autoload": {
     "psr-4": {
@@ -38,25 +38,25 @@
     }
   },
   "config": {
-    "sort-packages": true,
-    "optimize-autoloader": true
+    "optimize-autoloader": true,
+    "sort-packages": true
   },
   "minimum-stability": "stable",
   "prefer-stable": true,
   "scripts": {
     "test": "@php vendor/bin/phpunit",
     "analyse": [
-      "@php tools/ensure-tool.php phpstan",
+      "@php tools/require-tool.php phpstan",
       "@php tools/phpstan/vendor/bin/phpstan analyse --configuration=phpstan.neon.dist --no-progress --memory-limit=1G",
       "@php tools/phpstan/vendor/bin/phpstan analyse --configuration=phpstan-php85.neon.dist --no-progress --memory-limit=1G"
     ],
     "cs:check": [
-      "@php tools/ensure-tool.php php-cs-fixer",
-      "@php tools/php-cs-fixer/vendor/bin/php-cs-fixer fix --dry-run --diff --verbose"
+      "@php tools/require-tool.php php-cs-fixer",
+      "@php tools/php-cs-fixer/vendor/bin/php-cs-fixer fix --dry-run --diff"
     ],
     "cs:fix": [
-      "@php tools/ensure-tool.php php-cs-fixer",
-      "@php tools/php-cs-fixer/vendor/bin/php-cs-fixer fix --verbose"
+      "@php tools/require-tool.php php-cs-fixer",
+      "@php tools/php-cs-fixer/vendor/bin/php-cs-fixer fix"
     ],
     "ci": [
       "@cs:check",
@@ -66,9 +66,9 @@
   },
   "scripts-descriptions": {
     "test": "Run the PHPUnit test suite.",
-    "analyse": "Run PHPStan at max level for PHP 7.2.5 and for PHP 8.5 (requires tools/phpstan).",
-    "cs:check": "Report coding style violations without changing files (requires tools/php-cs-fixer).",
-    "cs:fix": "Fix coding style violations in place (requires tools/php-cs-fixer).",
+    "analyse": "Run PHPStan at level max as PHP 7.2.5 and as PHP 8.5 (needs tools/phpstan).",
+    "cs:check": "Report coding style violations as a diff, without changing files (needs tools/php-cs-fixer).",
+    "cs:fix": "Fix coding style violations in place (needs tools/php-cs-fixer).",
     "ci": "Run cs:check, analyse and test, in this order."
   }
 }

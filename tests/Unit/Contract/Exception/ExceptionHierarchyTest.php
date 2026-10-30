@@ -73,8 +73,10 @@ final class ExceptionHierarchyTest extends TestCase
     }
 
     /**
-     * @param class-string<ExceptionInterface> $class
-     * @param class-string<\Throwable>         $parent
+     * $class is typed as any Throwable, so that the interface is asserted rather than taken from the data provider.
+     *
+     * @param class-string<\Throwable> $class
+     * @param class-string<\Throwable> $parent
      *
      * @dataProvider exceptions
      */
@@ -166,7 +168,10 @@ final class ExceptionHierarchyTest extends TestCase
     {
         $exception = LimitExceededException::forInput(Capabilities::LIMIT_MAX_BYTES, 20971520, 20971521);
 
-        self::assertInstanceOf(\RangeException::class, $exception);
+        // Read through reflection, so that the assertion checks the class hierarchy rather than its declaration.
+        $parent = (new \ReflectionClass($exception))->getParentClass();
+        self::assertNotFalse($parent);
+        self::assertSame(\RangeException::class, $parent->getName());
         self::assertSame(ErrorCode::FILE_TOO_LARGE, $exception->getErrorCode());
         self::assertSame('max_bytes', $exception->getLimit());
         self::assertSame(20971520, $exception->getMaximum());

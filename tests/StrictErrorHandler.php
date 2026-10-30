@@ -5,74 +5,78 @@ declare(strict_types=1);
 namespace Mfonte\SecureImageConverter\Tests;
 
 /**
- * Error handler for the test suite: turns notices, warnings and deprecations into exceptions so that they fail
- * the test that raised them, on every PHP version of the matrix (PHP 8.4 and 8.5 deprecations included).
+ * Error handler installed by tests/bootstrap.php, before the Composer
+ * autoloader.
  *
- * The only tolerated case is a deprecation raised from a file outside the project's own directories (src/ and
- * tests/), typically inside vendor/: dependencies must remain installable at their lowest versions on the newest
- * PHP, and their deprecations are not ours to fix. Those are counted and reported once on STDERR at shutdown.
+ * Every notice, warning and deprecation becomes an \ErrorException, so that a
+ * PHP 8.4 or 8.5 deprecation in the project's own code fails the build.
+ * Deprecations raised by files inside vendor/ are tolerated: the lowest
+ * supported releases of the dependencies trigger them on the newest PHP, and
+ * they are not the project's to fix. They are counted instead, and reported
+ * once on STDERR at shutdown so that they stay visible. Errors silenced with
+ * the @ operator, or excluded by error_reporting(), are left to PHP.
  *
- * PHPUnit 8.5 to 11.5 do not replace an error handler that is already installed when a test starts, so the handler
- * installed by tests/bootstrap.php stays active for the whole run (StrictErrorHandlerTest proves it).
+ * PHPUnit 8.5 to 11.5 keep an error handler that is already installed when
+ * they start, so this one stays active for the whole run.
  */
 final class StrictErrorHandler
 {
     /**
-     * @var list<string> absolute directory paths, each with a trailing directory separator
+     * @var string Absolute vendor directory with forward slashes and a trailing slash
      */
-    private $ownDirectories = [];
+    private $vendorDirectory;
 
     /**
-     * @var array<string, int> deprecation description => number of occurrences
+     * @var array<string, int> "message in file:line" => number of occurrences
      */
-    private $foreignDeprecations = [];
+    private $vendorDeprecations = [];
 
     /**
-     * @param list<string> $ownDirectories Directories whose files must never raise a notice, warning or
-     *                                     deprecation. Directories that do not exist are ignored.
+     * @param string $vendorDirectory absolute path of the Composer vendor
+     *                                directory, resolved when it exists, as
+     *                                PHP reports resolved paths
      */
-    public function __construct(array $ownDirectories)
+    public function __construct(string $vendorDirectory)
     {
-        foreach ($ownDirectories as $directory) {
-            $realPath = realpath($directory);
-            if ($realPath !== false && is_dir($realPath)) {
-                $this->ownDirectories[] = rtrim($realPath, '/\\') . DIRECTORY_SEPARATOR;
-            }
+        $realPath = realpath($vendorDirectory);
+        if ($realPath !== false) {
+            $vendorDirectory = $realPath;
         }
+        $this->vendorDirectory = rtrim(str_replace('\\', '/', $vendorDirectory), '/') . '/';
     }
 
     /**
-     * Installs a new handler as the current PHP error handler and registers its shutdown report.
+     * Installs a new handler as the current PHP error handler, and registers
+     * the shutdown report of the vendor deprecations it tolerated.
      *
-     * @param list<string> $ownDirectories see the constructor
+     * @param string $vendorDirectory absolute path of the Composer vendor directory
      */
-    public static function install(array $ownDirectories): self
+    public static function install(string $vendorDirectory): self
     {
-        $handler = new self($ownDirectories);
-        set_error_handler([$handler, 'handle']);
-        register_shutdown_function([$handler, 'reportForeignDeprecations']);
+        $handler = new self($vendorDirectory);
+        set_error_handler($handler);
+        register_shutdown_function([$handler, 'reportVendorDeprecations']);
 
         return $handler;
     }
 
     /**
-     * Error handler callback, see set_error_handler().
+     * Handles one PHP error, with the signature expected by set_error_handler().
      *
-     * @throws \ErrorException for every error that is not silenced and is not a foreign deprecation
+     * @throws \ErrorException for every error that is reported and not tolerated
      *
-     * @return bool true when the error has been handled (foreign deprecation), false to let PHP apply its default
-     *              behaviour to an error silenced with the @ operator
+     * @return bool true when the error is a tolerated vendor deprecation, false to let PHP handle it
      */
-    public function handle(int $severity, string $message, string $file = '', int $line = 0): bool
+    public function __invoke(int $severity, string $message, string $file = '', int $line = 0): bool
     {
         if ((error_reporting() & $severity) === 0) {
             return false;
         }
 
         $isDeprecation = $severity === E_DEPRECATED || $severity === E_USER_DEPRECATED;
-        if ($isDeprecation && !$this->isOwnFile($file)) {
+        if ($isDeprecation && strpos(str_replace('\\', '/', $file), $this->vendorDirectory) === 0) {
             $key = sprintf('%s in %s:%d', $message, $file, $line);
-            $this->foreignDeprecations[$key] = (isset($this->foreignDeprecations[$key]) ? $this->foreignDeprecations[$key] : 0) + 1;
+            $this->vendorDeprecations[$key] = ($this->vendorDeprecations[$key] ?? 0) + 1;
 
             return true;
         }
@@ -81,41 +85,39 @@ final class StrictErrorHandler
     }
 
     /**
-     * Whether the file is inside one of the project's own directories.
+     * @return array<string, int> tolerated vendor deprecations ("message in file:line") with their count
      */
-    public function isOwnFile(string $file): bool
+    public function getVendorDeprecations(): array
     {
-        foreach ($this->ownDirectories as $directory) {
-            if (strpos($file, $directory) === 0) {
-                return true;
-            }
-        }
-
-        return false;
+        return $this->vendorDeprecations;
     }
 
     /**
-     * @return array<string, int> deprecations raised outside the project's own directories, with their count
+     * Writes the tolerated vendor deprecations, each once with its count.
+     * Writes nothing when there are none.
+     *
+     * @param resource|null $stream where to write; STDERR when null
      */
-    public function getForeignDeprecations(): array
+    public function reportVendorDeprecations($stream = null): void
     {
-        return $this->foreignDeprecations;
-    }
-
-    /**
-     * Prints the tolerated foreign deprecations on STDERR, so that they stay visible without failing the build.
-     */
-    public function reportForeignDeprecations(): void
-    {
-        if ($this->foreignDeprecations === [] || !defined('STDERR')) {
+        if ($this->vendorDeprecations === []) {
             return;
         }
+        if ($stream === null) {
+            if (!defined('STDERR')) {
+                return;
+            }
+            $stream = STDERR;
+        }
 
-        $lines = [sprintf('%d distinct deprecation(s) raised outside src/ and tests/ (not fatal):', count($this->foreignDeprecations))];
-        foreach ($this->foreignDeprecations as $description => $count) {
+        $lines = [sprintf(
+            '%d distinct deprecation(s) raised inside vendor/ (not fatal):',
+            count($this->vendorDeprecations)
+        )];
+        foreach ($this->vendorDeprecations as $description => $count) {
             $lines[] = sprintf('  [%dx] %s', $count, $description);
         }
 
-        fwrite(STDERR, PHP_EOL . implode(PHP_EOL, $lines) . PHP_EOL);
+        fwrite($stream, PHP_EOL . implode(PHP_EOL, $lines) . PHP_EOL);
     }
 }

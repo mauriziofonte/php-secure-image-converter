@@ -14,7 +14,7 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
  * @coversNothing
  */
 #[CoversNothing]
-final class ComposerJsonTest extends TestCase
+final class ComposerManifestTest extends TestCase
 {
     /**
      * @return array<mixed>

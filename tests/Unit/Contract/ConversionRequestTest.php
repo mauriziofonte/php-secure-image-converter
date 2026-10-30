@@ -52,16 +52,41 @@ final class ConversionRequestTest extends TestCase
         self::assertSame(80, $request->getEffectiveQuality('webp'));
     }
 
-    public function testDocumentedConstants(): void
+    /**
+     * Public constants with their documented values.
+     *
+     * @return array<string, array{string, int|string}>
+     */
+    public static function documentedConstants(): array
     {
-        self::assertSame('original', ConversionRequest::FORMAT_ORIGINAL);
-        self::assertSame('webp', ConversionRequest::DEFAULT_FORMAT);
-        self::assertSame(80, ConversionRequest::DEFAULT_QUALITY_WEBP);
-        self::assertSame(60, ConversionRequest::DEFAULT_QUALITY_AVIF);
-        self::assertSame(85, ConversionRequest::DEFAULT_QUALITY_JPEG);
-        self::assertSame([1, 100], [ConversionRequest::QUALITY_MIN, ConversionRequest::QUALITY_MAX]);
-        self::assertSame([0, 9, 4], [ConversionRequest::EFFORT_MIN, ConversionRequest::EFFORT_MAX, ConversionRequest::DEFAULT_EFFORT]);
-        self::assertSame([1, 16383], [ConversionRequest::DIMENSION_MIN, ConversionRequest::DIMENSION_MAX]);
+        return [
+            'FORMAT_ORIGINAL' => ['FORMAT_ORIGINAL', 'original'],
+            'DEFAULT_FORMAT' => ['DEFAULT_FORMAT', 'webp'],
+            'DEFAULT_QUALITY_WEBP' => ['DEFAULT_QUALITY_WEBP', 80],
+            'DEFAULT_QUALITY_AVIF' => ['DEFAULT_QUALITY_AVIF', 60],
+            'DEFAULT_QUALITY_JPEG' => ['DEFAULT_QUALITY_JPEG', 85],
+            'QUALITY_MIN' => ['QUALITY_MIN', 1],
+            'QUALITY_MAX' => ['QUALITY_MAX', 100],
+            'EFFORT_MIN' => ['EFFORT_MIN', 0],
+            'EFFORT_MAX' => ['EFFORT_MAX', 9],
+            'DEFAULT_EFFORT' => ['DEFAULT_EFFORT', 4],
+            'DIMENSION_MIN' => ['DIMENSION_MIN', 1],
+            'DIMENSION_MAX' => ['DIMENSION_MAX', 16383],
+        ];
+    }
+
+    /**
+     * The constant is read by name, so that the assertion pins its published value instead of comparing a value that
+     * static analysis already knows.
+     *
+     * @param int|string $value
+     *
+     * @dataProvider documentedConstants
+     */
+    #[DataProvider('documentedConstants')]
+    public function testDocumentedConstantHasItsPublishedValue(string $name, $value): void
+    {
+        self::assertSame($value, constant(ConversionRequest::class . '::' . $name));
     }
 
     public function testListsOfAcceptedValues(): void

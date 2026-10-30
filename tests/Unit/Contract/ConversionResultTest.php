@@ -116,9 +116,12 @@ final class ConversionResultTest extends TestCase
     public function testToInternalArrayAddsTheOutputPath(): void
     {
         $result = self::create();
+        $internal = $result->toInternalArray();
 
-        self::assertSame(['output_path' => '/tmp/out/photo.webp'] + $result->toArray(), $result->toInternalArray());
-        self::assertSame('output_path', array_keys($result->toInternalArray())[0]);
+        self::assertSame('output_path', key($internal));
+        self::assertSame('/tmp/out/photo.webp', $internal['output_path']);
+        unset($internal['output_path']);
+        self::assertSame($result->toArray(), $internal);
     }
 
     /**

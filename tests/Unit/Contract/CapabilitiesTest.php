@@ -130,7 +130,32 @@ final class CapabilitiesTest extends TestCase
     public function testToArray(): void
     {
         self::assertSame(self::validArray(), self::create()->toArray());
-        self::assertSame(1, Capabilities::SCHEMA_VERSION);
+    }
+
+    /**
+     * Public constants with their documented values.
+     *
+     * @return array<string, array{string, int}>
+     */
+    public static function documentedConstants(): array
+    {
+        return [
+            'SCHEMA_VERSION' => ['SCHEMA_VERSION', 1],
+            'LIMIT_VALUE_MAX' => ['LIMIT_VALUE_MAX', 2147483647],
+            'OUTPUT_DIMENSION_MAX' => ['OUTPUT_DIMENSION_MAX', 16383],
+        ];
+    }
+
+    /**
+     * The constant is read by name, so that the assertion pins its published value instead of comparing a value that
+     * static analysis already knows.
+     *
+     * @dataProvider documentedConstants
+     */
+    #[DataProvider('documentedConstants')]
+    public function testDocumentedConstantHasItsPublishedValue(string $name, int $value): void
+    {
+        self::assertSame($value, constant(Capabilities::class . '::' . $name));
     }
 
     public function testArrayRoundTrip(): void
@@ -476,7 +501,6 @@ final class CapabilitiesTest extends TestCase
         $capabilities = new Capabilities([], [], [], [], 'none', $limits);
 
         self::assertSame($limits, $capabilities->getLimits());
-        self::assertSame(2147483647, Capabilities::LIMIT_VALUE_MAX);
     }
 
     public function testFileSizeWithinTheLimitIsAccepted(): void
@@ -696,10 +720,9 @@ final class CapabilitiesTest extends TestCase
 
     public function testOutputAtTheOutputDimensionMaximumIsAccepted(): void
     {
-        self::assertSame(16383, Capabilities::OUTPUT_DIMENSION_MAX);
-        self::assertSame(ConversionRequest::DIMENSION_MAX, Capabilities::OUTPUT_DIMENSION_MAX);
-
         self::createWithLargeLimits()->assertOutputWithinLimits(16383, 16383, 1);
+
+        $this->expectNotToPerformAssertions();
     }
 
     /**
