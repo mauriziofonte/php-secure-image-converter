@@ -43,6 +43,11 @@ use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
  * - Every directory from "/" down to the lock directory must be inspectable: under an open_basedir setting that
  *   excludes any of them, "/" included, the constructor refuses every path and says so.
  * - Only the owner and the permission bits are checked; access control lists are not.
+ * - Missing components are created with mkdir() and then set to mode 0700 with chmod(). Under a umask that removes
+ *   permissions from the owner (such as 0277), another process can see a new directory between those two calls and
+ *   fail, closed (the constructor throws), until the chmod() is done. Create the directory before the workers start,
+ *   or keep a usual umask (022, 027, 077), when several processes construct the same new path at once. The umask is
+ *   never changed temporarily, because it is shared by all the threads of a multi-threaded server.
  * - Locks coordinate the processes of one host that share the directory and run as the same user. They do not span
  *   hosts or containers that do not share the directory.
  * - Lock files must not be deleted while the application runs: exclude the directory from temporary-file cleaners
