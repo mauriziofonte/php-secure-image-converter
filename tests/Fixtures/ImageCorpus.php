@@ -10,6 +10,7 @@ use Mfonte\SecureImageConverter\Validation\Parser\Av1SequenceHeader;
 use Mfonte\SecureImageConverter\Validation\Parser\AvifParser;
 use Mfonte\SecureImageConverter\Validation\Parser\BmpParser;
 use Mfonte\SecureImageConverter\Validation\Parser\GifParser;
+use Mfonte\SecureImageConverter\Validation\Parser\JpegParser;
 use Mfonte\SecureImageConverter\Validation\Parser\PngParser;
 use Mfonte\SecureImageConverter\Validation\Parser\TiffParser;
 use Mfonte\SecureImageConverter\Validation\Parser\WebpParser;
@@ -73,6 +74,20 @@ final class ImageCorpus
         $frameHeader = (string) substr($valid, $sof, 2 + 2 + 6 + 3 * 3);
         $grey = ImageBuilder::jpeg(8, 8);
         $greySof = ImageBuilder::find($grey, "\xFF\xC0");
+        // The 8 x 8 grey image with $segments between its scan data and its EOI marker.
+        $afterScan = static function (string $segments) use ($grey): string {
+            return substr($grey, 0, -2) . $segments . "\xFF\xD9";
+        };
+        // The 8 x 8 grey image whose scan data ends with zero bytes up to $offset from its start, then $bytes. The
+        // parser searches the scan data in chunks of 256 bytes, then 512, 1024...: $bytes straddle a chunk boundary.
+        // The scan data follows the SOS marker and its segment, whose length the 32-bit value at the marker ends with.
+        $scanStart = ImageBuilder::find($grey, "\xFF\xDA");
+        $scanStart += 2 + (ImageBuilder::readUint32($grey, $scanStart) & 0xFFFF);
+        $acrossChunks = static function (int $offset, string $bytes) use ($grey, $scanStart): string {
+            $data = (string) substr($grey, $scanStart, -2);
+
+            return substr($grey, 0, $scanStart) . $data . ImageBuilder::repeat("\0", $offset - strlen($data)) . $bytes;
+        };
 
         return [
             'jpeg/valid-grey.jpg' => self::committed(ImageBuilder::jpeg(16, 8), self::accept(ImageFormat::JPEG, 16, 8, 1, ['bit_depth' => 8, 'icc_profile' => false, 'exif' => false, 'metadata' => false, 'orientation' => 1, 'trailing_data' => false])),
@@ -110,6 +125,35 @@ final class ImageCorpus
             'jpeg/valid-trailing-zip.jpg' => self::committed(
                 $grey . "PK\x03\x04" . ImageBuilder::repeat("\0", 26) . 'payload.txt',
                 self::accept(ImageFormat::JPEG, 8, 8, 1, ['trailing_data' => true])
+            ),
+            // Decoders read the segments between the scan data and EOI too: a comment there is metadata, its bytes are
+            // not the end of the image.
+            'jpeg/valid-zip-in-comment-after-scan.jpg' => self::committed(
+                $afterScan(ImageBuilder::jpegSegment(0xFE, "PK\x05\x06" . ImageBuilder::repeat("\0", 18))),
+                self::accept(ImageFormat::JPEG, 8, 8, 1, ['metadata' => true, 'trailing_data' => false])
+            ),
+            'jpeg/valid-eoi-in-comment-after-scan.jpg' => self::committed(
+                $afterScan(ImageBuilder::jpegSegment(0xFE, "\xFF\xD9<?php echo 'payload'; ?>")),
+                self::accept(ImageFormat::JPEG, 8, 8, 1, ['metadata' => true, 'trailing_data' => false])
+            ),
+            'jpeg/valid-eoi-across-chunks.jpg' => self::committed($acrossChunks(255, "\xFF\xD9"), self::accept(ImageFormat::JPEG, 8, 8, 1, ['trailing_data' => false])),
+            'jpeg/valid-fill-across-chunks.jpg' => self::committed($acrossChunks(254, "\xFF\xFF\xFF\xD9"), self::accept(ImageFormat::JPEG, 8, 8, 1, ['trailing_data' => false])),
+            'jpeg/valid-stuffed-across-chunks.jpg' => self::committed(
+                $acrossChunks(767, "\xFF\x00\xFF\xD0" . ImageBuilder::repeat("\0", 1022) . "\xFF\xD7\xFF\xD9"),
+                self::accept(ImageFormat::JPEG, 8, 8, 1, ['trailing_data' => false])
+            ),
+            'jpeg/valid-comment-across-chunks.jpg' => self::committed(
+                $acrossChunks(255, ImageBuilder::jpegSegment(0xFE, 'comment') . "\xFF\xD9"),
+                self::accept(ImageFormat::JPEG, 8, 8, 1, ['metadata' => true, 'trailing_data' => false])
+            ),
+            // The image has 6 segments before its scan data: then the most segments allowed after it, and one too many.
+            'jpeg/valid-most-segments-after-scan.jpg' => self::committed(
+                $afterScan(ImageBuilder::repeat("\xFF\xFE\x00\x02", JpegParser::MAX_SEGMENTS - 6)),
+                self::accept(ImageFormat::JPEG, 8, 8, 1, ['metadata' => true])
+            ),
+            'jpeg/spoof-too-many-segments-after-scan.jpg' => self::committed(
+                $afterScan(ImageBuilder::repeat("\xFF\xFE\x00\x02", JpegParser::MAX_SEGMENTS - 5)),
+                self::reject(ErrorCode::INVALID_IMAGE)
             ),
             'jpeg/bomb-65535x65535.jpg' => self::committed(ImageBuilder::patch($grey, $greySof + 5, pack('nn', 65535, 65535)), self::reject(ErrorCode::IMAGE_TOO_LARGE, true)),
             'jpeg/bomb-exif-flood.jpg' => self::committed(

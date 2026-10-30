@@ -23,21 +23,23 @@ use Mfonte\SecureImageConverter\Validation\Limits;
  *   refused), 1 to 4 components with sampling factors from 1 to 4. The dimensions are checked against the limits as
  *   soon as the frame header is read.
  * - Every segment must fit in the file; a truncated header is refused. Once the first scan is reached, the image
- *   must end with an EOI marker (FF D9), found by searching the bytes after the scan header (entropy-coded data
- *   cannot contain FF D9, so the first match is the end of the image), without decoding them. A file without EOI is
- *   truncated; bytes after the EOI (the video of a motion photo, an appended archive) are trailing data.
+ *   must end with an EOI marker (FF D9). The entropy-coded data of a scan holds no marker but RSTn (FF D0 to FF D7)
+ *   and stuffed FF 00 bytes: the parser searches it for the next marker, without decoding it, and skips the segments
+ *   that come between scans (tables, further scan headers, APPn and comments, which decoders read wherever they
+ *   are), up to MAX_SEGMENTS segments in all. A file without EOI is truncated; bytes after the EOI (the video of a
+ *   motion photo, an appended archive) are trailing data.
  *
- * Metadata: APP1 "Exif" is EXIF, APP2 "ICC_PROFILE" is the colour profile; APP0 JFIF and APP14 Adobe carry decoding
- * parameters, not metadata; every other APPn segment (XMP, IPTC, MPF, FlashPix...) and every comment is other
- * metadata. The orientation comes from the first EXIF segment.
+ * Metadata, before or after the first scan: APP1 "Exif" is EXIF, APP2 "ICC_PROFILE" is the colour profile; APP0 JFIF
+ * and APP14 Adobe carry decoding parameters, not metadata; every other APPn segment (XMP, IPTC, MPF, FlashPix...) and
+ * every comment is other metadata. The orientation comes from the first EXIF segment.
  *
  * @internal
  */
 final class JpegParser implements ParserInterface
 {
     /**
-     * Largest number of marker segments before the first scan. Real files have a few dozen at most, even with an ICC
-     * profile split over many APP2 segments or extended XMP.
+     * Largest number of marker segments, before the first scan and after it. Real files have a few dozen at most, even
+     * with an ICC profile split over many APP2 segments, extended XMP or the scans of a progressive image.
      */
     public const MAX_SEGMENTS = 1024;
 
@@ -61,9 +63,43 @@ final class JpegParser implements ParserInterface
      */
     private const PRECISIONS = [8, 12, 16];
 
+    /**
+     * Entropy-coded data up to the next marker: bytes other than FF, and FF bytes followed by a stuffed zero or a
+     * restart marker (RST0 to RST7), which decoders read as data.
+     */
+    private const SCAN_DATA_PATTERN = '/\G(?:[^\xFF]++|\xFF++[\x00\xD0-\xD7])*+/';
+
+    /**
+     * Bytes read by the first step of a marker search, each next step reading twice as many up to SCAN_CHUNK_SIZE: the
+     * next marker usually follows a segment at once.
+     */
+    private const FIRST_SCAN_CHUNK_SIZE = 256;
+
+    private const SCAN_CHUNK_SIZE = 65536;
+
     private const MARKER_SOS = 0xDA;
     private const MARKER_EOI = 0xD9;
     private const MARKER_COM = 0xFE;
+
+    /**
+     * @var bool
+     */
+    private $iccProfile = false;
+
+    /**
+     * @var bool
+     */
+    private $exif = false;
+
+    /**
+     * @var bool
+     */
+    private $otherMetadata = false;
+
+    /**
+     * @var int
+     */
+    private $orientation = ImageInfo::ORIENTATION_NORMAL;
 
     public function parse(ByteReader $reader, Limits $limits): ImageInfo
     {
@@ -73,14 +109,14 @@ final class JpegParser implements ParserInterface
         }
 
         $frame = null;
-        $iccProfile = false;
-        $exif = false;
-        $otherMetadata = false;
-        $orientation = ImageInfo::ORIENTATION_NORMAL;
+        $this->iccProfile = false;
+        $this->exif = false;
+        $this->otherMetadata = false;
+        $this->orientation = ImageInfo::ORIENTATION_NORMAL;
 
         for ($segments = 1; ; ++$segments) {
             if ($segments > self::MAX_SEGMENTS) {
-                throw self::invalid(sprintf('more than %d segments precede the image data', self::MAX_SEGMENTS));
+                throw self::tooManySegments();
             }
             $marker = self::readMarker($reader);
             if ($marker === self::MARKER_EOI) {
@@ -114,30 +150,118 @@ final class JpegParser implements ParserInterface
                     throw self::invalid('a scan precedes the frame header');
                 }
                 self::checkScanHeader($reader, $payloadLength);
-                $endOfImage = $reader->indexOf("\xFF\xD9", $payloadEnd);
-                if ($endOfImage < 0) {
-                    throw ByteReader::truncated();
-                }
+                $endOfImage = $this->findEndOfImage($reader, $payloadEnd, $segments);
 
                 return (new ImageInfo(ImageFormat::JPEG, $frame[0], $frame[1], 1, $reader->getSize()))
-                    ->withMetadata($iccProfile, $exif, $otherMetadata)
-                    ->withOrientation($orientation)
+                    ->withMetadata($this->iccProfile, $this->exif, $this->otherMetadata)
+                    ->withOrientation($this->orientation)
                     ->withTrailingData($endOfImage + 2 < $reader->getSize());
-            } elseif (($marker >= 0xE0 && $marker <= 0xEF) || $marker === self::MARKER_COM) {
-                $identifier = $reader->read(min($payloadLength, 12));
-                if ($marker === 0xE1 && strncmp($identifier, "Exif\0", 5) === 0) {
-                    if (!$exif) {
-                        $tiffStart = $payloadEnd - $payloadLength + 6;
-                        $orientation = ExifOrientation::read($reader, $tiffStart, $payloadEnd - $tiffStart);
-                    }
-                    $exif = true;
-                } elseif ($marker === 0xE2 && $identifier === "ICC_PROFILE\0") {
-                    $iccProfile = true;
-                } elseif (!($marker === 0xE0 && strncmp($identifier, "JFIF\0", 5) === 0) && !($marker === 0xEE && strncmp($identifier, 'Adobe', 5) === 0)) {
-                    $otherMetadata = true;
-                }
+            } else {
+                $this->readMetadata($reader, $marker, $payloadLength, $payloadEnd);
             }
             $reader->seek($payloadEnd);
+        }
+    }
+
+    /**
+     * Offset of the EOI marker: searches the entropy-coded data after a scan header for the next marker, and skips the
+     * segments between scans, noting their metadata.
+     *
+     * @param int $from     offset of the entropy-coded data of the first scan
+     * @param int $segments segments walked before it
+     *
+     * @throws InvalidImageException
+     */
+    private function findEndOfImage(ByteReader $reader, int $from, int $segments): int
+    {
+        $position = $from;
+        while (true) {
+            $markerStart = self::findMarker($reader, $position);
+            if ($markerStart < 0) {
+                throw ByteReader::truncated();
+            }
+            $reader->seek($markerStart + 1);
+            $marker = $reader->readUint8();
+            if ($marker === self::MARKER_EOI) {
+                return $markerStart;
+            }
+            if (++$segments > self::MAX_SEGMENTS) {
+                throw self::tooManySegments();
+            }
+            if (self::isStandalone($marker)) {
+                $position = $markerStart + 2;
+                continue;
+            }
+
+            $length = $reader->readUint16Be();
+            if ($length < 2) {
+                throw self::invalid('a segment has a length below 2');
+            }
+            if ($length - 2 > $reader->getRemaining()) {
+                throw ByteReader::truncated();
+            }
+            $position = $markerStart + 2 + $length;
+            $this->readMetadata($reader, $marker, $length - 2, $position);
+        }
+    }
+
+    /**
+     * Offset of the FF byte that the code of the next marker follows (the last one when fill bytes precede it), from
+     * $from, or -1. Reads the bytes in growing chunks, without keeping them in memory.
+     *
+     * @throws InvalidImageException
+     */
+    private static function findMarker(ByteReader $reader, int $from): int
+    {
+        $size = $reader->getSize();
+        $reader->seek($from);
+        $chunkStart = $from;
+        $chunk = '';
+        $chunkSize = self::FIRST_SCAN_CHUNK_SIZE;
+        while ($reader->getPosition() < $size) {
+            $chunk .= $reader->read(min($chunkSize, $size - $reader->getPosition()));
+            $chunkSize = min(2 * $chunkSize, self::SCAN_CHUNK_SIZE);
+            if (preg_match(self::SCAN_DATA_PATTERN, $chunk, $data) !== 1) {
+                throw self::invalid('the scan data cannot be searched');
+            }
+            // The data stops at an FF byte, or a run of fill bytes, that a marker code follows.
+            $at = strlen($data[0]);
+            $at += strspn($chunk, "\xFF", $at);
+            if ($at < strlen($chunk)) {
+                return $chunkStart + $at - 1;
+            }
+            // The chunk ends with data, or with FF bytes whose next byte is in the next chunk: the last one is kept.
+            $kept = $chunk[strlen($chunk) - 1] === "\xFF" ? 1 : 0;
+            $chunkStart += strlen($chunk) - $kept;
+            $chunk = $kept === 1 ? "\xFF" : '';
+        }
+
+        return -1;
+    }
+
+    /**
+     * Notes the metadata of an APPn or comment segment; does nothing for other segments.
+     *
+     * @param int $payloadEnd offset of the byte after the payload, which starts at the position
+     *
+     * @throws InvalidImageException
+     */
+    private function readMetadata(ByteReader $reader, int $marker, int $payloadLength, int $payloadEnd): void
+    {
+        if (($marker < 0xE0 || $marker > 0xEF) && $marker !== self::MARKER_COM) {
+            return;
+        }
+        $identifier = $reader->read(min($payloadLength, 12));
+        if ($marker === 0xE1 && strncmp($identifier, "Exif\0", 5) === 0) {
+            if (!$this->exif) {
+                $tiffStart = $payloadEnd - $payloadLength + 6;
+                $this->orientation = ExifOrientation::read($reader, $tiffStart, $payloadEnd - $tiffStart);
+            }
+            $this->exif = true;
+        } elseif ($marker === 0xE2 && $identifier === "ICC_PROFILE\0") {
+            $this->iccProfile = true;
+        } elseif (!($marker === 0xE0 && strncmp($identifier, "JFIF\0", 5) === 0) && !($marker === 0xEE && strncmp($identifier, 'Adobe', 5) === 0)) {
+            $this->otherMetadata = true;
         }
     }
 
@@ -230,6 +354,11 @@ final class JpegParser implements ParserInterface
         if ($components < 1 || $components > 4 || $payloadLength !== 4 + 2 * $components) {
             throw self::invalid('the scan header has an invalid component count or length');
         }
+    }
+
+    private static function tooManySegments(): InvalidImageException
+    {
+        return self::invalid(sprintf('the image has more than %d segments', self::MAX_SEGMENTS));
     }
 
     private static function invalid(string $problem): InvalidImageException
