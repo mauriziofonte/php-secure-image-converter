@@ -112,6 +112,13 @@ jobs:
       - name: Run the test suite
         run: composer test
 
+      # Some ownership checks need a directory or a symbolic link owned by
+      # another user, which only root can create: those tests skip themselves
+      # above and run here again as root. cacheResult="false" in phpunit.xml.dist
+      # keeps root from writing to the checkout.
+      - name: Run the root-only tests
+        run: sudo "$(command -v php)" vendor/bin/phpunit --group root
+
   static:
     name: Static analysis
     runs-on: ubuntu-24.04
