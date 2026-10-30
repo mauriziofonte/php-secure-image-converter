@@ -37,6 +37,20 @@ abstract class IsolationTestCase extends TestCase
      */
     private $workingDirectory;
 
+    /**
+     * Files opened by openDescriptors().
+     *
+     * @var list<resource>
+     */
+    private $openFiles = [];
+
+    /**
+     * Directory handles opened by openDescriptors().
+     *
+     * @var list<resource>
+     */
+    private $openDirectories = [];
+
     protected function set_up(): void
     {
         parent::set_up();
@@ -45,6 +59,7 @@ abstract class IsolationTestCase extends TestCase
 
     protected function tear_down(): void
     {
+        $this->closeDescriptors();
         if ($this->workingDirectory !== null) {
             $this->workingDirectory->remove();
             $this->workingDirectory = null;
@@ -57,6 +72,75 @@ abstract class IsolationTestCase extends TestCase
         self::assertNotNull($this->workingDirectory);
 
         return $this->workingDirectory;
+    }
+
+    /**
+     * Opens $count descriptors in this PHP process until closeDescriptors() or the end of the test: files, which a
+     * child process would inherit, or directory handles, which PHP opens with close-on-exec.
+     */
+    protected function openDescriptors(int $count, bool $inheritable): void
+    {
+        for ($index = 0; $index < $count; ++$index) {
+            if ($inheritable) {
+                $file = fopen('/dev/null', 'r');
+                self::assertIsResource($file);
+                $this->openFiles[] = $file;
+            } else {
+                $directory = opendir('/');
+                self::assertIsResource($directory);
+                $this->openDirectories[] = $directory;
+            }
+        }
+    }
+
+    protected function closeDescriptors(): void
+    {
+        foreach ($this->openFiles as $file) {
+            fclose($file);
+        }
+        foreach ($this->openDirectories as $directory) {
+            closedir($directory);
+        }
+        $this->openFiles = [];
+        $this->openDirectories = [];
+    }
+
+    /**
+     * Skips the test unless this PHP process may open at least $count descriptors.
+     */
+    protected static function requireOpenFilesLimit(int $count): void
+    {
+        $limits = function_exists('posix_getrlimit') ? posix_getrlimit() : false;
+        $limit = is_array($limits) ? ($limits['soft openfiles'] ?? null) : null;
+        if ($limit !== 'unlimited' && (!is_numeric($limit) || (int) $limit < $count)) {
+            self::markTestSkipped(sprintf(
+                'This test needs a soft open files limit of at least %d (ulimit -n).',
+                $count
+            ));
+        }
+    }
+
+    /**
+     * Processes that are running (not zombies) and have $argument among their command line arguments.
+     *
+     * @return list<int>
+     */
+    protected static function processesWithArgument(string $argument): array
+    {
+        $pids = [];
+        foreach (glob('/proc/[0-9]*/cmdline') ?: [] as $path) {
+            $commandLine = @file_get_contents($path);
+            $pid = (int) basename(dirname($path));
+            if (
+                is_string($commandLine)
+                && in_array($argument, explode("\0", $commandLine), true)
+                && self::isRunning($pid)
+            ) {
+                $pids[] = $pid;
+            }
+        }
+
+        return $pids;
     }
 
     /**

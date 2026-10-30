@@ -24,6 +24,10 @@ use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
  * address space for every thread stack and malloc arena, so a tool running many threads may need a higher value (or
  * fewer threads, for example VIPS_CONCURRENCY=1 or MALLOC_ARENA_MAX=2 in the process environment).
  *
+ * The open files limit caps descriptor numbers, and the process starts with the three standard streams plus every
+ * descriptor PHP holds open without close-on-exec (replaced with /dev/null, see ProcessRunner): ProcessRunner refuses
+ * to run when these leave too few free descriptors below the limit.
+ *
  * The process limit is disabled by default because the kernel counts every process of the user (real user ID), not
  * only the descendants of the command: on a PHP-FPM host whose pool already runs more workers than the limit, the
  * command could not even start. Enable it only when the conversions run under a dedicated user.

@@ -253,6 +253,37 @@ final class IsolationDetectorTest extends IsolationTestCase
         self::assertCount(2, $files);
     }
 
+    /**
+     * A probe that cannot run because of the state of this PHP process (here: too many descriptors for the open files
+     * limit) says nothing about the host: the result is cached nowhere, and the next detection probes again.
+     */
+    public function testAProbeThatCannotRunIsNotCached(): void
+    {
+        $this->requireLevel(IsolationLevel::RLIMIT);
+        $options = (new ProcessOptions())->withResourceLimits((new ResourceLimits())->withOpenFiles(32));
+        $logger = new MemoryLogger();
+        $detector = new IsolationDetector($options, $this->cacheDirectory(), 3600, $logger);
+        $this->openDescriptors(40, true);
+
+        $detection = $detector->detect();
+
+        self::assertSame(IsolationLevel::PROCESS, $detection->getLevel());
+        self::assertSame('the probe command "cat" could not be run', $detection->getReason());
+        self::assertSame([], glob($this->cacheDirectory() . '/isolation-*.json') ?: []);
+        self::assertContains(
+            'The isolation level {level} is not cached: a probe could not be run.',
+            $logger->getMessages('debug')
+        );
+
+        $this->closeDescriptors();
+        $detection = $detector->detect();
+
+        self::assertTrue(IsolationLevel::isAtLeast($detection->getLevel(), IsolationLevel::RLIMIT));
+        self::assertSame([self::PROBED, self::PROBED], $logger->getMessages('info'), 'probed again');
+        self::assertCount(1, glob($this->cacheDirectory() . '/isolation-*.json') ?: []);
+        self::assertSame($detection, $detector->detect(), 'a complete detection is cached');
+    }
+
     public function testATtlOfZeroDisablesTheFileCache(): void
     {
         (new IsolationDetector(null, $this->cacheDirectory(), 0))->detect();

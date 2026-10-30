@@ -4,15 +4,18 @@ declare(strict_types=1);
 
 namespace Mfonte\SecureImageConverter\Tests\Integration\Isolation;
 
+use Mfonte\SecureImageConverter\Contract\Exception\ConversionFailedException;
 use Mfonte\SecureImageConverter\Contract\Exception\ConversionTimeoutException;
 use Mfonte\SecureImageConverter\Contract\Exception\ErrorCode;
 use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
 use Mfonte\SecureImageConverter\Contract\Exception\IsolationUnavailableException;
 use Mfonte\SecureImageConverter\Contract\IsolationLevel;
 use Mfonte\SecureImageConverter\Isolation\CommandBuilder;
+use Mfonte\SecureImageConverter\Isolation\OutputCapture;
 use Mfonte\SecureImageConverter\Isolation\ProcessOptions;
 use Mfonte\SecureImageConverter\Isolation\ProcessResult;
 use Mfonte\SecureImageConverter\Isolation\ProcessRunner;
+use Mfonte\SecureImageConverter\Isolation\ResourceLimits;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\Group;
@@ -23,12 +26,14 @@ use PHPUnit\Framework\Attributes\Group;
  * sandbox in SandboxTest.
  *
  * @covers \Mfonte\SecureImageConverter\Isolation\CommandBuilder
+ * @covers \Mfonte\SecureImageConverter\Isolation\OutputCapture
  * @covers \Mfonte\SecureImageConverter\Isolation\ProcessRunner
  *
  * @group isolation
  */
 #[CoversClass(ProcessRunner::class)]
 #[CoversClass(CommandBuilder::class)]
+#[CoversClass(OutputCapture::class)]
 #[Group('isolation')]
 final class ProcessRunnerTest extends IsolationTestCase
 {
@@ -398,6 +403,92 @@ final class ProcessRunnerTest extends IsolationTestCase
                 self::assertMatchesRegularExpression('#\A(/dev/null|/proc/[0-9]+/fd)\z#', $match[2]);
             }
         }
+    }
+
+    /**
+     * Descriptors with close-on-exec never reach the child, so they are neither replaced nor counted against the
+     * open files limit.
+     *
+     * @dataProvider levels
+     */
+    #[DataProvider('levels')]
+    public function testDescriptorsWithCloseOnExecAreLeftAlone(string $level): void
+    {
+        $options = (new ProcessOptions())->withResourceLimits((new ResourceLimits())->withOpenFiles(32));
+        $runner = $this->runner($level, $options);
+        $this->openDescriptors(64, false);
+
+        $result = $runner->run(['ls', '/proc/self/fd'], $this->workingDirectory());
+
+        self::assertTrue($result->isSuccessful());
+        self::assertLessThan(16, count(explode("\n", trim($result->getStdout()))), $result->getStdout());
+    }
+
+    /**
+     * proc_open() cannot close descriptors in the child, only replace them, and the replacements count against the
+     * open files limit: when they would leave too little room, the run fails before anything starts instead of
+     * letting the program fail to load (exit code 127).
+     */
+    public function testInheritedDescriptorsMustLeaveRoomBelowTheOpenFilesLimit(): void
+    {
+        $this->requireLevel(IsolationLevel::RLIMIT);
+        $limits = (new ResourceLimits())->withOpenFiles(32);
+        $options = (new ProcessOptions())->withResourceLimits($limits);
+        // Descriptors are allocated lowest first: these fill the numbers below 32.
+        $this->openDescriptors(40, true);
+
+        try {
+            (new ProcessRunner(IsolationLevel::RLIMIT, $options))->run(['true'], $this->workingDirectory());
+            self::fail('The run must be refused.');
+        } catch (ConversionFailedException $exception) {
+            self::assertSame(ErrorCode::CONVERSION_FAILED, $exception->getErrorCode());
+            self::assertMatchesRegularExpression(
+                '/\AThe [0-9]+ descriptors inherited from PHP would leave the process fewer than 16 free descriptors '
+                . 'below its open files limit of 32: raise the limit with ResourceLimits::withOpenFiles\(\) /',
+                $exception->getMessage()
+            );
+        }
+
+        $roomy = $options->withResourceLimits($limits->withOpenFiles(1024));
+        $result = (new ProcessRunner(IsolationLevel::RLIMIT, $roomy))->run(['true'], $this->workingDirectory());
+        self::assertTrue($result->isSuccessful(), 'a higher limit leaves room');
+        $result = (new ProcessRunner(IsolationLevel::PROCESS, $options))->run(['true'], $this->workingDirectory());
+        self::assertTrue($result->isSuccessful(), 'below the rlimit level there is no limit to check');
+    }
+
+    /**
+     * stream_select() cannot poll descriptors numbered 1024 or more: the pipes get such numbers when PHP holds that
+     * many descriptors open. The run must fail, and its process must be killed, instead of being reported as a
+     * success without output.
+     *
+     * @dataProvider levels
+     */
+    #[DataProvider('levels')]
+    public function testOutputThatCannotBeReadFailsTheRun(string $level): void
+    {
+        $runner = $this->runner($level);
+        self::requireOpenFilesLimit(1400);
+        $token = 'sic-unread-' . bin2hex(random_bytes(6));
+        // Directory handles have close-on-exec: the child inherits none of them, only the pipes are affected.
+        $this->openDescriptors(1100, false);
+        $started = microtime(true);
+
+        try {
+            $runner->run(['sh', '-c', 'printf output; sleep 5; : "$0"', $token], $this->workingDirectory());
+            self::fail('A run whose output cannot be read must not succeed.');
+        } catch (ConversionFailedException $exception) {
+            self::assertSame(ErrorCode::CONVERSION_FAILED, $exception->getErrorCode());
+            self::assertSame(
+                'The output of the process cannot be read: PHP holds more open descriptors than stream_select() '
+                . 'supports (FD_SETSIZE).',
+                $exception->getMessage()
+            );
+        }
+        self::assertLessThan(4.0, microtime(true) - $started, 'the run fails at once, not when the process ends');
+        self::assertSame([], self::processesWithArgument($token), 'the process was killed');
+
+        $this->closeDescriptors();
+        self::assertSame('output', $runner->run(['printf', 'output'], $this->workingDirectory())->getStdout());
     }
 
     /**

@@ -30,6 +30,11 @@ use Psr\Log\NullLogger;
  * bubblewrap or toggling kernel.apparmor_restrict_unprivileged_userns therefore invalidates the cache at once; any
  * other change is picked up when the TTL expires, or with refresh().
  *
+ * A level whose probe could not be run at all (no working directory could be created, or ProcessRunner threw: fork()
+ * failed, or this PHP process holds too many descriptors for the open files limit) is reported as unavailable, but
+ * that result is cached neither in memory nor in the file, because the cause belongs to the moment and to this PHP
+ * process rather than to the host: the next detect() probes again.
+ *
  * The cache directory must be owned by the effective user and not writable by group or others; a cache file must be
  * a regular file with the same properties. Anything else is ignored (and the detector probes), so that another
  * local user cannot plant a cached "sandbox" result to defeat a strict policy. Without the posix extension the
@@ -108,6 +113,13 @@ final class IsolationDetector
     private $result;
 
     /**
+     * Whether a probe of the current detection could not be run (see the class description).
+     *
+     * @var bool
+     */
+    private $probeFailed = false;
+
+    /**
      * @param ProcessOptions|null  $options         the options the conversions will run with; the probes use them, so
      *                                              that a level is reported only if it works with these limits, tools
      *                                              and sandbox paths
@@ -157,7 +169,7 @@ final class IsolationDetector
             }
         }
 
-        return $this->result = $this->probeAndStore($cacheFile);
+        return $this->probeAndStore($cacheFile);
     }
 
     /**
@@ -165,7 +177,7 @@ final class IsolationDetector
      */
     public function refresh(): DetectionResult
     {
-        return $this->result = $this->probeAndStore($this->cacheFile());
+        return $this->probeAndStore($this->cacheFile());
     }
 
     /**
@@ -178,6 +190,15 @@ final class IsolationDetector
             'level' => $result->getLevel(),
             'reasons' => $result->getReasons(),
         ]);
+        if ($this->probeFailed) {
+            $this->result = null;
+            $this->logger->debug('The isolation level {level} is not cached: a probe could not be run.', [
+                'level' => $result->getLevel(),
+            ]);
+
+            return $result;
+        }
+        $this->result = $result;
         if ($cacheFile !== null) {
             $this->writeCache($cacheFile['path'], $cacheFile['key'], $result);
         }
@@ -187,6 +208,7 @@ final class IsolationDetector
 
     private function probe(): DetectionResult
     {
+        $this->probeFailed = false;
         $level = IsolationLevel::NONE;
         $reasons = [];
         $workingDirectory = null;
@@ -196,6 +218,7 @@ final class IsolationDetector
                     try {
                         $workingDirectory = WorkingDirectory::create();
                     } catch (ExceptionInterface $exception) {
+                        $this->probeFailed = true;
                         $reasons[$candidate] = 'no private working directory could be created for the probe';
                         break;
                     }
@@ -246,6 +269,7 @@ final class IsolationDetector
         try {
             $result = $runner->execute($command, $workingDirectory);
         } catch (ExceptionInterface $exception) {
+            $this->probeFailed = true;
             $this->logger->debug('The {level} isolation probe could not run: {message}', [
                 'level' => $level,
                 'message' => $exception->getMessage(),

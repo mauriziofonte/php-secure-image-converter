@@ -39,12 +39,20 @@ use Mfonte\SecureImageConverter\Contract\IsolationLevel;
  * IsolationPolicy decides which one to use.
  *
  * Standard input is /dev/null, or a file; stdout and stderr are captured through non-blocking pipes polled with
- * stream_select(), up to ProcessOptions::getMaxOutputBytes() each; further output is read and discarded.
+ * stream_select(), up to ProcessOptions::getMaxOutputBytes() each; further output is read and discarded (see
+ * OutputCapture). When the pipes cannot be polled, because PHP holds 1024 or more descriptors open (FD_SETSIZE), the
+ * run fails with ConversionFailedException: a run whose output was not read is never reported as successful.
  *
  * proc_open() lets the child inherit every descriptor PHP holds open without close-on-exec: in PHP-FPM that can be
  * the FastCGI connection, database and cache sockets or open files, which would give a compromised decoder a way
- * around the sandbox's network isolation. Every descriptor above 2 that is open in PHP when the run starts is
- * therefore replaced with /dev/null in the child.
+ * around the sandbox's network isolation. proc_open() cannot close a descriptor in the child, so every descriptor
+ * above 2 that is open in PHP without close-on-exec when the run starts (read from /proc/self/fdinfo; without it,
+ * every open descriptor) is replaced with /dev/null in the child instead. These replacements occupy descriptor
+ * numbers in the child, and at the rlimit and sandbox levels the open files limit (ResourceLimits::getOpenFiles())
+ * caps those numbers: the run fails with ConversionFailedException, before anything starts, when the standard
+ * streams and the replacements below the limit would leave the program fewer than MIN_FREE_DESCRIPTORS free (half
+ * the limit, for a limit below 32), instead of letting it fail to load its libraries. Raise the limit with
+ * ResourceLimits::withOpenFiles() if PHP keeps many descriptors open.
  *
  * Usage, for a backend:
  *
@@ -74,7 +82,17 @@ final class ProcessRunner
 
     private const SIGTERM = 15;
 
-    private const READ_CHUNK_BYTES = 65536;
+    /**
+     * Descriptors that must stay free below the open files limit, at the rlimit and sandbox levels, after the
+     * standard streams and the descriptors inherited from PHP: enough for bubblewrap, the dynamic loader and a
+     * decoder's input and output files. Half the limit is enough for a limit below 32.
+     */
+    public const MIN_FREE_DESCRIPTORS = 16;
+
+    /**
+     * O_CLOEXEC as shown in the flags of /proc/self/fdinfo on x86, ARM, RISC-V, PowerPC, s390 and MIPS.
+     */
+    private const O_CLOEXEC = 0x80000;
 
     /**
      * Longest wait in stream_select() before the process status is polled again.
@@ -194,7 +212,8 @@ final class ProcessRunner
      * @throws InvalidArgumentException      when the command (a NUL byte, a command line longer than
      *                                       CommandBuilder::MAX_COMMAND_LINE_BYTES), the input or the working
      *                                       directory is invalid
-     * @throws ConversionFailedException     when the process cannot be started or its status is lost
+     * @throws ConversionFailedException     when the process cannot be started, its output cannot be read, PHP holds
+     *                                       too many descriptors for the open files limit, or its status is lost
      */
     public function run(
         array $command,
@@ -221,7 +240,8 @@ final class ProcessRunner
      *
      * @throws IsolationUnavailableException when the level of this runner is not available on the host
      * @throws InvalidArgumentException      when the command, the input or the working directory is invalid
-     * @throws ConversionFailedException     when the process cannot be started or its status is lost
+     * @throws ConversionFailedException     when the process cannot be started, its output cannot be read, PHP holds
+     *                                       too many descriptors for the open files limit, or its status is lost
      */
     public function execute(
         array $command,
@@ -255,11 +275,15 @@ final class ProcessRunner
                 CommandBuilder::MAX_COMMAND_LINE_BYTES
             ));
         }
+        $inherited = self::inheritedDescriptors();
+        if (IsolationLevel::isAtLeast($this->level, IsolationLevel::RLIMIT)) {
+            $this->checkOpenFilesLimit(array_keys($inherited));
+        }
         $descriptors = [
             0 => ['file', $stdinPath === null ? '/dev/null' : $stdinPath, 'r'],
             1 => ['pipe', 'w'],
             2 => ['pipe', 'w'],
-        ] + self::inheritedDescriptors();
+        ] + $inherited;
 
         $environment = $this->builder->environment($directory);
 
@@ -293,13 +317,7 @@ final class ProcessRunner
             throw new ConversionFailedException('The process could not be started.');
         }
 
-        /** @var array<int, resource> $streams */
-        $streams = [1 => $pipes[1], 2 => $pipes[2]];
-        foreach ($streams as $stream) {
-            stream_set_blocking($stream, false);
-        }
-        $output = [1 => '', 2 => ''];
-        $truncated = [1 => false, 2 => false];
+        $capture = new OutputCapture([1 => $pipes[1], 2 => $pipes[2]], $this->options->getMaxOutputBytes());
         $status = null;
         $timedOut = false;
         $pid = 0;
@@ -311,43 +329,47 @@ final class ProcessRunner
             $pid = self::pidOf($initial);
             $status = self::interpret($initial);
             if ($status === null) {
-                $status = $this->pump($process, $streams, $output, $truncated, $deadline);
+                $status = $this->pump($process, $capture, $deadline);
             }
             if ($status === null) {
                 $timedOut = true;
                 $this->signal($process, $pid, self::SIGTERM);
-                $status = $this->pump(
-                    $process,
-                    $streams,
-                    $output,
-                    $truncated,
-                    self::now() + $this->options->getKillGraceSeconds()
-                );
+                $status = $this->pump($process, $capture, self::now() + $this->options->getKillGraceSeconds());
                 if ($status === null) {
                     $this->signal($process, $pid, self::SIGKILL);
-                    $reapDeadline = self::now() + self::REAP_TIMEOUT_SECONDS;
-                    $status = $this->pump($process, $streams, $output, $truncated, $reapDeadline);
+                    $status = $this->pump($process, $capture, self::now() + self::REAP_TIMEOUT_SECONDS);
                 }
             }
             // Background descendants that stayed in the process group must not outlive the run.
             $this->killGroup($pid);
-            $this->drain($streams, $output, $truncated, self::now() + self::DRAIN_TIMEOUT_SECONDS);
-        } finally {
-            foreach ($streams as $stream) {
-                fclose($stream);
-            }
+            $this->drain($capture, self::now() + self::DRAIN_TIMEOUT_SECONDS);
+        } catch (\Throwable $exception) {
+            // The output cannot be read (or something else failed): the run is abandoned, and neither the process
+            // nor its group may live on.
+            $capture->close();
             if ($status === null) {
-                // Not reaped (an exception, or a process stuck in the kernel after SIGKILL): kill it again and let
-                // the resource go without the blocking wait of proc_close().
                 $this->signal($process, $pid, self::SIGKILL);
-            } else {
+                $status = $this->pump($process, $capture, self::now() + self::REAP_TIMEOUT_SECONDS);
+            }
+            $this->killGroup($pid);
+            if ($status !== null) {
                 proc_close($process);
             }
+
+            throw $exception;
+        }
+        $capture->close();
+        if ($status === null) {
+            // Not reaped (a process stuck in the kernel after SIGKILL): kill it again and let the resource go without
+            // the blocking wait of proc_close().
+            $this->signal($process, $pid, self::SIGKILL);
+        } else {
+            proc_close($process);
         }
         $duration = max(0.0, self::now() - $start);
 
         if ($status === null) {
-            return $this->result(null, self::SIGKILL, true, $duration, $output, $truncated);
+            return $this->result(null, self::SIGKILL, true, $duration, $capture);
         }
         if ($status['signal'] === null && $status['exit'] === null) {
             throw new ConversionFailedException(
@@ -355,25 +377,34 @@ final class ProcessRunner
             );
         }
 
-        return $this->result($status['exit'], $status['signal'], $timedOut, $duration, $output, $truncated);
+        return $this->result($status['exit'], $status['signal'], $timedOut, $duration, $capture);
     }
 
     /**
-     * Descriptor specifications that replace, in the child, every descriptor above 2 open in this PHP process with
-     * /dev/null, so that none of them is inherited. The open descriptors are listed from /proc/self/fd (Linux) or
-     * /dev/fd.
+     * Descriptor specifications that replace, in the child, every descriptor above 2 that this PHP process holds open
+     * without close-on-exec with /dev/null, so that none of them is inherited. The open descriptors are listed from
+     * /proc/self/fd (Linux) or /dev/fd; descriptors with close-on-exec, which the child never receives, are left out
+     * where /proc/self/fdinfo tells.
      *
-     * @return array<int, list<string>>
+     * @return array<int, list<string>> keyed by descriptor number
      */
     private static function inheritedDescriptors(): array
     {
+        $fromProc = true;
         $entries = @scandir('/proc/self/fd');
         if (!is_array($entries)) {
+            $fromProc = false;
             $entries = @scandir('/dev/fd');
         }
+        // O_CLOEXEC has another value on a few rare architectures: there every open descriptor is replaced.
+        $checkFlags = $fromProc
+            && preg_match('/\A(x86_64|i[3-6]86|aarch64|arm|riscv|ppc|s390|mips)/', php_uname('m')) === 1;
         $descriptors = [];
         foreach (is_array($entries) ? $entries : [] as $entry) {
-            if (preg_match('/\A[0-9]{1,9}\z/', $entry) === 1 && (int) $entry > 2) {
+            if (preg_match('/\A[0-9]{1,9}\z/', $entry) !== 1 || (int) $entry <= 2) {
+                continue;
+            }
+            if (!$checkFlags || self::isInheritable((int) $entry)) {
                 $descriptors[(int) $entry] = ['file', '/dev/null', 'r'];
             }
         }
@@ -382,16 +413,63 @@ final class ProcessRunner
     }
 
     /**
+     * Whether a descriptor listed in /proc/self/fd is still open without close-on-exec. Its flags are read from
+     * /proc/self/fdinfo; when they cannot be read or parsed, an open descriptor counts as inheritable.
+     */
+    private static function isInheritable(int $descriptor): bool
+    {
+        $info = @file_get_contents('/proc/self/fdinfo/' . $descriptor);
+        if (!is_string($info)) {
+            // Closed since it was listed (such as the descriptor scandir() used), or fdinfo is unreadable.
+            return is_string(@readlink('/proc/self/fd/' . $descriptor));
+        }
+        if (preg_match('/^flags:\s*([0-7]{1,11})\s*$/m', $info, $match) !== 1) {
+            return true;
+        }
+
+        return ((int) octdec($match[1]) & self::O_CLOEXEC) === 0;
+    }
+
+    /**
+     * Fails when the descriptors replaced with /dev/null leave the program too few free descriptor numbers below the
+     * open files limit (see the class description).
+     *
+     * @param list<int> $inherited descriptor numbers above 2 that the child receives
+     *
+     * @throws ConversionFailedException when too few descriptors would be free
+     */
+    private function checkOpenFilesLimit(array $inherited): void
+    {
+        $limit = $this->options->getResourceLimits()->getOpenFiles();
+        $below = 0;
+        foreach ($inherited as $descriptor) {
+            if ($descriptor < $limit) {
+                ++$below;
+            }
+        }
+        $required = min(self::MIN_FREE_DESCRIPTORS, intdiv($limit, 2));
+        if ($limit - 3 - $below < $required) {
+            throw new ConversionFailedException(sprintf(
+                'The %d descriptors inherited from PHP would leave the process fewer than %d free descriptors below '
+                . 'its open files limit of %d: raise the limit with ResourceLimits::withOpenFiles() or keep fewer '
+                . 'descriptors open in PHP.',
+                $below,
+                $required,
+                $limit
+            ));
+        }
+    }
+
+    /**
      * Reads the output and polls the process until it ends or $until passes.
      *
-     * @param resource             $process
-     * @param array<int, resource> $streams   open output pipes; closed ones are removed
-     * @param array<int, string>   $output
-     * @param array<int, bool>     $truncated
+     * @param resource $process
+     *
+     * @throws ConversionFailedException when the output cannot be read
      *
      * @return array{exit: int|null, signal: int|null}|null how the process ended, or null when it is still running
      */
-    private function pump($process, array &$streams, array &$output, array &$truncated, float $until): ?array
+    private function pump($process, OutputCapture $capture, float $until): ?array
     {
         $sleep = 0.001;
         while (true) {
@@ -403,8 +481,8 @@ final class ProcessRunner
             if ($remaining <= 0.0) {
                 return null;
             }
-            if ($streams !== []) {
-                $this->read($streams, $output, $truncated, min($remaining, self::SELECT_SLICE_SECONDS));
+            if ($capture->isOpen()) {
+                $capture->read(min($remaining, self::SELECT_SLICE_SECONDS));
             } else {
                 // Both pipes are closed but the process is still running: poll with a short, growing sleep.
                 usleep((int) ceil(min($remaining, $sleep) * 1000000));
@@ -416,62 +494,16 @@ final class ProcessRunner
     /**
      * Reads what is left in the pipes, until they are closed or $until passes.
      *
-     * @param array<int, resource> $streams
-     * @param array<int, string>   $output
-     * @param array<int, bool>     $truncated
+     * @throws ConversionFailedException when the output cannot be read
      */
-    private function drain(array &$streams, array &$output, array &$truncated, float $until): void
+    private function drain(OutputCapture $capture, float $until): void
     {
-        while ($streams !== []) {
+        while ($capture->isOpen()) {
             $remaining = $until - self::now();
             if ($remaining <= 0.0) {
                 return;
             }
-            $this->read($streams, $output, $truncated, min($remaining, self::SELECT_SLICE_SECONDS));
-        }
-    }
-
-    /**
-     * Waits up to $timeout seconds for output, then reads one chunk from each ready pipe.
-     *
-     * @param array<int, resource> $streams
-     * @param array<int, string>   $output
-     * @param array<int, bool>     $truncated
-     */
-    private function read(array &$streams, array &$output, array &$truncated, float $timeout): void
-    {
-        $ready = $streams;
-        $write = null;
-        $except = null;
-        $seconds = (int) floor($timeout);
-        $microseconds = (int) (($timeout - $seconds) * 1000000);
-        // stream_select() warns and returns false when a signal interrupts it; the caller simply polls again.
-        $count = @stream_select($ready, $write, $except, $seconds, $microseconds);
-        if ($count === false) {
-            usleep(1000);
-
-            return;
-        }
-        foreach ($ready as $stream) {
-            $key = array_search($stream, $streams, true);
-            if (!is_int($key)) {
-                continue;
-            }
-            // A read error (false) counts as the end of the stream.
-            $chunk = (string) @fread($stream, self::READ_CHUNK_BYTES);
-            if ($chunk === '') {
-                if (feof($stream)) {
-                    fclose($stream);
-                    unset($streams[$key]);
-                }
-                continue;
-            }
-            $room = $this->options->getMaxOutputBytes() - strlen($output[$key]);
-            if (strlen($chunk) > $room) {
-                $truncated[$key] = true;
-                $chunk = $room > 0 ? (string) substr($chunk, 0, $room) : '';
-            }
-            $output[$key] .= $chunk;
+            $capture->read(min($remaining, self::SELECT_SLICE_SECONDS));
         }
     }
 
@@ -541,27 +573,22 @@ final class ProcessRunner
         return IsolationLevel::isAtLeast($this->level, IsolationLevel::PROCESS);
     }
 
-    /**
-     * @param array<int, string> $output
-     * @param array<int, bool>   $truncated
-     */
     private function result(
         ?int $exitCode,
         ?int $signal,
         bool $timedOut,
         float $duration,
-        array $output,
-        array $truncated
+        OutputCapture $capture
     ): ProcessResult {
         return new ProcessResult(
             $exitCode,
             $signal,
             $timedOut,
             $duration,
-            $output[1],
-            $output[2],
-            $truncated[1],
-            $truncated[2],
+            $capture->getStdout(),
+            $capture->getStderr(),
+            $capture->isStdoutTruncated(),
+            $capture->isStderrTruncated(),
             $this->level
         );
     }
