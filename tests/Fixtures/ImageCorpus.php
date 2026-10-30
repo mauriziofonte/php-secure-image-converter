@@ -307,7 +307,39 @@ final class ImageCorpus
                 self::reject(ErrorCode::INVALID_IMAGE)
             ),
             'png/truncated.png' => self::committed((string) substr($valid, 0, -20), self::reject(ErrorCode::INVALID_IMAGE)),
+        ] + self::pngColourChunkCases($withPalette);
+    }
+
+    /**
+     * Images of each colour type with a bKGD, sBIT or tRNS chunk as long as its fields, which is not metadata, and
+     * with one a byte longer, which is. The palette image has two entries, so one transparency byte more stays within
+     * its PLTE chunk.
+     *
+     * @param \Closure(string): string $withPalette the palette image with chunks after its PLTE chunk
+     *
+     * @return array<string, array{bytes: string, committed: bool, expect: array<string, bool|int|string>}>
+     */
+    private static function pngColourChunkCases(\Closure $withPalette): array
+    {
+        $fields = [
+            'bKGD' => [0 => 2, 2 => 6, 3 => 1, 4 => 2, 6 => 6],
+            'sBIT' => [0 => 1, 2 => 3, 3 => 3, 4 => 2, 6 => 4],
+            'tRNS' => [0 => 2, 2 => 6, 3 => 2, 4 => 0, 6 => 0],
         ];
+        $cases = [];
+        foreach ($fields as $type => $lengths) {
+            foreach ($lengths as $colourType => $length) {
+                foreach ([$length, $length + 1] as $size) {
+                    // sBIT values are significant bits, from 1 to the bit depth; bKGD and tRNS hold samples.
+                    $chunk = ImageBuilder::pngChunk($type, ImageBuilder::repeat($type === 'sBIT' ? "\x08" : "\x00", $size));
+                    $bytes = $colourType === 3 && $type !== 'sBIT' ? $withPalette($chunk) : ImageBuilder::png(4, 4, 8, $colourType, $chunk);
+                    $name = sprintf('png/valid-%s-of-%d-bytes-in-colour-type-%d.png', strtolower($type), $size, $colourType);
+                    $cases[$name] = self::generated($bytes, self::accept(ImageFormat::PNG, 4, 4, 1, ['metadata' => $size > $length]));
+                }
+            }
+        }
+
+        return $cases;
     }
 
     /**
@@ -735,7 +767,8 @@ final class ImageCorpus
                 self::reject(ErrorCode::INVALID_IMAGE)
             ),
             'avif/unsupported-second-sample-entry.avif' => self::committed(self::avifWithOtherSampleEntries(1), self::reject(ErrorCode::UNSUPPORTED_FORMAT)),
-            // The sample description table may not hold more entries than allowed, whatever they are.
+            // The sample description table may hold the most entries allowed, whatever they are, and not one more.
+            'avif/unsupported-most-sample-entries.avif' => self::committed(self::avifWithOtherSampleEntries(AvifParser::MAX_ENTRIES - 1), self::reject(ErrorCode::UNSUPPORTED_FORMAT)),
             'avif/spoof-too-many-sample-entries.avif' => self::committed(self::avifWithOtherSampleEntries(AvifParser::MAX_ENTRIES), self::reject(ErrorCode::INVALID_IMAGE)),
             // libavif writes the sequence header in av1C too; libheif feeds those configuration OBUs to the decoder
             // before the data of the item, so they may not hold a larger sequence header or frame.
