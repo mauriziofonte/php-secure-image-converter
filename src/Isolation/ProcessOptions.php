@@ -93,9 +93,13 @@ final class ProcessOptions
      * symbolic link such as /bin -> usr/bin on merged-/usr systems is recreated as a link) and the dynamic loader
      * configuration. Debian's /etc/alternatives is included because many commands in /usr/bin link through it.
      *
-     * All of /usr is visible, read-only, except DEFAULT_SANDBOX_HIDDEN_PATHS: programs, libraries and shared data,
-     * which the Filesystem Hierarchy Standard keeps free of host-specific configuration and secrets. Nothing outside
-     * these paths is visible: no /home, no /var, no other file of /etc, and an empty /tmp (see CommandBuilder).
+     * All of /usr is visible, read-only, except DEFAULT_SANDBOX_HIDDEN_PATHS. /usr is meant for programs, libraries
+     * and shared data, but the Filesystem Hierarchy Standard does not stop a host from keeping configuration there,
+     * above all under /usr/local: the hidden paths cover the known places (the official PHP images keep their
+     * configuration in /usr/local/etc), and a host that keeps other configuration or secrets under /usr must add
+     * those paths to the hidden ones, or narrow the read-only paths to the directories its tools need. Nothing
+     * outside these paths is visible: no /home, no /var, no other file of /etc, and an empty /tmp (see
+     * CommandBuilder).
      */
     public const DEFAULT_SANDBOX_READ_ONLY_PATHS = [
         '/usr',

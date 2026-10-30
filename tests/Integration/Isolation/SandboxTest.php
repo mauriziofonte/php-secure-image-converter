@@ -15,8 +15,9 @@ use PHPUnit\Framework\Attributes\Group;
 
 /**
  * Proves the bubblewrap sandbox: no network, read-only system, no host data, host configuration below /usr hidden,
- * an empty read-only /tmp, only the working directory writable (nothing can be stored in memory), no capabilities,
- * resource limits inside, and every process of the sandbox killed with it.
+ * an empty read-only /tmp, only the working directory writable (no file can be stored in memory; memfd and System V
+ * shared memory are bounded only by a cgroup limit, see CommandBuilder), no capabilities, resource limits inside,
+ * and every process of the sandbox killed with it.
  *
  * Skipped where bubblewrap cannot run (for example in a container with Docker's default seccomp profile); the CI job
  * "isolation" installs bubblewrap and sets SIC_EXPECTED_ISOLATION_LEVEL=sandbox, so that there these tests run or
@@ -158,8 +159,9 @@ final class SandboxTest extends IsolationTestCase
     }
 
     /**
-     * No path outside the working directory accepts a file: the file systems in memory are read-only, so the
-     * address space limit bounds all the memory the sandbox can use.
+     * No path outside the working directory accepts a file: the file systems in memory are read-only, so no file can
+     * be stored in memory (memory held without a file system, such as memfd and System V shared memory, needs a
+     * cgroup limit, see CommandBuilder).
      */
     public function testNothingCanBeStoredOutsideTheWorkingDirectory(): void
     {

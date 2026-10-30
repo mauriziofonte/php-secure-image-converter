@@ -20,11 +20,14 @@ use Mfonte\SecureImageConverter\Contract\IsolationLevel;
  *
  * Every file system that bubblewrap creates in memory (the root, /tmp, the /dev tmpfs with /dev/shm, and the ones
  * over the hidden paths) is made read-only once the mount points it needs exist in it: /tmp shows nothing but the
- * mount points of the working directory and the per-run paths, and the sandbox cannot store data in memory outside
- * its address space limit. This is why no tmpfs size limit (--size, bubblewrap 0.10+, newer than the 0.9 of Ubuntu
- * 24.04 and the 0.8 of Debian 12) is needed. Programs write their temporary files to the working directory
- * (TMPDIR), which is on disk: RLIMIT_FSIZE bounds each file, but not their number or total size; put the working
- * directories on a file system with a quota where that matters.
+ * mount points of the working directory and the per-run paths, and no file can be stored there, so no tmpfs size
+ * limit (--size, bubblewrap 0.10+, newer than the 0.9 of Ubuntu 24.04 and the 0.8 of Debian 12) is needed. This does
+ * not bound the memory of the sandbox: the address space limit (RLIMIT_AS) applies to each process separately, and
+ * memory that no process maps, such as memfd_create() files and System V shared memory segments in the private IPC
+ * namespace, is not counted at all. Bound the total memory with a cgroup limit on the service that runs PHP (systemd
+ * MemoryMax=, docker run --memory, a Kubernetes memory limit). Programs write their temporary files to the working
+ * directory (TMPDIR), which is on disk: RLIMIT_FSIZE bounds each file, but not their number or total size; put the
+ * working directories on a file system with a quota where that matters.
  *
  * Every element is passed as a separate argument: no shell ever parses the command (see toShellCommand() for PHP
  * 7.2 and 7.3).
