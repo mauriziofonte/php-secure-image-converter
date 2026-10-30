@@ -16,13 +16,14 @@ use Mfonte\SecureImageConverter\Validation\Limits;
  * each image item and of the first sample of each track, without decoding any AV1 frame.
  *
  * - Boxes must nest inside their parent and the top-level boxes must tile the file up to its end: a truncated file is
- *   refused. At most MAX_BOXES boxes are visited, MAX_ENTRIES entries read from any table, MAX_REFERENCES item
- *   references (iref), and MAX_ASSOCIATIONS property associations (ipma) and item extents (iloc) in all; the ftyp box
- *   is at most 4 KiB and must list an "avif" or "avis" brand, and an infe box is at most 1 KiB. A box that a decoder reads once (ftyp, meta and moov at the top;
- *   hdlr, pitm, iloc, iinf, iprp, iref, idat and dinf in meta; ipco and ipma in iprp; the boxes of a track's media and
- *   sample tables, and av1C in its AV1 sample entry) may not appear twice, an item may not be described or associated
- *   twice, and an image item may not have two ispe, av1C, pixi, irot or imir properties: decoders disagree on which
- *   copy wins.
+ *   refused. At most MAX_BOXES boxes are visited, MAX_ITEMS entries read from the item information (iinf), location
+ *   (iloc) and property association (ipma) tables, MAX_ENTRIES from the property and sample description tables,
+ *   MAX_REFERENCES item references (iref), and MAX_ASSOCIATIONS property associations (ipma) and item extents (iloc)
+ *   in all; the ftyp box is at most 4 KiB and must list an "avif" or "avis" brand, and an infe box is at most 1 KiB. A
+ *   box that a decoder reads once (ftyp, meta and moov at the top; hdlr, pitm, iloc, iinf, iprp, iref, idat and dinf
+ *   in meta; ipco and ipma in iprp; the boxes of a track's media and sample tables, and av1C in its AV1 sample entry)
+ *   may not appear twice, an item may not be described or associated twice, and an image item may not have two ispe,
+ *   av1C, pixi, irot or imir properties: decoders disagree on which copy wins.
  * - Still image (meta box): the handler must be "pict" and the primary item (pitm) an AV1 image ("av01"). Items other
  *   than AV1 images, EXIF ("Exif"), URIs ("uri ") and MIME items of a content type other than an image (XMP) are
  *   refused as unsupported: grids and other derived images, and images coded otherwise, which libheif decodes too.
@@ -52,19 +53,26 @@ use Mfonte\SecureImageConverter\Validation\Limits;
 final class AvifParser implements ParserInterface
 {
     /**
-     * Largest number of boxes visited in a file.
+     * Largest number of boxes visited in a file: real files have a few dozen, a few hundred with many tracks.
      */
-    public const MAX_BOXES = 16384;
+    public const MAX_BOXES = 4096;
 
     /**
-     * Largest number of entries read from an item, property, association, location or sample description table.
+     * Largest number of entries read from the property or sample description table.
      */
-    public const MAX_ENTRIES = 4096;
+    public const MAX_ENTRIES = 1024;
 
     /**
-     * Largest number of property associations in the ipma box, and of extents in the iloc box, all entries together.
+     * Largest number of items, and of entries read from the item information, location or property association table:
+     * real files hold an image, its alpha plane and thumbnail, and a few metadata items.
      */
-    public const MAX_ASSOCIATIONS = 16384;
+    public const MAX_ITEMS = 64;
+
+    /**
+     * Largest number of property associations in the ipma box, and of extents in the iloc box, all entries together:
+     * real files associate a few properties with each item and store each item in one extent.
+     */
+    public const MAX_ASSOCIATIONS = 1024;
 
     /**
      * Largest number of AV1 image items, and of AV1 tracks, in a file.
@@ -488,7 +496,7 @@ final class AvifParser implements ParserInterface
         $reader->seek($start);
         $version = self::readFullBoxHeader($reader, $end, 1);
         $count = $version === 0 ? self::readUint16($reader, $end) : self::readUint32($reader, $end);
-        if ($count > self::MAX_ENTRIES) {
+        if ($count > self::MAX_ITEMS) {
             throw self::invalid('the iinf box has too many entries');
         }
 
@@ -606,7 +614,7 @@ final class AvifParser implements ParserInterface
         $reader->seek($start);
         $version = self::readFullBoxHeader($reader, $end, 1, $flags);
         $count = self::readUint32($reader, $end);
-        if ($count > self::MAX_ENTRIES) {
+        if ($count > self::MAX_ITEMS) {
             throw self::invalid('the ipma box has too many entries');
         }
         $wide = ($flags & 0x01) !== 0;
@@ -667,7 +675,7 @@ final class AvifParser implements ParserInterface
             }
         }
         $count = $version < 2 ? self::readUint16($reader, $end) : self::readUint32($reader, $end);
-        if ($count > self::MAX_ENTRIES) {
+        if ($count > self::MAX_ITEMS) {
             throw self::invalid('the iloc box has too many entries');
         }
         $extentSize = $indexSize + $offsetSize + $lengthSize;

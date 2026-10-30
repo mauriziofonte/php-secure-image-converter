@@ -643,6 +643,15 @@ final class ImageCorpus
                 ImageBuilder::avifOfItems([1 => "av01\0"], ImageBuilder::repeat(ImageBuilder::avifReference('cdsc', 1, 1), AvifParser::MAX_REFERENCES + 1)),
                 self::reject(ErrorCode::INVALID_IMAGE)
             ),
+            // The most items a file may describe, then one too many: the image and EXIF items.
+            'avif/valid-most-items.avif' => self::committed(
+                ImageBuilder::avifOfItems([1 => "av01\0"] + array_fill(2, AvifParser::MAX_ITEMS - 1, "Exif\0")),
+                self::accept(ImageFormat::AVIF, 8, 8, 1, ['exif' => true, 'metadata' => true])
+            ),
+            'avif/spoof-too-many-items.avif' => self::committed(
+                ImageBuilder::avifOfItems([1 => "av01\0"] + array_fill(2, AvifParser::MAX_ITEMS, "Exif\0")),
+                self::reject(ErrorCode::INVALID_IMAGE)
+            ),
             // Decoders read the first copy of a box or property, so a second copy must not hide a large first one.
             'avif/spoof-two-pixi.avif' => self::committed(
                 ImageBuilder::avifOfItems([1 => "av01\0"], '', ImageBuilder::isoFullBox('pixi', 0, "\x03\x10\x10\x10"), [1 => [5]]),
@@ -980,7 +989,7 @@ final class ImageCorpus
      */
     private static function avifOfAssociations(int $total): string
     {
-        $items = AvifParser::MAX_ENTRIES;
+        $items = AvifParser::MAX_ITEMS;
         $payload = pack('NN', 1, $items) . pack('nC', 1, 4) . pack('nnnn', 1, 2, 0x8003, 4);
         for ($item = 2; $item <= $items; ++$item) {
             $count = intdiv($total - 4, $items - 1) + ($item - 2 < ($total - 4) % ($items - 1) ? 1 : 0);
@@ -998,7 +1007,7 @@ final class ImageCorpus
      */
     private static function avifOfExtents(int $total): string
     {
-        $items = AvifParser::MAX_ENTRIES;
+        $items = AvifParser::MAX_ITEMS;
         $payload = pack('NCCn', 0x01000000, 0x88, 0x88, $items);
         // Item ID, construction method, data reference, base offset, extent count, then extent index, offset, length.
         $extentOffset = strlen($payload) + 2 + 2 + 2 + 8 + 2 + 8;
