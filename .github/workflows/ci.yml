@@ -241,18 +241,24 @@ jobs:
   # and the highest supported PHP. SIC_EXPECTED_BACKENDS makes a test of a
   # backend that is missing or lacks its reference capabilities fail instead
   # of skipping. The packages are those of tests/docker/Dockerfile; the page
-  # in /usr/share/nginx/html is one that no backend may see.
+  # in /usr/share/nginx/html is one that no backend may see. The group
+  # "slow" (highest-effort AVIF of large screenshots and GIFs; avifenc
+  # takes minutes per megapixel) runs once, with every backend, on the
+  # highest PHP ("all-slow"); the other jobs exclude it.
   backends:
     name: Backends (PHP ${{ matrix.php }}, ${{ matrix.backends }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: ${{ matrix.backends == 'all-slow' && 240 || 45 }}
     strategy:
       fail-fast: false
       matrix:
         php: ['7.2', '8.5']
         backends: [all, vips, cwebp, gif2webp, avifenc, imagick, gd]
+        include:
+          - php: '8.5'
+            backends: all-slow
     env:
-      SIC_BACKENDS: ${{ matrix.backends == 'all' && 'vips,cwebp,gif2webp,avifenc,imagick,gd' || matrix.backends }}
+      SIC_BACKENDS: ${{ startsWith(matrix.backends, 'all') && 'vips,cwebp,gif2webp,avifenc,imagick,gd' || matrix.backends }}
     steps:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -310,4 +316,5 @@ jobs:
         env:
           SIC_EXPECTED_BACKENDS: ${{ env.SIC_BACKENDS }}
           SIC_EXPECTED_ISOLATION_LEVEL: sandbox
-        run: vendor/bin/phpunit --group backends
+          GROUPS: ${{ matrix.backends == 'all-slow' && '--group slow' || '--group backends --exclude-group slow' }}
+        run: vendor/bin/phpunit $GROUPS

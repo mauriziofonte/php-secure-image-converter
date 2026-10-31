@@ -8,7 +8,10 @@
 #     --security-opt systempaths=unconfined \
 #     -v "$PWD:/src" -w /src -e SIC_EXPECTED_ISOLATION_LEVEL=sandbox \
 #     -e SIC_EXPECTED_BACKENDS=vips,cwebp,gif2webp,avifenc,imagick,gd \
-#     sic-backends php vendor/bin/phpunit --group backends
+#     sic-backends php vendor/bin/phpunit --group backends --exclude-group slow
+#
+# The group "slow" (highest-effort AVIF of large screenshots and GIFs) takes
+# over an hour: run it on its own with --group slow.
 #
 # Docker's default seccomp and AppArmor profiles forbid the user namespaces
 # that bubblewrap needs: without the security options the tests run at the
