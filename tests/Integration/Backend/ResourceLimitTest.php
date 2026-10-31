@@ -231,8 +231,8 @@ final class ResourceLimitTest extends BackendTestCase
     }
 
     /**
-     * A slow job under a CPU time limit of one second fails with ResourceLimitException, from the kill and not from
-     * the memory estimate: a noisy image at the highest effort, of 6 megapixels to AVIF, or of 20 megapixels to
+     * A slow job under a CPU time limit of one second fails with ResourceLimitException, from the kill and neither
+     * from the memory estimate nor from the address space limit: a noisy image at the highest effort, of 6 megapixels to AVIF, or of 20 megapixels to
      * lossless WEBP (GD's encoder ignores the effort: its worker took 2.3 seconds of CPU time for 6 megapixels in
      * tests/docker and 8.1 for 20, and converted 6 megapixels within the limit on GitHub's runners).
      *
@@ -248,7 +248,7 @@ final class ResourceLimitTest extends BackendTestCase
         $backend = BackendFactory::create($name, self::hostRunner($options), self::backendOptions());
         self::assertInstanceOf(AbstractBackend::class, $backend);
         $capabilities = $backend->getCapabilities();
-        self::requireAvailable($capabilities);
+        self::requireAvailable($capabilities, $backend);
         if (!in_array(ImageFormat::PNG, $capabilities->getInputFormats(), true)) {
             self::markTestSkipped(sprintf('The %s backend does not decode PNG.', $name));
         }
@@ -264,8 +264,15 @@ final class ResourceLimitTest extends BackendTestCase
         }
         self::assertLessThanOrEqual(self::backendOptions()->getMemoryCeilingBytes(), $backend->estimateMemoryBytes($job), 'the job is admitted');
 
-        $this->expectException(ResourceLimitException::class);
-        $backend->convert($job);
+        try {
+            $backend->convert($job);
+            self::fail(sprintf('The %s backend converted the job within one second of CPU time.', $name));
+        } catch (ResourceLimitException $exception) {
+            // The CPU limit kills with a signal: SIGXCPU, or SIGKILL at the hard limit (prlimit sets both).
+            // The address space limit makes an allocation fail instead, which the backend reports as a memory or
+            // pixel budget exceeded or as memory exhaustion, never as a kill.
+            self::assertMatchesRegularExpression('/ was killed \(signal (?:9|24)\): /', $exception->getMessage());
+        }
     }
 
     private function assertContentJobs(string $mode, string $input, bool $slow): void
