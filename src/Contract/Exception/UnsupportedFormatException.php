@@ -10,10 +10,10 @@ namespace Mfonte\SecureImageConverter\Contract\Exception;
  * when enabled), or the input is a variant of an identified format that the library does not accept: a coding the
  * backends do not decode (12- or 16-bit, lossless or hierarchical JPEG; BMP and TIFF compression schemes outside the
  * supported set; AVIF images not coded in AV1), a structure it does not convert (AVIF grids and other derived images,
- * AVIF items stored in another file or in several extents, several images in one AVIF or BMP file, BMP files with
- * embedded JPEG or PNG data, OS/2 2.x BMP headers, BMP colour profiles linked by file name), or more scans, runs, items
- * or tracks than the validation reads. Also thrown by ImageFormat::fromMimeType() for a MIME type that is not a known
- * image type.
+ * AVIF items stored in another file, by reference or in several extents, AVIF tracks with several sample descriptions,
+ * several images in one AVIF or BMP file, BMP files with embedded JPEG or PNG data, OS/2 2.x BMP headers, BMP colour
+ * profiles linked by file name), or more scans, runs, items or tracks than the validation reads. Also thrown by
+ * ImageFormat::fromMimeType() for a MIME type that is not a known image type.
  *
  * Error code ErrorCode::UNSUPPORTED_FORMAT; expected HTTP status in the API: 415 Unsupported Media Type.
  */
