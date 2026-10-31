@@ -236,8 +236,12 @@ final class AbstractBackendTest extends TestCase
     public function testAJobRunsWithItsLimitsAllowlistAndInput(): void
     {
         $runner = $this->runner();
-        $backend = new CwebpBackend($runner, $this->options());
+        $ceiling = 3 * 1073741824;
+        $backend = new CwebpBackend($runner, $this->options()->withMemoryCeilingBytes($ceiling));
         $backend->getCapabilities();
+        foreach ($runner->getRuns() as $probe) {
+            self::assertSame($ceiling, $probe['options']->getResourceLimits()->getAddressSpaceBytes(), 'probes and traces run with the ceiling');
+        }
         $job = $this->job();
 
         $result = $backend->convert($job);
@@ -248,7 +252,8 @@ final class AbstractBackendTest extends TestCase
         $run = $runs[count($runs) - 1];
         self::assertSame($backend->commandLine($job), $run['command']);
         self::assertSame([$job->getInputPath()], $run['read_only']);
-        self::assertSame($backend->estimateMemoryBytes($job), $run['options']->getResourceLimits()->getAddressSpaceBytes());
+        self::assertSame($ceiling, $run['options']->getResourceLimits()->getAddressSpaceBytes(), 'the ceiling, not the estimate');
+        self::assertLessThan($ceiling, $backend->estimateMemoryBytes($job));
         self::assertSame($backend->getSandboxPaths(), $run['options']->getSandboxReadOnlyPaths());
         self::assertContains($this->fakePrograms() . '/cwebp', $run['options']->getSandboxReadOnlyPaths());
         self::assertNotContains('/usr', $run['options']->getSandboxReadOnlyPaths());

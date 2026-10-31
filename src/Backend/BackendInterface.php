@@ -33,17 +33,19 @@ interface BackendInterface
     public function getCapabilities(): BackendCapabilities;
 
     /**
-     * Address space, in bytes, that converting this job needs: the per-job memory limit of the process. It grows
+     * Estimate, in bytes, of the address space that converting this job takes, for admission only: a job whose
+     * estimate is above the memory ceiling is refused before anything runs, so that BackendResolver can pick another
+     * backend. The process itself always runs with the memory ceiling as its address space limit. The estimate grows
      * with the decoded pixels (every frame for an animation) and the encoded pixels, plus the fixed overhead of the
-     * program.
+     * program; what it is measured on is documented by each backend (see AbstractBackend::estimate()).
      */
     public function estimateMemoryBytes(BackendJob $job): int;
 
     /**
      * Converts the job and writes the output to its output path, replacing any file there.
      *
-     * @throws ResourceLimitException        when the job needs more memory than the ceiling, or the process ran out of
-     *                                       its memory, CPU time or file size budget
+     * @throws ResourceLimitException        when the estimate is above the memory ceiling (nothing runs), or the
+     *                                       process ran out of its address space, CPU time or file size limit
      * @throws ConversionTimeoutException    when the process exceeded its wall-clock timeout
      * @throws IsolationUnavailableException when the isolation level of the runner is not available on the host
      * @throws ConversionFailedException     when the backend is unavailable, its capabilities do not cover the job,

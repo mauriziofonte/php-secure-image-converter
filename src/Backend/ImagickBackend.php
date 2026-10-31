@@ -13,8 +13,8 @@ use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
  *
  * The worker runs under the restrictive policy shipped in resources/imagemagick/policy.xml (it denies every coder
  * but the raster formats of the library, every delegate, filter and indirect read, and caps the resources), found
- * through MAGICK_CONFIGURE_PATH and, in the sandbox, the only policy ImageMagick sees. It also lowers the memory and
- * map limits to the job's budget and disables the disk cache for each job. MAGICK_TEMPORARY_PATH points to the job's
+ * through MAGICK_CONFIGURE_PATH and, in the sandbox, the only policy ImageMagick sees. It also sets the memory and
+ * map limits to the memory ceiling and disables the disk cache for each job. MAGICK_TEMPORARY_PATH points to the job's
  * working directory, MAGICK_THREAD_LIMIT is 1 and OpenCL is off. MALLOC_ARENA_MAX=2 bounds the address space that the
  * threads of the AVIF encoder (libheif and libaom run four, whatever the number of processors) reserve for malloc.
  *

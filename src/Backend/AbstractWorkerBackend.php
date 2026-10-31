@@ -10,7 +10,6 @@ use Mfonte\SecureImageConverter\Contract\Exception\ConversionFailedException;
 use Mfonte\SecureImageConverter\Contract\ImageFormat;
 use Mfonte\SecureImageConverter\Isolation\ExecutableFinder;
 use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
-use Mfonte\SecureImageConverter\Validation\ImageInfo;
 
 /**
  * A backend whose program is a PHP CLI worker (see AbstractWorker) using one PHP extension.
@@ -21,8 +20,9 @@ use Mfonte\SecureImageConverter\Validation\ImageInfo;
  * extension is loaded explicitly when the PHP build does not include it statically (established by probing
  * "php -n -m"), from BackendOptions::getPhpExtensionDirectory() when it is set and from the binary's built-in
  * extension directory otherwise.
- * PHP's own memory limit is off: the address space limit of the job bounds the process, including the memory the
- * image library allocates outside PHP. The job is passed in AbstractWorker::JOB_FILE, never on the command line.
+ * PHP's own memory limit is off: the address space limit of the process (the memory ceiling) bounds it, including the
+ * memory the image library allocates outside PHP. The job is passed in AbstractWorker::JOB_FILE, never on the command
+ * line.
  *
  * The sandbox allowlist adds the time zone database (Debian's PHP reads /usr/share/zoneinfo at startup and aborts
  * without it) and what the extension needs; each run mounts the worker scripts and the configured extension
@@ -63,8 +63,7 @@ abstract class AbstractWorkerBackend extends AbstractBackend
 
     protected function discover(array $programs, WorkingDirectory $directory): array
     {
-        $memory = $this->estimateMemoryBytes(self::probeJob());
-        $modules = $this->execute(array_merge($this->php($programs['php']), ['-m']), $directory, $memory);
+        $modules = $this->execute(array_merge($this->php($programs['php']), ['-m']), $directory);
         if (!$modules->isSuccessful()) {
             return [self::FACT_UNAVAILABLE => 'the PHP CLI does not start'];
         }
@@ -72,8 +71,7 @@ abstract class AbstractWorkerBackend extends AbstractBackend
         if (!self::listsModule($modules->getStdout(), $this->extension())) {
             $modules = $this->execute(
                 array_merge($this->php($programs['php']), ['-d', 'extension=' . $this->extension(), '-m']),
-                $directory,
-                $memory
+                $directory
             );
             if (!$modules->isSuccessful() || !self::listsModule($modules->getStdout(), $this->extension())) {
                 return [self::FACT_UNAVAILABLE => 'the ' . $this->extension() . ' extension is not available to the PHP CLI'];
@@ -84,7 +82,6 @@ abstract class AbstractWorkerBackend extends AbstractBackend
         $probe = $this->execute(
             array_merge($this->phpCommand($programs['php'], $facts), ['probe']),
             $directory,
-            $memory,
             $this->environment($directory, $facts)
         );
         $answer = $probe->isSuccessful() ? json_decode(trim($probe->getStdout()), true) : null;
@@ -136,7 +133,7 @@ abstract class AbstractWorkerBackend extends AbstractBackend
             'lossless' => $job->needsLosslessMode(),
             'strip' => $job->shouldStripMetadata(),
             'keep_icc' => $job->shouldKeepIccProfile(),
-            'memory_bytes' => $this->estimateMemoryBytes($job),
+            'memory_bytes' => $this->getOptions()->getMemoryCeilingBytes(),
         ]);
         $path = $directory->pathOf(AbstractWorker::JOB_FILE);
         $file = is_string($json) ? @fopen($path, 'xb') : false;
@@ -168,8 +165,7 @@ abstract class AbstractWorkerBackend extends AbstractBackend
         }
         $result = $this->execute(
             array_merge($this->php($programs['php']), ['-r', 'echo ini_get("extension_dir");']),
-            $directory,
-            $this->estimateMemoryBytes(self::probeJob())
+            $directory
         );
         $object = rtrim(trim($result->getStdout()), '/') . '/' . $this->extension() . '.so';
 
@@ -242,21 +238,6 @@ abstract class AbstractWorkerBackend extends AbstractBackend
     private static function listsModule(string $output, string $module): bool
     {
         return preg_match('/^' . preg_quote($module, '/') . '\s*$/mi', $output) === 1;
-    }
-
-    /**
-     * A one-pixel job, for the memory budget of the discovery runs.
-     */
-    private static function probeJob(): BackendJob
-    {
-        return new BackendJob(
-            '/dev/null',
-            new ImageInfo(ImageFormat::PNG, 1, 1, 1, 1),
-            '/dev/zero',
-            ImageFormat::PNG,
-            1,
-            1
-        );
     }
 
     /**

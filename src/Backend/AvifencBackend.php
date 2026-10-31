@@ -45,11 +45,6 @@ final class AvifencBackend extends AbstractBackend
         'lossless_slow' => [64 * self::MIB, 72],
     ];
 
-    /**
-     * Address space of avifenc --help.
-     */
-    private const BASE_BYTES = 83886080;
-
     private const MIB = 1048576;
 
     public function getName(): string
@@ -77,7 +72,7 @@ final class AvifencBackend extends AbstractBackend
 
     protected function discover(array $programs, WorkingDirectory $directory): array
     {
-        $help = $this->execute([$programs['avifenc'], '--help'], $directory, self::BASE_BYTES);
+        $help = $this->execute([$programs['avifenc'], '--help'], $directory);
         $text = $help->getStdout() . $help->getStderr();
         if (strpos($text, 'avifenc') === false) {
             return [self::FACT_UNAVAILABLE => 'avifenc --help failed'];

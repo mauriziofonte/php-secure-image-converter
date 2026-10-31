@@ -10,8 +10,9 @@ namespace Mfonte\SecureImageConverter\Backend\Worker;
  *
  * Every read names its coder and its first image ("TIFF:input.tiff[0]"), so that ImageMagick never guesses the
  * format from the content and decodes page 0 of a TIFF and the first frame of an animation only; animations are
- * never written. Before reading, the memory and map limits are set to the job's memory budget, the disk limit to 0
- * (the pixel cache never spills to disk), one thread. A resource limit error is reported as EXIT_RESOURCE_LIMIT.
+ * never written. Before reading, the memory and map limits are set to the job's memory_bytes (the memory ceiling, the
+ * address space limit of the process), the disk limit to 0 (the pixel cache never spills to disk), one thread. A
+ * resource limit error is reported as EXIT_RESOURCE_LIMIT.
  * Stripping removes every profile and comment; the ICC profile is put back when it is kept.
  *
  * @internal

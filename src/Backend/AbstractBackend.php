@@ -29,8 +29,9 @@ use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
 
 /**
  * What every backend shares: one private working directory per job, the input linked into it under a fixed name,
- * a process started through the runner with the job's own limits and sandbox allowlist, the output taken without
- * trusting the process, and capabilities probed once and cached.
+ * a memory estimate that admits or refuses the job, a process started through the runner with the memory ceiling and
+ * the backend's sandbox allowlist, the output taken without trusting the process, and capabilities probed once and
+ * cached.
  *
  * Each run:
  *
@@ -40,11 +41,10 @@ use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
  *   an empty, read-only file system);
  * - links the input there as "input.<extension>" (the input path is mounted read-only in the sandbox), so that no
  *   path chosen by a client ever reaches a command line;
- * - runs the command with an address space limit equal to estimateMemoryBytes() (at least
- *   ResourceLimits::MIN_ADDRESS_SPACE_BYTES), the runner's other limits, and the backend's sandbox allowlist
- *   (SandboxPaths, with the library directories that probing traced) plus any read-only path the operator added to
- *   the runner's defaults; the input and the library's
- *   own files (worker scripts, configuration) are mounted for the run, after the sandbox's private /tmp;
+ * - runs the command with an address space limit equal to the memory ceiling (BackendOptions), the runner's other
+ *   limits, and the backend's sandbox allowlist (SandboxPaths, with the library directories that probing traced)
+ *   plus any read-only path the operator added to the runner's defaults; the input and the library's own files
+ *   (worker scripts, configuration) are mounted for the run, after the sandbox's private /tmp;
  * - maps a failure to its exception (ProcessFailure), or copies "output.<extension>" next to the job's output path
  *   (OutputFile), checks the copy (OutputCheck) and only then renames it over the output path, and removes the
  *   directory.
@@ -88,11 +88,6 @@ abstract class AbstractBackend implements BackendInterface
      * Largest number of library directories kept; programs that need more are given the whole library roots.
      */
     private const MAX_LIBRARY_DIRECTORIES = 8;
-
-    /**
-     * Address space of a dynamic loader trace, which maps the libraries without running anything.
-     */
-    private const TRACE_BYTES = 536870912;
 
     /**
      * @var ProcessRunnerInterface
@@ -172,10 +167,12 @@ abstract class AbstractBackend implements BackendInterface
         if ($unsupported !== null) {
             throw new ConversionFailedException(sprintf('The %s backend cannot convert this job: %s.', $this->getName(), $unsupported));
         }
+        // The estimate only admits the job: the process runs with the ceiling as its address space limit, because
+        // what a job needs depends on the content as well as on the pixels.
         $needed = $this->estimateMemoryBytes($job);
         if ($needed > $this->options->getMemoryCeilingBytes()) {
             throw new ResourceLimitException(sprintf(
-                'The %s backend needs about %d MiB for this image, above the memory ceiling of %d MiB.',
+                'The %s backend needs up to %d MiB for this image, above the memory ceiling of %d MiB.',
                 $this->getName(),
                 (int) ceil($needed / 1048576),
                 intdiv($this->options->getMemoryCeilingBytes(), 1048576)
@@ -333,11 +330,13 @@ abstract class AbstractBackend implements BackendInterface
     }
 
     /**
-     * The runner a job runs with: the given address space limit and environment, this backend's sandbox paths.
+     * The runner a job runs with: the memory ceiling as its address space limit (or the given limit, for
+     * diagnostics and tests), the given environment, this backend's sandbox paths.
      *
+     * @param int|null              $memoryBytes address space limit, or null for the memory ceiling
      * @param array<string, string> $environment variables added to the runner's explicit environment
      */
-    final public function createJobRunner(int $memoryBytes, array $environment = [], ?float $timeoutSeconds = null): ProcessRunnerInterface
+    final public function createJobRunner(?int $memoryBytes = null, array $environment = [], ?float $timeoutSeconds = null): ProcessRunnerInterface
     {
         return $this->runnerFor($memoryBytes, $environment, $timeoutSeconds, $this->getFacts());
     }
@@ -348,9 +347,10 @@ abstract class AbstractBackend implements BackendInterface
      * @param array<string, string> $environment
      * @param array<string, string> $facts
      */
-    private function runnerFor(int $memoryBytes, array $environment, ?float $timeoutSeconds, array $facts): ProcessRunnerInterface
+    private function runnerFor(?int $memoryBytes, array $environment, ?float $timeoutSeconds, array $facts): ProcessRunnerInterface
     {
         $options = $this->runner->getOptions();
+        $memoryBytes = $memoryBytes !== null ? $memoryBytes : $this->options->getMemoryCeilingBytes();
         $memoryBytes = max(ResourceLimits::MIN_ADDRESS_SPACE_BYTES, min(ResourceLimits::MAX_BYTES, $memoryBytes));
         $options = $options
             ->withResourceLimits($options->getResourceLimits()->withAddressSpaceBytes($memoryBytes))
@@ -378,18 +378,18 @@ abstract class AbstractBackend implements BackendInterface
     }
 
     /**
-     * Runs a command in a working directory with this backend's environment and its sandbox before the library
-     * directories are known (the whole library roots); for discover().
+     * Runs a command in a working directory with the memory ceiling, this backend's environment and its sandbox
+     * before the library directories are known (the whole library roots); for discover().
      *
      * @param list<string>               $command
      * @param array<string, string>|null $environment null for environment() without facts
      *
      * @throws ExceptionInterface when the run cannot start
      */
-    final protected function execute(array $command, WorkingDirectory $directory, int $memoryBytes, ?array $environment = null): ProcessResult
+    final protected function execute(array $command, WorkingDirectory $directory, ?array $environment = null): ProcessResult
     {
         return $this->runnerFor(
-            $memoryBytes,
+            null,
             $environment !== null ? $environment : $this->environment($directory, []),
             self::PROBE_TIMEOUT_SECONDS,
             []
@@ -540,7 +540,7 @@ abstract class AbstractBackend implements BackendInterface
             }
             $this->prepare($job, $directory, $input, $output);
             $runner = $this->runnerFor(
-                $this->estimateMemoryBytes($job),
+                null,
                 $this->environment($directory, $facts),
                 $timeoutSeconds,
                 $facts
@@ -744,7 +744,7 @@ abstract class AbstractBackend implements BackendInterface
      */
     private function trace(array $command, WorkingDirectory $directory, array $environment): ?array
     {
-        $result = $this->execute($command, $directory, self::TRACE_BYTES, $environment);
+        $result = $this->execute($command, $directory, $environment);
 
         return $result->isSuccessful() ? LibraryTrace::parse($result->getStdout()) : null;
     }

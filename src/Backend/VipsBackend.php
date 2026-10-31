@@ -52,11 +52,6 @@ final class VipsBackend extends AbstractBackend
     ];
 
     /**
-     * Address space of the program alone with VIPS_CONCURRENCY=1: the discovery runs and the base of every job.
-     */
-    private const BASE_BYTES = 201326592;
-
-    /**
      * Address space by profile (AbstractBackend::estimate()): fixed bytes, bytes per encoded pixel of one frame, and
      * bytes per pixel more for an input of more than 8 bits per channel. The peak address space (VmPeak, MiB) of the
      * profile's costliest effort on RGBA noise at 1, 4, 6 and 20 megapixels, a 16-bit input in parentheses:
@@ -129,7 +124,7 @@ final class VipsBackend extends AbstractBackend
 
     protected function discover(array $programs, WorkingDirectory $directory): array
     {
-        $list = $this->execute([$programs['vips'], '-l'], $directory, self::BASE_BYTES);
+        $list = $this->execute([$programs['vips'], '-l'], $directory);
         if (!$list->isSuccessful()) {
             return [self::FACT_UNAVAILABLE => 'vips -l failed'];
         }
@@ -145,8 +140,8 @@ final class VipsBackend extends AbstractBackend
                 $savers[] = $format;
             }
         }
-        $webpsave = $this->execute([$programs['vips'], 'webpsave'], $directory, self::BASE_BYTES);
-        $jpegload = $this->execute([$programs['vips'], 'jpegload'], $directory, self::BASE_BYTES);
+        $webpsave = $this->execute([$programs['vips'], 'webpsave'], $directory);
+        $jpegload = $this->execute([$programs['vips'], 'jpegload'], $directory);
 
         return [
             'loaders' => implode(',', $loaders),
@@ -243,7 +238,7 @@ final class VipsBackend extends AbstractBackend
         }
 
         try {
-            $result = $this->execute([$vips, 'thumbnail', 'untrusted.ppm', 'untrusted.png', '1', '--no-rotate'], $directory, self::BASE_BYTES);
+            $result = $this->execute([$vips, 'thumbnail', 'untrusted.ppm', 'untrusted.png', '1', '--no-rotate'], $directory);
         } finally {
             @unlink($probe);
             @unlink($directory->pathOf('untrusted.png'));
