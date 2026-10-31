@@ -302,6 +302,36 @@ final class CapabilityMatrixTest extends BackendTestCase
     }
 
     /**
+     * vips thumbnail picks its loader by content: a resize is declared only where VIPS_BLOCK_UNTRUSTED works, and then
+     * an input whose content only an untrusted loader reads (a PPM passed as a validated PNG) is refused, resized or
+     * not, while a PNG converts.
+     */
+    public function testVipsReadsNoInputWithAnUntrustedLoader(): void
+    {
+        $vips = self::backend(VipsBackend::NAME);
+        $blocked = $vips->getFacts()['untrusted_blocked'] ?? null;
+        self::assertContains($blocked, ['0', '1']);
+        self::assertSame($blocked === '1' ? ConversionRequest::fitModes() : [], $vips->getCapabilities()->getFits());
+        if ($blocked !== '1') {
+            self::markTestSkipped('VIPS_BLOCK_UNTRUSTED has no effect on this libvips: vips declares no resize.');
+        }
+        $png = self::still(ImageFormat::PNG);
+        $ppm = $this->workingDirectory()->pathOf('disguised.png');
+        file_put_contents($ppm, "P6\n40 30\n255\n" . str_repeat("\x80\x40\x20", 40 * 30));
+        $disguised = [$ppm, $png[1]];
+
+        foreach ([[40, 30], [20, 15]] as $size) {
+            try {
+                $vips->convert($this->job($disguised, ImageFormat::WEBP, $size[0], $size[1]));
+                self::fail(sprintf('vips read a PPM at %dx%d.', $size[0], $size[1]));
+            } catch (ConversionFailedException $exception) {
+                self::assertStringContainsString('vips', $exception->getMessage());
+            }
+            self::assertNull(self::check($vips, $this->job($png, ImageFormat::WEBP, $size[0], $size[1])));
+        }
+    }
+
+    /**
      * Converts each job and fails with the list of jobs that did not produce what they asked for.
      *
      * @param list<BackendJob> $jobs

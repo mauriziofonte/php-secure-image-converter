@@ -16,8 +16,11 @@ use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
  * input.jpg output.webp[...]"), so that vips never picks a loader itself. With resize, "vips thumbnail" scales on
  * load to the exact size (--size force for contain and fill, --crop centre for cover); thumbnail picks the loader
  * by content, which VIPS_BLOCK_UNTRUSTED=1 limits to the loaders libvips considers safe for untrusted input
- * (ImageMagick, PDF, SVG and the other "untrusted" loaders are blocked; BMP, which libvips reads only through
- * ImageMagick, is therefore not supported). The output saver follows from the output file name.
+ * (ImageMagick, OpenSlide, PDF, SVG and the other "untrusted" loaders are blocked; BMP, which libvips reads only
+ * through ImageMagick, is therefore not supported). libvips before 8.13 ignores the variable, so discovery checks
+ * that it works: thumbnail must refuse a file that only an untrusted loader reads (a one-pixel PPM). Where it does
+ * not, nothing would stop OpenSlide (priority 100) from reading a validated TIFF, and the backend declares no fit:
+ * it converts without resize only, through the named loaders. The output saver follows from the output file name.
  *
  * | Setting       | Mapping                                                                              |
  * | ------------- | ------------------------------------------------------------------------------------ |
@@ -85,6 +88,11 @@ final class VipsBackend extends AbstractBackend
 
     private const BYTES_PER_ANIMATION_PIXEL = 4;
 
+    /**
+     * A one-pixel PPM, which only ppmload, an untrusted loader, reads: the probe of VIPS_BLOCK_UNTRUSTED.
+     */
+    private const UNTRUSTED_PROBE = "P6\n1 1\n255\n\0\0\0";
+
     public function getName(): string
     {
         return self::NAME;
@@ -134,6 +142,7 @@ final class VipsBackend extends AbstractBackend
             'savers' => implode(',', $savers),
             'keep' => preg_match('/^\s+keep\s/m', $webpsave->getStdout() . $webpsave->getStderr()) === 1 ? '1' : '0',
             'fail_on' => preg_match('/^\s+fail-on\s/m', $jpegload->getStdout() . $jpegload->getStderr()) === 1 ? '1' : '0',
+            'untrusted_blocked' => $this->blocksUntrustedLoaders($programs['vips'], $directory) ? '1' : '0',
         ];
     }
 
@@ -147,8 +156,10 @@ final class VipsBackend extends AbstractBackend
         $candidates['first_frame'] = [ImageFormat::PNG, ImageFormat::GIF, ImageFormat::WEBP];
         $candidates['animated_inputs'] = [ImageFormat::GIF, ImageFormat::WEBP];
         $candidates['animated_outputs'] = [ImageFormat::WEBP, ImageFormat::GIF];
-        $candidates['fits'] = ConversionRequest::fitModes();
-        $candidates['animated_fits'] = ConversionRequest::fitModes();
+        if (($facts['untrusted_blocked'] ?? '0') === '1') {
+            $candidates['fits'] = ConversionRequest::fitModes();
+            $candidates['animated_fits'] = ConversionRequest::fitModes();
+        }
         $candidates['lossless'] = [ImageFormat::WEBP, ImageFormat::AVIF];
         $candidates['icc_profile'] = ($facts['keep'] ?? '0') === '1';
         $candidates['metadata'] = true;
@@ -207,6 +218,27 @@ final class VipsBackend extends AbstractBackend
             'VIPS_BLOCK_UNTRUSTED' => '1',
             'MALLOC_ARENA_MAX' => '2',
         ];
+    }
+
+    /**
+     * Whether vips thumbnail, with this backend's environment, refuses a file that only an untrusted loader reads:
+     * VIPS_BLOCK_UNTRUSTED works. Any other outcome (it converts the file, or fails for another reason) counts as no.
+     */
+    private function blocksUntrustedLoaders(string $vips, WorkingDirectory $directory): bool
+    {
+        $probe = $directory->pathOf('untrusted.ppm');
+        if (@file_put_contents($probe, self::UNTRUSTED_PROBE) !== strlen(self::UNTRUSTED_PROBE)) {
+            return false;
+        }
+
+        try {
+            $result = $this->execute([$vips, 'thumbnail', 'untrusted.ppm', 'untrusted.png', '1', '--no-rotate'], $directory, self::BASE_BYTES);
+        } finally {
+            @unlink($probe);
+            @unlink($directory->pathOf('untrusted.png'));
+        }
+
+        return !$result->isSuccessful() && strpos($result->getStderr(), 'is not a known file format') !== false;
     }
 
     /**
