@@ -118,6 +118,89 @@ final class WorkerTest extends TestCase
         self::assertSame(['ok' => false, 'code' => 1, 'error' => 'The job file is not valid.'], $answer);
     }
 
+    public function testTheJobDecoderReadsWhatTheBackendWrites(): void
+    {
+        $job = self::job();
+
+        self::assertSame($job, AbstractWorker::decodeJob((string) json_encode($job)));
+        self::assertSame($job, AbstractWorker::decodeJob((string) json_encode($job, JSON_PRETTY_PRINT)));
+        self::assertSame(['memory_bytes' => PHP_INT_MAX, 'offset' => -1], AbstractWorker::decodeJob('{"memory_bytes":' . PHP_INT_MAX . ',"offset":-1}'));
+        self::assertSame([], AbstractWorker::decodeJob(' { } '));
+    }
+
+    /**
+     * Texts the job decoder refuses: more than json_encode() writes for a job, or not JSON.
+     *
+     * @return array<string, array{0: string}>
+     */
+    public static function undecodableJobs(): array
+    {
+        return [
+            'empty' => [''],
+            'list' => ['["input.png"]'],
+            'trailing comma' => ['{"quality":80,}'],
+            'duplicate key' => ['{"quality":80,"quality":90}'],
+            'float' => ['{"quality":80.5}'],
+            'exponent' => ['{"quality":8e1}'],
+            'leading zero' => ['{"quality":080}'],
+            'beyond the integer range' => ['{"memory_bytes":9223372036854775808}'],
+            'null' => ['{"input":null}'],
+            'nested' => ['{"input":{"a":1}}'],
+            'escape' => ['{"input":"input\\u002epng"}'],
+            'slash' => ['{"input":"a/b"}'],
+            'upper-case key' => ['{"Input":"input.png"}'],
+            'text after' => ['{"quality":80}{}'],
+            'single quotes' => ["{'quality':80}"],
+        ];
+    }
+
+    /**
+     * @dataProvider undecodableJobs
+     */
+    #[DataProvider('undecodableJobs')]
+    public function testAnUndecodableJobIsRefused(string $text): void
+    {
+        self::assertNull(AbstractWorker::decodeJob($text));
+        file_put_contents(AbstractWorker::JOB_FILE, $text);
+
+        ob_start();
+        $code = GdWorker::main(['gd.php', 'convert']);
+        $answer = json_decode((string) ob_get_clean(), true);
+
+        self::assertSame(AbstractWorker::EXIT_INVALID, $code);
+        self::assertSame(['ok' => false, 'code' => 1, 'error' => 'The job file is not valid.'], $answer);
+    }
+
+    /**
+     * @return array<string, array{0: array<int|string, mixed>}>
+     */
+    public static function answers(): array
+    {
+        return [
+            'probe' => [['inputs' => ['jpeg', 'png'], 'outputs' => [], 'lossless' => ['webp']]],
+            'success' => [['ok' => true]],
+            'failure' => [['ok' => false, 'code' => 2, 'error' => "Quotes \" back\\slash /slash\n\ttab \x01 \x7f."]],
+            'null and negative' => [['value' => null, 'number' => -5, 'list' => [[1, 2], []]]],
+            'numbered keys' => [[1 => 'a', 3 => 'b']],
+        ];
+    }
+
+    /**
+     * @dataProvider answers
+     *
+     * @param array<int|string, mixed> $answer
+     */
+    #[DataProvider('answers')]
+    public function testAnAnswerIsTheJsonOfItsValue(array $answer): void
+    {
+        self::assertSame($answer, json_decode(AbstractWorker::encodeAnswer($answer), true));
+    }
+
+    public function testAnAnswerWritesBytesOutsideAsciiAsQuestionMarks(): void
+    {
+        self::assertSame('"caf?? ?"', AbstractWorker::encodeAnswer("caf\xC3\xA9 \xFF"));
+    }
+
     public function testAnUnknownModeIsRefused(): void
     {
         ob_start();

@@ -29,7 +29,8 @@ use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
  * after a check fails is the configured path resolved anew). PHP's own memory limit is off: at the rlimit and sandbox
  * isolation levels the address space limit of the process (the memory ceiling) bounds the worker, including the memory
  * the image library allocates outside PHP; at the none and process levels nothing does (see BackendOptions). The job is
- * passed in AbstractWorker::JOB_FILE, never on the command line.
+ * passed in AbstractWorker::JOB_FILE, never on the command line, as JSON that the worker reads, and answers in, without
+ * ext-json (AbstractWorker::decodeJob() and encodeAnswer()).
  *
  * The sandbox allowlist adds the time zone database (Debian's PHP reads /usr/share/zoneinfo at startup and aborts
  * without it) and what the extension needs; each run mounts the worker scripts and, from a configured extension

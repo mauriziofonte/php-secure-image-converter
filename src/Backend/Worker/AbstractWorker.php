@@ -10,7 +10,10 @@ namespace Mfonte\SecureImageConverter\Backend\Worker;
  * A worker runs as "php -n [-d extension=...] resources/workers/<name>.php <mode>" in the job's working directory,
  * started by its backend through the ProcessRunner. It loads no php.ini (-n), no Composer autoloader and no other
  * library class: the entry script requires this file and the concrete worker only, so that the sandbox exposes
- * nothing but them.
+ * nothing but them. Without php.ini, a PHP build has only its built-in extensions: the workers use no function, class
+ * or constant beyond the ones PHP 7.2 always builds in (Core, date, pcre, Reflection, SPL, standard) and the
+ * extension they load. In particular json is a shared extension in many PHP 7 builds (setup-php's, for one), so the
+ * job file and the answer are read and written by decodeJob() and encodeAnswer() rather than by ext-json.
  *
  * | Mode    | Does                                                                                         |
  * | ------- | -------------------------------------------------------------------------------------------- |
@@ -127,7 +130,7 @@ abstract class AbstractWorker
     final public static function readJob(string $path): array
     {
         $json = @file_get_contents($path, false, null, 0, self::JOB_MAX_BYTES + 1);
-        $job = is_string($json) && strlen($json) <= self::JOB_MAX_BYTES ? json_decode($json, true) : null;
+        $job = is_string($json) && strlen($json) <= self::JOB_MAX_BYTES ? self::decodeJob($json) : null;
         $invalid = new \RuntimeException('The job file is not valid.', self::EXIT_INVALID);
         if (!is_array($job)) {
             throw $invalid;
@@ -185,10 +188,88 @@ abstract class AbstractWorker
     }
 
     /**
+     * The job object as AbstractWorkerBackend writes it with json_encode(), decoded with core functions only: a flat
+     * object whose keys are lower-case names and whose values are strings of letters, digits, dots, hyphens and
+     * underscores (no escapes), integers or booleans, each key once. Returns null for anything else, which readJob()
+     * refuses like a job that does not validate.
+     *
+     * @return array<string, string|int|bool>|null
+     */
+    final public static function decodeJob(string $json): ?array
+    {
+        $space = '[ \t\r\n]*';
+        $pair = '"([a-z_]{1,32})"' . $space . ':' . $space . '("[A-Za-z0-9._-]{0,255}"|-?(?:0|[1-9][0-9]{0,18})|true|false)';
+        $object = '/\A' . $space . '\{' . $space . '(?:' . $pair . $space . '(?:,' . $space . $pair . $space . ')*)?\}' . $space . '\z/';
+        if (preg_match($object, $json) !== 1 || preg_match_all('/' . $pair . '/', $json, $matches, PREG_SET_ORDER) === false) {
+            return null;
+        }
+        $job = [];
+        foreach ($matches as $match) {
+            $key = $match[1];
+            $text = $match[2];
+            if (array_key_exists($key, $job)) {
+                return null;
+            }
+            if ($text[0] === '"') {
+                $job[$key] = substr($text, 1, -1);
+            } elseif ($text === 'true' || $text === 'false') {
+                $job[$key] = $text === 'true';
+            } elseif ((string) (int) $text === $text) {
+                $job[$key] = (int) $text;
+            } else {
+                // Beyond the integer range.
+                return null;
+            }
+        }
+
+        return $job;
+    }
+
+    /**
+     * An answer as JSON, written with core functions only (see decodeJob()): lists, objects, strings, integers,
+     * booleans and null, as json_encode() writes them for the format names and the fixed English sentences of the
+     * answers. A byte outside ASCII is written as "?", so that the output is valid UTF-8 whatever a library message
+     * holds.
+     *
+     * @param mixed $value
+     */
+    final public static function encodeAnswer($value): string
+    {
+        if (is_array($value)) {
+            $list = $value === [] || array_keys($value) === range(0, count($value) - 1);
+            $items = [];
+            foreach ($value as $key => $item) {
+                $items[] = ($list ? '' : self::encodeAnswer((string) $key) . ':') . self::encodeAnswer($item);
+            }
+
+            return $list ? '[' . implode(',', $items) . ']' : '{' . implode(',', $items) . '}';
+        }
+        if (is_string($value)) {
+            return '"' . preg_replace_callback(
+                '/[^\x20-\x7E]|["\\\\\/]/',
+                static function (array $match): string {
+                    $byte = ord($match[0]);
+                    if ($byte > 0x7F) {
+                        return '?';
+                    }
+
+                    return $byte < 0x20 || $byte === 0x7F ? sprintf('\\u%04x', $byte) : '\\' . $match[0];
+                },
+                $value
+            ) . '"';
+        }
+        if (is_bool($value)) {
+            return $value ? 'true' : 'false';
+        }
+
+        return is_int($value) ? (string) $value : 'null';
+    }
+
+    /**
      * @param array<string, mixed> $answer
      */
     private static function answer(array $answer): void
     {
-        echo json_encode($answer), "\n";
+        echo self::encodeAnswer($answer), "\n";
     }
 }
