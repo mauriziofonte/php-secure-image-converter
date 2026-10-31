@@ -63,8 +63,13 @@ final class WorkerBackendTest extends TestCase
             [$this->program('php'), '-n', '-d', 'display_errors=stderr', '-d', 'log_errors=0', '-d', 'memory_limit=-1', $workers . '/imagick.php', 'convert'],
             $imagick->commandLine($job, ['load' => '0'])
         );
-        self::assertContains(ImagickBackend::policyDirectory(), $imagick->getSandboxPaths());
-        self::assertContains($workers, $gd->getSandboxPaths());
+        $classes = (string) realpath(__DIR__ . '/../../../src/Backend/Worker');
+        self::assertSame([$workers, $classes, ImagickBackend::policyDirectory()], $imagick->getSandboxResourcePaths());
+        self::assertSame([$workers, $classes], $gd->getSandboxResourcePaths());
+        foreach ([$workers, $classes, ImagickBackend::policyDirectory()] as $resource) {
+            self::assertNotContains($resource, $imagick->getSandboxPaths(), 'the library files are mounted per run, after /tmp');
+        }
+        self::assertContains('/usr/share/zoneinfo', $gd->getSandboxPaths());
         self::assertFileExists(ImagickBackend::policyDirectory() . '/policy.xml');
     }
 
@@ -89,9 +94,14 @@ final class WorkerBackendTest extends TestCase
             $this->programOptions()
         );
 
-        $facts = (new GdBackend($runner, (new BackendOptions())->withPhpBinary($php)))->discoverFacts();
+        $backend = new GdBackend($runner, (new BackendOptions())->withPhpBinary($php));
+        $facts = $backend->discoverFacts();
 
         self::assertSame(['inputs' => 'jpeg,png,tiff', 'load' => '1', 'lossless' => 'webp', 'outputs' => 'webp'], $facts);
+        self::assertCount(3, $runner->getRuns());
+        foreach ($runner->getRuns() as $run) {
+            self::assertSame($backend->getSandboxResourcePaths(), $run['read_only'], 'each run mounts the worker scripts');
+        }
     }
 
     public function testAWorkerWithoutItsExtensionIsUnavailable(): void

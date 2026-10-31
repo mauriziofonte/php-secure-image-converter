@@ -82,9 +82,9 @@ final class ImagickBackend extends AbstractWorkerBackend
         ];
     }
 
-    protected function sandboxData(): array
+    protected function sandboxResources(): array
     {
-        return array_merge(parent::sandboxData(), [self::policyDirectory()]);
+        return array_merge(parent::sandboxResources(), [self::policyDirectory()]);
     }
 
     protected function extension(): string

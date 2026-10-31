@@ -11,6 +11,7 @@ use Mfonte\SecureImageConverter\Backend\ImagickBackend;
 use Mfonte\SecureImageConverter\Backend\Internal\SandboxPaths;
 use Mfonte\SecureImageConverter\Contract\ImageFormat;
 use Mfonte\SecureImageConverter\Contract\IsolationLevel;
+use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\Group;
@@ -101,7 +102,7 @@ final class SandboxVisibilityTest extends BackendTestCase
         $visible = [self::checkout() . '/composer.json', self::checkout() . '/vendor', \dirname(__DIR__, 2) . '/Fixtures/backend/still.png'];
         foreach (self::PRIVATE_PATHS as $path) {
             $above = false;
-            foreach ($backend->getSandboxPaths() as $allowed) {
+            foreach (array_merge($backend->getSandboxPaths(), $backend->getSandboxResourcePaths()) as $allowed) {
                 $above = $above || strpos($allowed, $path . '/') === 0;
             }
             if (!$above) {
@@ -120,7 +121,7 @@ final class SandboxVisibilityTest extends BackendTestCase
         );
         $directory = $this->workingDirectory();
 
-        $result = $backend->createJobRunner(268435456)->execute([(string) $command[0], '-n', '-r', $code], $directory);
+        $result = $backend->createJobRunner(268435456)->execute([(string) $command[0], '-n', '-r', $code], $directory, null, $backend->getSandboxResourcePaths());
 
         self::assertTrue($result->isSuccessful(), $result->getStderr());
         self::assertSame(IsolationLevel::SANDBOX, $result->getIsolationLevel());
@@ -142,6 +143,68 @@ final class SandboxVisibilityTest extends BackendTestCase
         self::assertTrue($seen['zoneinfo'], 'The time zone data is missing.');
         self::assertTrue($seen['script'], 'The worker script is missing.');
         self::assertSame($backend->getName() === ImagickBackend::NAME, $seen['policy'], 'The ImageMagick policy is visible to Imagick only.');
+    }
+
+    /**
+     * A copy of this library below /tmp, which the sandbox replaces with its own: its PHP workers still run, since
+     * each run mounts their scripts and configuration after /tmp.
+     */
+    public function testThePhpWorkersRunFromALibraryBelowTmp(): void
+    {
+        self::requireLevel(IsolationLevel::SANDBOX);
+        $names = [];
+        foreach ([GdBackend::NAME, ImagickBackend::NAME] as $name) {
+            if (in_array($name, self::enabledNames(), true) && self::backend($name)->getCapabilities()->isAvailable()) {
+                $names[] = $name;
+            }
+        }
+        if ($names === []) {
+            self::markTestSkipped('Neither PHP worker backend is enabled.');
+        }
+        $copy = WorkingDirectory::create('/tmp');
+
+        try {
+            foreach (['src', 'resources'] as $directory) {
+                self::copyTree(self::checkout() . '/' . $directory, $copy->pathOf($directory));
+            }
+            $script = $copy->pathOf('probe.php');
+            file_put_contents($script, sprintf(
+                '<?php require %s; spl_autoload_register(static function ($class) { $prefix = "Mfonte\\\\SecureImageConverter\\\\";'
+                . ' if (strpos($class, $prefix) === 0) { require %s . strtr(substr($class, strlen($prefix)), "\\\\", "/") . ".php"; } }, true, true);'
+                . ' $runner = new Mfonte\\SecureImageConverter\\Isolation\\ProcessRunner("sandbox"); $seen = [];'
+                . ' foreach (%s as $name) { $backend = Mfonte\\SecureImageConverter\\Backend\\BackendFactory::create($name, $runner,'
+                . ' (new Mfonte\\SecureImageConverter\\Backend\\BackendOptions())->withCapabilityCache(false));'
+                . ' $seen[$name] = [(new ReflectionClass($backend))->getFileName(), $backend->getCapabilities()->isAvailable(),'
+                . ' (string) $backend->getCapabilities()->getUnavailableReason()]; } echo json_encode($seen);',
+                var_export(self::checkout() . '/vendor/autoload.php', true),
+                var_export($copy->pathOf('src') . '/', true),
+                var_export($names, true)
+            ));
+            $output = [];
+            exec(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($script) . ' 2>&1', $output, $status);
+            $seen = json_decode(implode("\n", $output), true);
+
+            self::assertSame(0, $status, implode("\n", $output));
+            self::assertIsArray($seen, implode("\n", $output));
+            foreach ($names as $name) {
+                self::assertSame([$copy->pathOf('src') . '/Backend/' . ucfirst($name) . 'Backend.php', true, ''], $seen[$name] ?? null, $name);
+            }
+        } finally {
+            $copy->remove();
+        }
+    }
+
+    private static function copyTree(string $source, string $destination): void
+    {
+        self::assertTrue(mkdir($destination, 0700));
+        foreach (array_diff((array) scandir($source), ['.', '..']) as $entry) {
+            self::assertIsString($entry);
+            if (is_dir($source . '/' . $entry)) {
+                self::copyTree($source . '/' . $entry, $destination . '/' . $entry);
+            } else {
+                self::assertTrue(copy($source . '/' . $entry, $destination . '/' . $entry));
+            }
+        }
     }
 
     private static function checkout(): string

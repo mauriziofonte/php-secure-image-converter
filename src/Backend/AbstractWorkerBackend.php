@@ -22,8 +22,8 @@ use Mfonte\SecureImageConverter\Validation\ImageInfo;
  * PHP's own memory limit is off: the address space limit of the job bounds the process, including the memory the
  * image library allocates outside PHP. The job is passed in AbstractWorker::JOB_FILE, never on the command line.
  *
- * The sandbox allowlist adds the worker scripts, the time zone database (Debian's PHP reads /usr/share/zoneinfo at
- * startup and aborts without it) and what the extension needs.
+ * The sandbox allowlist adds the time zone database (Debian's PHP reads /usr/share/zoneinfo at startup and aborts
+ * without it) and what the extension needs; each run mounts the worker scripts (getSandboxResourcePaths()).
  *
  * The PHP binary is BackendOptions::getPhpBinary(), else the running PHP when it is the CLI, else "php" from the
  * runner's search path.
@@ -144,13 +144,12 @@ abstract class AbstractWorkerBackend extends AbstractBackend
 
     protected function sandboxData(): array
     {
-        return array_merge(
-            array_values(array_filter([
-                realpath(\dirname(__DIR__, 2) . '/resources/workers'),
-                realpath(__DIR__ . '/Worker'),
-            ], 'is_string')),
-            [self::ZONEINFO]
-        );
+        return [self::ZONEINFO];
+    }
+
+    protected function sandboxResources(): array
+    {
+        return [\dirname(__DIR__, 2) . '/resources/workers', __DIR__ . '/Worker'];
     }
 
     protected function isWorker(): bool

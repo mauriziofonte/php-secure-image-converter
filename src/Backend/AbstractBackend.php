@@ -42,7 +42,8 @@ use Mfonte\SecureImageConverter\Validation\Limits;
  *   path chosen by a client ever reaches a command line;
  * - runs the command with an address space limit equal to estimateMemoryBytes() (at least
  *   ResourceLimits::MIN_ADDRESS_SPACE_BYTES), the runner's other limits, and the backend's sandbox allowlist
- *   (SandboxPaths) plus any read-only path the operator added to the runner's defaults;
+ *   (SandboxPaths) plus any read-only path the operator added to the runner's defaults; the input and the library's
+ *   own files (worker scripts, configuration) are mounted for the run, after the sandbox's private /tmp;
  * - maps a failure to its exception (ProcessFailure), or copies "output.<extension>" next to the job's output path
  *   (OutputFile), checks the copy (verifyOutput()) and only then renames it over the output path, and removes the
  *   directory.
@@ -230,7 +231,9 @@ abstract class AbstractBackend implements BackendInterface
     }
 
     /**
-     * The read-only paths visible in this backend's sandbox (the runner's defaults are replaced by them).
+     * The system paths visible in this backend's sandbox (the runner's defaults are replaced by them): the programs,
+     * their libraries, the system files of sandboxData() and the read-only paths the operator added to the runner's
+     * defaults. The sandbox mounts them before its private /tmp.
      *
      * @return list<string>
      */
@@ -246,6 +249,26 @@ abstract class AbstractBackend implements BackendInterface
                 array_values(array_diff($configured, ProcessOptions::DEFAULT_SANDBOX_READ_ONLY_PATHS))
             )
         );
+    }
+
+    /**
+     * The files of this library that the programs read (worker scripts, configuration), canonical and existing. Each
+     * run mounts them read-only after the sandbox's private /tmp, like the input, so that they stay visible when the
+     * library is installed below /tmp.
+     *
+     * @return list<string>
+     */
+    final public function getSandboxResourcePaths(): array
+    {
+        $paths = [];
+        foreach ($this->sandboxResources() as $path) {
+            $real = realpath($path);
+            if (is_string($real)) {
+                $paths[$real] = $real;
+            }
+        }
+
+        return array_values($paths);
     }
 
     /**
@@ -296,7 +319,7 @@ abstract class AbstractBackend implements BackendInterface
             $memoryBytes,
             $environment !== null ? $environment : $this->environment($directory, []),
             self::PROBE_TIMEOUT_SECONDS
-        )->execute($command, $directory);
+        )->execute($command, $directory, null, $this->getSandboxResourcePaths());
     }
 
     /**
@@ -350,11 +373,21 @@ abstract class AbstractBackend implements BackendInterface
     }
 
     /**
-     * Files and directories the program needs besides itself and the libraries.
+     * Files and directories of the system the program needs besides itself and the libraries (see getSandboxPaths()).
      *
      * @return list<string>
      */
     protected function sandboxData(): array
+    {
+        return [];
+    }
+
+    /**
+     * Files and directories of this library the program needs (see getSandboxResourcePaths()).
+     *
+     * @return list<string>
+     */
+    protected function sandboxResources(): array
     {
         return [];
     }
@@ -425,7 +458,7 @@ abstract class AbstractBackend implements BackendInterface
                 $this->command($job, $input, $output, $programs, $facts),
                 $directory,
                 null,
-                [$job->getInputPath()]
+                array_merge([$job->getInputPath()], $this->getSandboxResourcePaths())
             );
             if (!$result->isSuccessful()) {
                 throw ProcessFailure::exception($this->getName(), $result, $this->isWorker());
@@ -596,6 +629,7 @@ abstract class AbstractBackend implements BackendInterface
             'level' => $this->runner->getLevel(),
             'isolation' => $this->runner->getOptions()->toIsolationArray(),
             'data' => $this->sandboxData(),
+            'resources' => $this->sandboxResources(),
         ]);
         if (!is_string($json)) {
             throw new InvalidArgumentException('The backend fingerprint could not be encoded.');

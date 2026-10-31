@@ -15,7 +15,11 @@ use Mfonte\SecureImageConverter\Isolation\ExecutableFinder;
  * | libraries            | LIBRARY_DIRECTORIES, and lib and lib64 next to the bin directory of a program   |
  * |                      | installed under another prefix (such as /opt/vips/lib)                          |
  * | loader configuration | /etc/ld.so.cache, /etc/ld.so.conf and /etc/ld.so.conf.d                         |
- * | backend data         | what the backend adds: its configuration, its worker scripts                    |
+ * | backend data         | the system files the backend adds, such as the time zone database PHP reads     |
+ *
+ * The library's own files (worker scripts, the ImageMagick policy) are not part of it: each run mounts them after
+ * the sandbox's private /tmp (AbstractBackend::getSandboxResourcePaths()), so that a library installed below /tmp
+ * is not hidden by it.
  *
  * Nothing else of /usr is visible: no other program of /usr/bin, no /usr/share (except what a backend adds, such as
  * the time zone database PHP reads at startup), no /usr/local/etc; nor any other file of /etc. Paths that do not
