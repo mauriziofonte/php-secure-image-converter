@@ -25,6 +25,7 @@ parameters:
     phpVersion: 70205
     paths:
         - src
+        - resources/workers
         - tests
         - tools/require-tool.php
     # Declares the PHPUnit 10+ attributes the tests use, so that they are

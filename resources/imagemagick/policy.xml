@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policymap [
+  <!ELEMENT policymap (policy)*>
+  <!ATTLIST policymap xmlns CDATA #FIXED "">
+  <!ELEMENT policy EMPTY>
+  <!ATTLIST policy xmlns CDATA #FIXED "">
+  <!ATTLIST policy domain NMTOKEN #REQUIRED>
+  <!ATTLIST policy name NMTOKEN #IMPLIED>
+  <!ATTLIST policy pattern CDATA #IMPLIED>
+  <!ATTLIST policy rights NMTOKEN #IMPLIED>
+  <!ATTLIST policy stealth NMTOKEN #IMPLIED>
+  <!ATTLIST policy value CDATA #IMPLIED>
+]>
+<!--
+  Restrictive ImageMagick policy of mfonte/secure-image-converter, for ImageMagick 6 and 7.
+  The Imagick backend points MAGICK_CONFIGURE_PATH to this directory; in the sandbox it is the only
+  policy ImageMagick can see. For each request, the last matching policy wins: everything is denied
+  first, then the raster formats the library converts are allowed again.
+
+  Resource limits are ceilings: the worker lowers memory and map to the job's budget and disk to 0
+  before reading, and ImageMagick never lets a process raise them above these values.
+-->
+<policymap>
+  <policy domain="resource" name="memory" value="2GiB"/>
+  <policy domain="resource" name="map" value="2GiB"/>
+  <policy domain="resource" name="disk" value="0"/>
+  <policy domain="resource" name="area" value="400MP"/>
+  <policy domain="resource" name="width" value="64KP"/>
+  <policy domain="resource" name="height" value="64KP"/>
+  <policy domain="resource" name="list-length" value="1000"/>
+  <policy domain="resource" name="file" value="64"/>
+  <policy domain="resource" name="thread" value="1"/>
+  <policy domain="resource" name="throttle" value="0"/>
+  <policy domain="resource" name="time" value="600"/>
+  <policy domain="cache" name="memory-map" value="anonymous"/>
+  <policy domain="cache" name="synchronize" value="true"/>
+  <policy domain="system" name="precision" value="6"/>
+  <policy domain="delegate" rights="none" pattern="*"/>
+  <policy domain="filter" rights="none" pattern="*"/>
+  <policy domain="path" rights="none" pattern="@*"/>
+  <policy domain="path" rights="none" pattern="-"/>
+  <policy domain="coder" rights="none" pattern="*"/>
+  <policy domain="coder" rights="read | write" pattern="{BMP,BMP2,BMP3,GIF,GIF87,JPEG,JPG,PNG,PNG8,PNG24,PNG32,PNG48,PNG64,TIFF,TIF,TIFF64,WEBP,HEIC,HEIF,AVIF}"/>
+  <policy domain="module" rights="none" pattern="*"/>
+  <policy domain="module" rights="read | write" pattern="{BMP,GIF,JPEG,PNG,TIFF,WEBP,HEIC}"/>
+</policymap>

@@ -9,10 +9,11 @@ use PhpCsFixer\Finder;
  * Coding style shared by the three repositories: PSR-12 plus the rules below, which keep the code bases uniform.
  *
  * No rule may rewrite code to syntax newer than PHP 7.2, the lowest supported version (so no @PHPxxMigration sets, no
- * modernize_strpos, no trailing commas in calls or parameter lists). Only src/, tests/ and this tooling are checked.
+ * modernize_strpos, no trailing commas in calls or parameter lists). Only src/, tests/, the worker scripts in
+ * resources/workers and this tooling are checked.
  */
 $finder = Finder::create()
-    ->in([__DIR__ . '/src', __DIR__ . '/tests'])
+    ->in([__DIR__ . '/src', __DIR__ . '/resources/workers', __DIR__ . '/tests'])
     ->append([__FILE__, __DIR__ . '/tools/require-tool.php']);
 
 return (new Config())

@@ -1,0 +1,90 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Mfonte\SecureImageConverter\Backend;
+
+use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
+
+/**
+ * ImageMagick through ext-imagick in a PHP CLI worker (Worker\ImagickWorker), for still images: the shell-free
+ * fallback for formats the command-line tools do not cover, such as BMP.
+ *
+ * The worker runs under the restrictive policy shipped in resources/imagemagick/policy.xml (it denies every coder
+ * but the raster formats of the library, every delegate, filter and indirect read, and caps the resources), found
+ * through MAGICK_CONFIGURE_PATH and, in the sandbox, the only policy ImageMagick sees. It also lowers the memory and
+ * map limits to the job's budget and disables the disk cache for each job. MAGICK_TEMPORARY_PATH points to the job's
+ * working directory, MAGICK_THREAD_LIMIT is 1 and OpenCL is off.
+ *
+ * Animations are not written: an animated input is converted to its first frame only.
+ */
+final class ImagickBackend extends AbstractWorkerBackend
+{
+    public const NAME = 'imagick';
+
+    /**
+     * Fixed address space of PHP with ImageMagick, and bytes per decoded and encoded pixel (16 bits per channel in
+     * the pixel cache, plus a working copy), rounded up.
+     */
+    private const BASE_BYTES = 268435456;
+
+    private const BYTES_PER_INPUT_PIXEL = 16;
+
+    private const BYTES_PER_OUTPUT_PIXEL = 16;
+
+    public function getName(): string
+    {
+        return self::NAME;
+    }
+
+    public function estimateMemoryBytes(BackendJob $job): int
+    {
+        return self::BASE_BYTES
+            + (int) min(PHP_INT_MAX / 4, self::BYTES_PER_INPUT_PIXEL * (float) $job->getInputPixels())
+            + (int) min(PHP_INT_MAX / 4, self::BYTES_PER_OUTPUT_PIXEL * (float) $job->getOutputPixels());
+    }
+
+    /**
+     * Directory of the shipped policy.xml.
+     */
+    public static function policyDirectory(): string
+    {
+        $directory = realpath(\dirname(__DIR__, 2) . '/resources/imagemagick');
+
+        return is_string($directory) ? $directory : \dirname(__DIR__, 2) . '/resources/imagemagick';
+    }
+
+    protected function candidates(array $facts): array
+    {
+        $candidates = parent::candidates($facts);
+        $candidates['icc_profile'] = true;
+        $candidates['metadata'] = true;
+
+        return $candidates;
+    }
+
+    protected function environment(WorkingDirectory $directory, array $facts): array
+    {
+        return [
+            'MAGICK_CONFIGURE_PATH' => self::policyDirectory(),
+            'MAGICK_TEMPORARY_PATH' => $directory->getPath(),
+            'MAGICK_THREAD_LIMIT' => '1',
+            'MAGICK_OCL_DEVICE' => 'OFF',
+        ];
+    }
+
+    protected function sandboxData(): array
+    {
+        return array_merge(parent::sandboxData(), [self::policyDirectory()]);
+    }
+
+    protected function extension(): string
+    {
+        return 'imagick';
+    }
+
+    protected function workerName(): string
+    {
+        return 'imagick';
+    }
+}
