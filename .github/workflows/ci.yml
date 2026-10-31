@@ -235,3 +235,79 @@ jobs:
         env:
           SIC_EXPECTED_ISOLATION_LEVEL: rlimit
         run: vendor/bin/phpunit --group isolation
+
+  # Converts with the real programs, at the sandbox level: once with every
+  # backend and once with each backend alone (SIC_BACKENDS), on the lowest
+  # and the highest supported PHP. SIC_EXPECTED_BACKENDS makes a test of a
+  # backend that is missing or lacks its reference capabilities fail instead
+  # of skipping. The packages are those of tests/docker/Dockerfile; the page
+  # in /usr/share/nginx/html is one that no backend may see.
+  backends:
+    name: Backends (PHP ${{ matrix.php }}, ${{ matrix.backends }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['7.2', '8.5']
+        backends: [all, vips, cwebp, gif2webp, avifenc, imagick, gd]
+    env:
+      SIC_BACKENDS: ${{ matrix.backends == 'all' && 'vips,cwebp,gif2webp,avifenc,imagick,gd' || matrix.backends }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The PHP workers run this PHP CLI with php -n and load gd or imagick
+      # themselves.
+      - name: Set up PHP
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+          ini-file: development
+          extensions: gd, imagick
+          tools: composer:v2
+
+      - name: Install the conversion programs and bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends bubblewrap \
+            libvips-tools libheif-plugin-aomenc webp libavif-bin imagemagick
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo mkdir -p /usr/share/nginx/html
+          echo private | sudo tee /usr/share/nginx/html/index.html > /dev/null
+          vips --version
+          cwebp -version
+          avifenc --version
+          php -r 'printf("gd %s, imagick %s\n", phpversion("gd"), phpversion("imagick"));'
+
+      - name: Install dependencies (highest)
+        run: composer update --no-progress
+
+      # Prints what each enabled backend proved it can do, so that a failure
+      # below can be diagnosed from the log.
+      - name: Report the backend capabilities
+        run: |
+          php <<'PHP'
+          <?php
+          require 'vendor/autoload.php';
+          use Mfonte\SecureImageConverter\Backend\BackendFactory;
+          use Mfonte\SecureImageConverter\Backend\BackendOptions;
+          use Mfonte\SecureImageConverter\Isolation\IsolationDetector;
+          use Mfonte\SecureImageConverter\Isolation\ProcessRunner;
+          $level = (new IsolationDetector(null, null, 0))->detect()->getLevel();
+          echo "isolation level: $level", PHP_EOL;
+          $runner = new ProcessRunner($level);
+          $options = (new BackendOptions())->withCapabilityCache(false);
+          foreach (BackendFactory::createAll($runner, $options, BackendFactory::parseNames(getenv('SIC_BACKENDS'))) as $backend) {
+              echo json_encode($backend->getCapabilities()->toArray(), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES), PHP_EOL;
+          }
+          PHP
+
+      - name: Run the backend tests
+        env:
+          SIC_EXPECTED_BACKENDS: ${{ env.SIC_BACKENDS }}
+          SIC_EXPECTED_ISOLATION_LEVEL: sandbox
+        run: vendor/bin/phpunit --group backends
