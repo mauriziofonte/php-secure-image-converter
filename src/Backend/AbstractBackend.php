@@ -208,7 +208,7 @@ abstract class AbstractBackend implements BackendInterface
      *
      * The estimate admits or refuses a job (convert() refuses it above the memory ceiling); the process then runs with
      * the ceiling as its address space limit at the rlimit and sandbox levels, and without one below them. Each
-     * backend's coefficients come from tests/Fixtures/backend/ memory-peaks.csv, the peak address space (VmPeak) of its
+     * backend's coefficients come from tests/Fixtures/backend/memory-peaks.csv, the peak address space (VmPeak) of its
      * own command line and environment for one job, and MemoryEstimateTest checks two rules on them:
      *
      * - every row is at least ESTIMATE_MARGIN_PERCENT % plus ESTIMATE_MARGIN_BYTES below the estimate of its job;
