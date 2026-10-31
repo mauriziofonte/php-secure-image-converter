@@ -26,6 +26,9 @@ namespace Mfonte\SecureImageConverter\Contract\Exception;
  * |                              |        |                               | pixel or frame limit                          |
  * | `conversion_timeout`         | 422    | ConversionTimeoutException    | processing budget exhausted; a retry will not |
  * |                              |        |                               | help                                          |
+ * | `resource_limit`             | 422    | ResourceLimitException        | a conversion process ran out of its memory,   |
+ * |                              |        |                               | CPU time or file size budget; a retry will    |
+ * |                              |        |                               | not help                                      |
  * | `isolation_unavailable`      | 503    | IsolationUnavailableException | required isolation level missing on the host  |
  * | `concurrency_limit`          | 503    | ConcurrencyLimitException     | no conversion slot or key lock free in time;  |
  * |                              |        |                               | retry later (Retry-After from the exception)  |
@@ -43,6 +46,7 @@ final class ErrorCode
     public const FILE_TOO_LARGE = 'file_too_large';
     public const IMAGE_TOO_LARGE = 'image_too_large';
     public const CONVERSION_TIMEOUT = 'conversion_timeout';
+    public const RESOURCE_LIMIT = 'resource_limit';
     public const ISOLATION_UNAVAILABLE = 'isolation_unavailable';
     public const CONCURRENCY_LIMIT = 'concurrency_limit';
     public const CONVERSION_FAILED = 'conversion_failed';
@@ -68,6 +72,7 @@ final class ErrorCode
             self::FILE_TOO_LARGE,
             self::IMAGE_TOO_LARGE,
             self::CONVERSION_TIMEOUT,
+            self::RESOURCE_LIMIT,
             self::ISOLATION_UNAVAILABLE,
             self::CONCURRENCY_LIMIT,
             self::CONVERSION_FAILED,

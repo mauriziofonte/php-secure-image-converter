@@ -12,6 +12,7 @@ use Mfonte\SecureImageConverter\Contract\Exception\InvalidImageException;
 use Mfonte\SecureImageConverter\Contract\Exception\IsolationUnavailableException;
 use Mfonte\SecureImageConverter\Contract\Exception\LimitExceededException;
 use Mfonte\SecureImageConverter\Contract\Exception\OutputVerificationException;
+use Mfonte\SecureImageConverter\Contract\Exception\ResourceLimitException;
 use Mfonte\SecureImageConverter\Contract\Exception\UnsupportedFormatException;
 
 /**
@@ -72,6 +73,9 @@ interface ConverterInterface
      *                                       [isolation_unavailable, 503]
      * @throws ConcurrencyLimitException     no conversion slot became free in time [concurrency_limit, 503]
      * @throws ConversionTimeoutException    the conversion exceeded its wall-clock timeout [conversion_timeout, 422]
+     * @throws ResourceLimitException        a conversion process ran out of its memory, CPU time or file size
+     *                                       budget, or every backend able to convert the input would need more
+     *                                       memory than the configured ceiling [resource_limit, 422]
      * @throws ConversionFailedException     no backend could produce the output or a fallback, or a backend failed
      *                                       [conversion_failed, 500]
      * @throws OutputVerificationException   the produced output does not match the expected format, dimensions or

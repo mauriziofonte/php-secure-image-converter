@@ -16,6 +16,7 @@ use Mfonte\SecureImageConverter\Contract\Exception\InvalidRequestException;
 use Mfonte\SecureImageConverter\Contract\Exception\IsolationUnavailableException;
 use Mfonte\SecureImageConverter\Contract\Exception\LimitExceededException;
 use Mfonte\SecureImageConverter\Contract\Exception\OutputVerificationException;
+use Mfonte\SecureImageConverter\Contract\Exception\ResourceLimitException;
 use Mfonte\SecureImageConverter\Contract\Exception\UnsupportedFormatException;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -44,6 +45,7 @@ final class ExceptionHierarchyTest extends TestCase
         'file_too_large' => 413,
         'image_too_large' => 422,
         'conversion_timeout' => 422,
+        'resource_limit' => 422,
         'isolation_unavailable' => 503,
         'concurrency_limit' => 503,
         'conversion_failed' => 500,
@@ -67,6 +69,7 @@ final class ExceptionHierarchyTest extends TestCase
             'ConcurrencyLimitException' => [ConcurrencyLimitException::class, \OverflowException::class, 'concurrency_limit'],
             'ConversionFailedException' => [ConversionFailedException::class, \RuntimeException::class, 'conversion_failed'],
             'ConversionTimeoutException' => [ConversionTimeoutException::class, \RuntimeException::class, 'conversion_timeout'],
+            'ResourceLimitException' => [ResourceLimitException::class, \RuntimeException::class, 'resource_limit'],
             'OutputVerificationException' => [OutputVerificationException::class, \UnexpectedValueException::class, 'output_verification_failed'],
             'InvalidArgumentException' => [InvalidArgumentException::class, \InvalidArgumentException::class, 'internal_error'],
         ];
@@ -130,7 +133,7 @@ final class ExceptionHierarchyTest extends TestCase
     {
         $docComment = (new \ReflectionClass(ErrorCode::class))->getDocComment();
         self::assertIsString($docComment);
-        self::assertSame(12, preg_match_all('/^ \* \| `([a-z_]+)` +\| (\d{3}) +\| (\w+) +\|/m', $docComment, $rows, PREG_SET_ORDER));
+        self::assertSame(13, preg_match_all('/^ \* \| `([a-z_]+)` +\| (\d{3}) +\| (\w+) +\|/m', $docComment, $rows, PREG_SET_ORDER));
 
         $documented = [];
         foreach ($rows as $row) {
