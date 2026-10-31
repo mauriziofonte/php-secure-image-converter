@@ -26,37 +26,38 @@ final class ImagickBackend extends AbstractWorkerBackend
 
     /**
      * Address space by profile (AbstractBackend::estimate()): fixed bytes, bytes per encoded pixel, and bytes per
-     * pixel more for an input of more than 8 bits per channel. The peak address space (VmPeak, MiB) of PHP with
-     * ImageMagick for the profile's costliest effort on RGBA noise at 1, 4, 6 and 20 megapixels, a 16-bit input in
-     * parentheses:
+     * pixel more for an input of more than 8 bits per channel, on top of BYTES_PER_INPUT_PIXEL per decoded pixel (the
+     * pixel cache holds 16 bits per channel, whatever the input format) and, for a resize, RESIZE_BYTES per encoded
+     * pixel (the resized copy). The largest peak address space (VmPeak, MiB) of tests/Fixtures/backend/
+     * memory-peaks.csv at each size of a still image, over every content, input format, bit depth and effort of the
+     * profile:
      *
-     * | Profile                        | Fixed   | Per pixel | 16-bit | 1 MP      | 4 MP      | 6 MP | 20 MP |
-     * | ------------------------------ | ------- | --------- | ------ | --------- | --------- | ---- | ----- |
-     * | JPEG, PNG, TIFF, BMP           | 160 MiB | 7         | 0      | 85 (85)   | 131 (131) |      | 299   |
-     * | GIF                            | 288 MiB | 19        | 0      | 231 (231) | 306 (306) | 355  |       |
-     * | WEBP, effort 0 to 8            | 144 MiB | 42        | 0      | 114 (114) | 247 (247) | 334  | 935   |
-     * | WEBP, effort 9 (method 6)      | 160 MiB | 60        | 0      | 134 (134) | 311 (311) |      |       |
-     * | WEBP lossless                  | 160 MiB | 38        | 0      | 123 (123) | 247 (247) |      |       |
-     * | AVIF, effort 0 to 2            | 320 MiB | 27        | 11     | 264 (281) | 362 (428) |      | 877   |
-     * | AVIF, effort 3 to 9            | 320 MiB | 42        | 12     | 282 (299) | 415 (482) | 498  |       |
+     * | Profile                   | Fixed   | Per pixel | 16-bit | 1 MP | 2.1 MP | 4 MP | 8.3 MP | 20 MP |
+     * | ------------------------- | ------- | --------- | ------ | ---- | ------ | ---- | ------ | ----- |
+     * | JPEG, PNG, TIFF, BMP      | 144 MiB | 24        | 4      | 98   | 126    | 177  | 292    | 604   |
+     * | GIF                       | 288 MiB | 24        | 0      | 235  | 263    | 314  | 413    | 694   |
+     * | WEBP, effort 0 to 8       | 128 MiB | 48        | 0      | 117  | 174    | 252  | 435    | 935   |
+     * | WEBP, effort 9 (method 6) | 128 MiB | 72        | 0      | 137  | 204    | 314  | 585    | 1202  |
+     * | WEBP lossless             | 176 MiB | 48        | 0      | 134  | 207    | 286  | 436    | 760   |
+     * | AVIF, effort 0 to 2       | 336 MiB | 120       | 24     | 375  | 497    | 711  | 1169   | 2241  |
+     * | AVIF, effort 3 to 9       | 336 MiB | 156       | 24     | 401  | 546    | 800  | 1169   |       |
      *
-     * On top come 12 bytes per decoded pixel (the pixel cache holds 16 bits per channel, whatever the input format)
-     * and, for a resize, RESIZE_BYTES per encoded pixel (the resized copy: 254 MiB from 1 to 4 megapixels, against
-     * 247 MiB without resize). Measured with ImageMagick 6.9.12 (Q16), libwebp 1.3, libheif 1.17 and libaom 3.8.
+     * AV1 needs the most for screenshots (1084 MiB for one of 8.3 megapixels on a transparent page at effort 4, 498
+     * for noise), and up to 93 MiB more for a 16-bit input of 4 megapixels.
      */
     private const PROFILES = [
-        'still' => [160 * self::MIB, 7, 0],
-        'gif' => [288 * self::MIB, 19, 0],
-        'webp' => [144 * self::MIB, 42, 0],
-        'webp_slow' => [160 * self::MIB, 60, 0],
-        'webp_lossless' => [160 * self::MIB, 38, 0],
-        'avif_fast' => [320 * self::MIB, 27, 11],
-        'avif' => [320 * self::MIB, 42, 12],
+        'still' => [144 * self::MIB, 24, 4],
+        'gif' => [288 * self::MIB, 24, 0],
+        'webp' => [128 * self::MIB, 48, 0],
+        'webp_slow' => [128 * self::MIB, 72, 0],
+        'webp_lossless' => [176 * self::MIB, 48, 0],
+        'avif_fast' => [336 * self::MIB, 120, 24],
+        'avif' => [336 * self::MIB, 156, 24],
     ];
 
     private const BYTES_PER_INPUT_PIXEL = 12;
 
-    private const RESIZE_BYTES = 12;
+    private const RESIZE_BYTES = 24;
 
     private const MIB = 1048576;
 

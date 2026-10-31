@@ -26,23 +26,24 @@ final class AvifencBackend extends AbstractBackend
 
     /**
      * Address space by profile (AbstractBackend::estimate()): fixed bytes and bytes per pixel (avifenc does not
-     * resize). The peak address space (VmPeak, MiB) of the profile's costliest effort on RGBA noise at 1, 4, 6 and 20
-     * megapixels, a 16-bit input in parentheses (it is encoded with 8 bits):
+     * resize, and encodes a 16-bit input with 8 bits). The largest peak address space (VmPeak, MiB) of
+     * tests/Fixtures/backend/memory-peaks.csv at each size, over every content, bit depth and effort of the profile:
      *
-     * | Profile                          | Fixed  | Per pixel | 1 MP    | 4 MP      | 6 MP | 20 MP |
-     * | -------------------------------- | ------ | --------- | ------- | --------- | ---- | ----- |
-     * | lossy, effort 0 to 4 (-s 6-10)   | 80 MiB | 27        | 65 (65) | 120 (118) |      | 456   |
-     * | lossy, effort 5 to 9 (-s 1-4)    | 64 MiB | 46        | 69 (69) | 181 (181) |      |       |
-     * | lossless, effort 0 to 4          | 80 MiB | 52        | 92 (90) | 221 (214) | 289  |       |
-     * | lossless, effort 5 to 9          | 64 MiB | 72        | 94      | 273 (265) |      |       |
+     * | Profile                        | Fixed   | Per pixel | 1 MP | 2.1 MP | 4 MP | 8.3 MP | 20 MP |
+     * | ------------------------------ | ------- | --------- | ---- | ------ | ---- | ------ | ----- |
+     * | lossy, effort 0 to 4 (-s 6-10) | 144 MiB | 120       | 182  | 261    | 445  | 839    | 485   |
+     * | lossy, effort 5 to 9 (-s 1-4)  | 112 MiB | 152       | 183  | 312    | 536  |        |       |
+     * | lossless, effort 0 to 4        | 144 MiB | 136       | 197  | 290    | 497  | 938    |       |
+     * | lossless, effort 5 to 9        | 128 MiB | 160       | 193  | 332    | 576  |        |       |
      *
-     * Measured with libavif 1.0 and libaom 3.8 on one thread.
+     * Screenshots and 256-colour images need the most: 839 MiB for a screenshot of 8.3 megapixels on a transparent
+     * page at effort 4, against 212 for noise.
      */
     private const PROFILES = [
-        'fast' => [80 * self::MIB, 27],
-        'slow' => [64 * self::MIB, 46],
-        'lossless' => [80 * self::MIB, 52],
-        'lossless_slow' => [64 * self::MIB, 72],
+        'fast' => [144 * self::MIB, 120],
+        'slow' => [112 * self::MIB, 152],
+        'lossless' => [144 * self::MIB, 136],
+        'lossless_slow' => [128 * self::MIB, 160],
     ];
 
     private const MIB = 1048576;

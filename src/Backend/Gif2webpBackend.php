@@ -27,15 +27,32 @@ final class Gif2webpBackend extends AbstractBackend
     public const NAME = 'gif2webp';
 
     /**
-     * Fixed address space and bytes per pixel of one frame, and per encoded pixel of every frame for the output it
-     * keeps. Measured in the sandbox: 23 and 39 MiB for 6 frames of 0.25 and 1 megapixel, 35 MiB for 30 frames of
-     * 0.75 megapixels; rounded up.
+     * Address space by profile (AbstractBackend::estimate()): fixed bytes and bytes per pixel of one frame, plus
+     * BYTES_PER_ANIMATION_PIXEL per pixel of every frame of an animation (the encoded output it keeps). The largest
+     * peak address space (VmPeak, MiB) of tests/Fixtures/backend/memory-peaks.csv at each size of a still GIF, over
+     * every content and effort of the profile:
+     *
+     * | Profile                       | Fixed  | Per pixel | 1 MP | 2.1 MP | 4 MP | 8.3 MP | 20 MP |
+     * | ----------------------------- | ------ | --------- | ---- | ------ | ---- | ------ | ----- |
+     * | lossy, effort 0 to 8 (-m 0-5) | 48 MiB | 76        | 50   | 127    | 233  | 484    | 884   |
+     * | lossy, effort 9 (-m 6)        | 48 MiB | 96        | 77   | 155    | 271  | 595    |       |
+     * | lossless, effort 0 to 7       | 64 MiB | 68        | 54   | 107    | 205  | 386    |       |
+     * | lossless, effort 8 and 9      | 64 MiB | 84        | 82   | 164    | 270  | 465    | 1128  |
+     *
+     * Palette images with transparency need the most for lossy output, palette noise for lossless. An animation needs
+     * little more than its first frame (2000 x 2000 pixels of palette noise at effort 4: 187 MiB for 6 frames, 163 for
+     * one).
      */
-    private const BASE_BYTES = 33554432;
+    private const PROFILES = [
+        'lossy' => [48 * self::MIB, 76],
+        'lossy_slow' => [48 * self::MIB, 96],
+        'lossless' => [64 * self::MIB, 68],
+        'lossless_slow' => [64 * self::MIB, 84],
+    ];
 
-    private const BYTES_PER_FRAME_PIXEL = 32;
+    private const BYTES_PER_ANIMATION_PIXEL = 2;
 
-    private const BYTES_PER_OUTPUT_PIXEL = 2;
+    private const MIB = 1048576;
 
     public function getName(): string
     {
@@ -44,15 +61,14 @@ final class Gif2webpBackend extends AbstractBackend
 
     public function estimateMemoryBytes(BackendJob $job): int
     {
-        $input = $job->getInput();
+        if ($job->needsLosslessMode()) {
+            $profile = $job->getEffort() >= 8 ? 'lossless_slow' : 'lossless';
+        } else {
+            $profile = self::webpMethod($job) === 6 ? 'lossy_slow' : 'lossy';
+        }
+        list($fixed, $perPixel) = self::PROFILES[$profile];
 
-        return self::addressSpace(
-            self::BASE_BYTES,
-            self::BYTES_PER_FRAME_PIXEL,
-            $input->getWidth() * $input->getHeight(),
-            self::BYTES_PER_OUTPUT_PIXEL,
-            $job->getOutputPixels()
-        );
+        return self::estimate($job, $fixed, 0, $perPixel, 0, self::BYTES_PER_ANIMATION_PIXEL);
     }
 
     protected function programs(ExecutableFinder $finder): array

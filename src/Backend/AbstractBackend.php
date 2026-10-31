@@ -90,6 +90,17 @@ abstract class AbstractBackend implements BackendInterface
     private const MAX_LIBRARY_DIRECTORIES = 8;
 
     /**
+     * The margin of every memory estimate (see estimate()): at least this many percent of the largest measured peak
+     * of the job, plus ESTIMATE_MARGIN_BYTES, above that peak.
+     */
+    public const ESTIMATE_MARGIN_PERCENT = 20;
+
+    /**
+     * The fixed part of the margin of every memory estimate (see ESTIMATE_MARGIN_PERCENT): 32 MiB.
+     */
+    public const ESTIMATE_MARGIN_BYTES = 33554432;
+
+    /**
      * @var ProcessRunnerInterface
      */
     private $runner;
@@ -172,7 +183,7 @@ abstract class AbstractBackend implements BackendInterface
         $needed = $this->estimateMemoryBytes($job);
         if ($needed > $this->options->getMemoryCeilingBytes()) {
             throw new ResourceLimitException(sprintf(
-                'The %s backend needs up to %d MiB for this image, above the memory ceiling of %d MiB.',
+                'The %s backend estimates %d MiB for this image, above the memory ceiling of %d MiB.',
                 $this->getName(),
                 (int) ceil($needed / 1048576),
                 intdiv($this->options->getMemoryCeilingBytes(), 1048576)
@@ -183,16 +194,8 @@ abstract class AbstractBackend implements BackendInterface
     }
 
     /**
-     * An address space estimate: $base bytes, plus $perInputPixel bytes per decoded pixel and $perOutputPixel per
-     * encoded pixel, saturated at a quarter of PHP_INT_MAX (far above any memory ceiling).
-     */
-    final protected static function addressSpace(int $base, int $perInputPixel, int $inputPixels, int $perOutputPixel, int $outputPixels): int
-    {
-        return (int) min(PHP_INT_MAX / 4, $base + $perInputPixel * (float) $inputPixels + $perOutputPixel * (float) $outputPixels);
-    }
-
-    /**
-     * An address space estimate from a backend's measured coefficients, saturated like addressSpace():
+     * An address space estimate from a backend's measured coefficients, saturated at a quarter of PHP_INT_MAX (far
+     * above any memory ceiling):
      *
      * - $fixed bytes;
      * - $perInputPixel bytes per decoded pixel (every frame of an animated output);
@@ -202,13 +205,27 @@ abstract class AbstractBackend implements BackendInterface
      * - $perFramePixel bytes per encoded pixel of every frame of an animated output;
      * - $perResizedPixel bytes per encoded pixel of one frame when the output size differs from the input size.
      *
-     * The coefficients come from the peak address space (VmPeak) of the backend's own command line and environment
-     * on RGBA noise, the costliest content: at 1 and 4 megapixels for every effort, at 6 and 20 megapixels for some,
-     * with 8 and 16 bits per channel, from every input format, resized and not. The bytes per pixel are 15 % above
-     * the steepest slope between two sizes, and the fixed part puts the estimate at least 15 % plus 16 MiB above
-     * every peak; for vips and Imagick, whose encoder threads sometimes reserve a second malloc arena (64 MiB), also
-     * at least 80 MiB above the lowest peak of each job. The thread counts do not depend on the number of
-     * processors, so neither do the peaks.
+     * The estimate admits or refuses a job (convert() refuses it above the memory ceiling); the process then runs with
+     * the ceiling as its address space limit. Each backend's coefficients come from tests/Fixtures/backend/
+     * memory-peaks.csv, the peak address space (VmPeak) of its own command line and environment for one job, and
+     * MemoryEstimateTest checks two rules on them:
+     *
+     * - every row is at least ESTIMATE_MARGIN_PERCENT % plus ESTIMATE_MARGIN_BYTES below the estimate of its job;
+     * - for rows that differ only in size, the estimate grows between the two largest sizes by at least the growth of
+     *   the peak plus ESTIMATE_MARGIN_PERCENT %, so that beyond the largest size measured it grows at least as fast
+     *   as each content did between its two largest sizes.
+     *
+     * The rows cover the content classes of tests/Fixtures/ContentImages (noise, screenshots of flat panels and text,
+     * 256-colour screenshots and palette noise, opaque and with transparency) as truecolor, 16-bit and indexed PNG
+     * and as GIF, re-encoded as JPEG, CMYK JPEG, BMP (24-bit, and 32-bit bit fields), TIFF and WEBP where the backend
+     * reads them, though not every class for every profile. Every profile has rows at 1, 2.1 and 4 megapixels, all
+     * but avifenc at effort 5 to 9 at 8.3, most of those that are not AV1 at effort 3 to 9 at 20; there are
+     * enlargements from 1 megapixel up to 36, reductions from 8.3 to 2.1, and animations of up to 40 frames. They were
+     * measured with the library versions of tests/docker (Ubuntu 24.04). The estimate is therefore an upper bound of
+     * what was measured, not of every image. Not measured: other content (photographs among them), larger images, and
+     * other library versions, whose encoders can need more. A job that needs more than the ceiling fails: with
+     * resource_limit when the limit stops the process, or with conversion_failed when an encoder writes a truncated
+     * file and exits with code 0, which the output check rejects.
      */
     final protected static function estimate(
         BackendJob $job,

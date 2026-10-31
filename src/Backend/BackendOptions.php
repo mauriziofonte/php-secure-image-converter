@@ -40,24 +40,28 @@ use Psr\Log\NullLogger;
  * address space it needs (BackendInterface::estimateMemoryBytes()) from the pixels it decodes (every frame of a
  * kept animation) and encodes, the output format, the effort, the lossless mode, the bits per channel and the input
  * format; a job whose estimate is above the ceiling is refused with resource_limit before anything runs, and
- * BackendResolver picks another backend or fallback format. The estimate only admits jobs; it comes from peaks
- * measured on noise plus a margin (AbstractBackend::estimate()). The largest still image, in megapixels, that each
- * backend admits below the default ceiling, with 8 bits per channel (16 bits in parentheses where fewer); the default
- * Limits allow 40 megapixels per frame, and the default effort is 4:
+ * BackendResolver picks another backend or fallback format. The estimate only admits jobs. It is set above the
+ * peaks measured on several kinds of content, with a margin (AbstractBackend::estimate()), because the memory an
+ * encoder takes depends on the content as well as on the pixels: AV1 needs the most for screenshots and 256-colour
+ * images (at effort 4 and 8.3 megapixels, avifenc takes 831 MiB for a screenshot and 212 for noise, vips 1086 and
+ * 568). Content that was not measured, such as photographs, and other library versions can need more; a job that
+ * then reaches the ceiling fails (see AbstractBackend::estimate()). The largest still image, in megapixels, that each
+ * backend admits below the default ceiling, with 8 bits per channel (16 bits in parentheses where fewer); the
+ * default Limits allow 40 megapixels per frame, and the default effort is 4:
  *
- * | Output               | Effort | vips    | cwebp | GD  | Imagick | avifenc |
- * | -------------------- | ------ | ------- | ----- | --- | ------- | ------- |
- * | JPEG, PNG, TIFF, BMP | any    | 254     |       | 204 | 104     |         |
- * | GIF                  | any    | 29      |       | 204 | 59      |         |
- * | WEBP                 | 0 to 8 | 37      | 54    | 42  | 36      |         |
- * | WEBP                 | 9      | 25 (21) | 35    | 42  | 27      |         |
- * | WEBP lossless        | 0 to 7 | 37      | 51    | 45  | 39      |         |
- * | WEBP lossless        | 8, 9   | 37      | 32    | 45  | 39      |         |
- * | AVIF                 | 0 to 2 | 42 (40) |       |     | 46 (36) | 76      |
- * | AVIF                 | 3, 4   | 30      |       |     | 33 (27) | 76      |
- * | AVIF                 | 5 to 9 | 30      |       |     | 33 (27) | 45      |
- * | AVIF lossless        | 0 to 4 | 30      |       |     |         | 39      |
- * | AVIF lossless        | 5 to 9 | 30      |       |     |         | 28      |
+ * | Output               | Effort | vips | cwebp | gif2webp | GD  | Imagick | avifenc |
+ * | -------------------- | ------ | ---- | ----- | -------- | --- | ------- | ------- |
+ * | JPEG, PNG, TIFF, BMP | any    | 88   |       |          | 126 | 55 (49) |         |
+ * | GIF                  | any    | 25   |       |          | 126 | 51      |         |
+ * | WEBP                 | 0 to 8 | 23   | 47    | 27       | 38  | 33      |         |
+ * | WEBP                 | 9      | 16   | 29    | 21       | 38  | 23      |         |
+ * | WEBP lossless        | 0 to 7 | 23   | 46    | 30       | 35  | 32      |         |
+ * | WEBP lossless        | 8, 9   | 23   | 24    | 24       | 35  | 32      |         |
+ * | AVIF                 | 0 to 2 | 12   |       |          |     | 13 (11) | 16      |
+ * | AVIF                 | 3, 4   | 9    |       |          |     | 10 (9)  | 16      |
+ * | AVIF                 | 5 to 9 | 9    |       |          |     | 10 (9)  | 13      |
+ * | AVIF lossless        | 0 to 4 | 9    |       |          |     |         | 14      |
+ * | AVIF lossless        | 5 to 9 | 9    |       |          |     |         | 12      |
  *
  * The largest animations fit only in gif2webp, which keeps one frame in memory (vips decodes every frame).
  */

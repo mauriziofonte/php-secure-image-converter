@@ -25,30 +25,30 @@ final class CwebpBackend extends AbstractBackend
     public const NAME = 'cwebp';
 
     /**
-     * Address space by profile (AbstractBackend::estimate()): fixed bytes and bytes per encoded pixel, on top of 8
-     * bytes per decoded pixel. The peak address space (VmPeak, MiB) of the profile's costliest effort on RGBA noise at
-     * 1, 4, 6 and 20 megapixels, a 16-bit input in parentheses:
+     * Address space by profile (AbstractBackend::estimate()): fixed bytes and bytes per encoded pixel, on top of
+     * BYTES_PER_INPUT_PIXEL per decoded pixel and, for a resize, RESIZE_BYTES per encoded pixel (the rescaled copy).
+     * The largest peak address space (VmPeak, MiB) of tests/Fixtures/backend/memory-peaks.csv at each size of a still
+     * image, over every content, input format, bit depth and effort of the profile:
      *
-     * | Profile                       | Fixed   | Per pixel | 1 MP    | 4 MP      | 6 MP | 20 MP |
-     * | ----------------------------- | ------- | --------- | ------- | --------- | ---- | ----- |
-     * | lossy, effort 0 to 8 (-m 0-5) | 32 MiB  | 31        | 42 (42) | 139 (139) |      | 646   |
-     * | lossy, effort 9 (-m 6)        | 32 MiB  | 51        | 62 (62) | 208 (208) | 305  |       |
-     * | lossless, effort 0 to 7 (-z)  | 48 MiB  | 33        | 60 (60) | 147 (147) | 215  |       |
-     * | lossless, effort 8 and 9      | 48 MiB  | 57        | 73 (74) | 234 (234) |      |       |
+     * | Profile                       | Fixed  | Per pixel | 1 MP | 2.1 MP | 4 MP | 8.3 MP | 20 MP |
+     * | ----------------------------- | ------ | --------- | ---- | ------ | ---- | ------ | ----- |
+     * | lossy, effort 0 to 8 (-m 0-5) | 64 MiB | 36        | 42   | 90     | 140  | 278    | 646   |
+     * | lossy, effort 9 (-m 6)        | 48 MiB | 64        | 63   | 118    | 208  | 436    | 883   |
+     * | lossless, effort 0 to 7 (-z)  | 96 MiB | 36        | 61   | 114    | 148  | 295    | 507   |
+     * | lossless, effort 8 and 9      | 48 MiB | 76        | 76   | 144    | 249  | 514    | 752   |
      *
-     * cwebp reads a 16-bit PNG as 8 bits. A resize keeps a rescaled copy: RESIZE_BYTES more per encoded pixel (164
-     * MiB from 1 to 4 megapixels, against 139 MiB without resize). Measured with libwebp 1.3.
+     * Noise and palette noise need the most; cwebp reads a 16-bit PNG as 8 bits.
      */
     private const PROFILES = [
-        'lossy' => [32 * self::MIB, 31],
-        'lossy_slow' => [32 * self::MIB, 51],
-        'lossless' => [48 * self::MIB, 33],
-        'lossless_slow' => [48 * self::MIB, 57],
+        'lossy' => [64 * self::MIB, 36],
+        'lossy_slow' => [48 * self::MIB, 64],
+        'lossless' => [96 * self::MIB, 36],
+        'lossless_slow' => [48 * self::MIB, 76],
     ];
 
     private const BYTES_PER_INPUT_PIXEL = 8;
 
-    private const RESIZE_BYTES = 16;
+    private const RESIZE_BYTES = 8;
 
     private const MIB = 1048576;
 

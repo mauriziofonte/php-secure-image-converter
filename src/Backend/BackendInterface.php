@@ -37,7 +37,8 @@ interface BackendInterface
      * estimate is above the memory ceiling is refused before anything runs, so that BackendResolver can pick another
      * backend. The process itself always runs with the memory ceiling as its address space limit. The estimate grows
      * with the decoded pixels (every frame for an animation) and the encoded pixels, plus the fixed overhead of the
-     * program; what it is measured on is documented by each backend (see AbstractBackend::estimate()).
+     * program; it is set above the peaks measured for the backend on several kinds of content, which are not every
+     * image (see AbstractBackend::estimate()).
      */
     public function estimateMemoryBytes(BackendJob $job): int;
 

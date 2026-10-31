@@ -47,16 +47,10 @@ final class MemoryEstimateTest extends TestCase
     private const MIB = 1048576;
 
     /**
-     * Backends whose encoder threads reserve a second malloc arena (64 MiB) in some runs only: their estimate stays
-     * 80 MiB above the smallest peak too.
-     */
-    private const THREADED = [VipsBackend::NAME, ImagickBackend::NAME];
-
-    /**
-     * Every measured job: backend, input and output format, effort, lossless, bits per channel, input and output
-     * size, frames, and the largest and smallest peak in MiB.
+     * Every measured job: backend, input format and variant, content, output format, effort, lossless, bits per
+     * channel, input and output size, frames, and the largest and smallest peak in MiB.
      *
-     * @return array<string, array{0: string, 1: string, 2: string, 3: int, 4: bool, 5: int, 6: int, 7: int, 8: int, 9: int, 10: int, 11: int, 12: int}>
+     * @return array<string, array{0: string, 1: string, 2: string, 3: string, 4: string, 5: int, 6: bool, 7: int, 8: int, 9: int, 10: int, 11: int, 12: int, 13: int, 14: int}>
      */
     public static function peaks(): array
     {
@@ -71,21 +65,35 @@ final class MemoryEstimateTest extends TestCase
             $fields = explode(',', $line);
             if ($header === null) {
                 $header = $fields;
-                self::assertCount(13, $header);
+                self::assertCount(15, $header);
 
                 continue;
             }
-            self::assertCount(13, $fields, $line);
-            list($backend, $input, $output) = $fields;
-            $numbers = array_map('intval', array_slice($fields, 3));
-            $label = sprintf('%s %s to %s effort %d%s %d-bit %dx%d', $backend, $input, $output, $numbers[0], $numbers[1] === 1 ? ' lossless' : '', $numbers[2], $numbers[3], $numbers[4]);
+            self::assertCount(15, $fields, $line);
+            list($backend, $input, $variant, $content, $output) = $fields;
+            $numbers = array_map('intval', array_slice($fields, 5));
+            $label = sprintf(
+                '%s %s%s %s to %s effort %d%s %d-bit %dx%d',
+                $backend,
+                $input,
+                $variant !== '' ? ' (' . $variant . ')' : '',
+                $content,
+                $output,
+                $numbers[0],
+                $numbers[1] === 1 ? ' lossless' : '',
+                $numbers[2],
+                $numbers[3],
+                $numbers[4]
+            );
             if ($numbers[5] !== $numbers[3] || $numbers[6] !== $numbers[4]) {
                 $label .= sprintf(' to %dx%d', $numbers[5], $numbers[6]);
             }
             if ($numbers[7] > 1) {
                 $label .= sprintf(' x%d', $numbers[7]);
             }
-            $rows[$label] = [$backend, $input, $output, $numbers[0], $numbers[1] === 1, $numbers[2], $numbers[3], $numbers[4], $numbers[5], $numbers[6], $numbers[7], $numbers[8], $numbers[9]];
+            self::assertArrayNotHasKey($label, $rows, 'one row per job');
+            self::assertGreaterThanOrEqual($numbers[9], $numbers[8], $line);
+            $rows[$label] = [$backend, $input, $variant, $content, $output, $numbers[0], $numbers[1] === 1, $numbers[2], $numbers[3], $numbers[4], $numbers[5], $numbers[6], $numbers[7], $numbers[8], $numbers[9]];
         }
         self::assertGreaterThan(200, count($rows));
 
@@ -93,12 +101,16 @@ final class MemoryEstimateTest extends TestCase
     }
 
     /**
+     * The margin rule of AbstractBackend::ESTIMATE_MARGIN_PERCENT and ESTIMATE_MARGIN_BYTES, for every row.
+     *
      * @dataProvider peaks
      */
     #[DataProvider('peaks')]
-    public function testTheEstimateIsAboveTheMeasuredPeak(
+    public function testTheEstimateIsAboveTheMeasuredPeakWithTheMargin(
         string $backend,
         string $input,
+        string $variant,
+        string $content,
         string $output,
         int $effort,
         bool $lossless,
@@ -111,15 +123,53 @@ final class MemoryEstimateTest extends TestCase
         int $largest,
         int $smallest
     ): void {
-        $info = (new ImageInfo($input, $width, $height, $frames, 1000))->withBitDepth($bits);
-        $job = $this->job($info, $output, $outputWidth, $outputHeight)->withEffort($effort)->withLossless($lossless);
+        $estimate = $this->estimateOf(\func_get_args());
+        $required = $largest * self::MIB * (100 + AbstractBackend::ESTIMATE_MARGIN_PERCENT) / 100 + AbstractBackend::ESTIMATE_MARGIN_BYTES;
 
-        $estimate = self::backend($backend)->estimateMemoryBytes($job) / self::MIB;
+        self::assertGreaterThanOrEqual($required, $estimate, sprintf(
+            '%d MiB is not %d %% and %d MiB above the largest peak of %d MiB (%s content)',
+            intdiv($estimate, self::MIB),
+            AbstractBackend::ESTIMATE_MARGIN_PERCENT,
+            intdiv(AbstractBackend::ESTIMATE_MARGIN_BYTES, self::MIB),
+            $largest,
+            $content
+        ));
+    }
 
-        self::assertGreaterThanOrEqual(1.15 * $largest + 16, $estimate, '15 % and 16 MiB above the largest peak');
-        if (in_array($backend, self::THREADED, true)) {
-            self::assertGreaterThanOrEqual($smallest + 80, $estimate, 'room for a second malloc arena');
+    /**
+     * The rows that differ only in size (one content, input, output, effort and bit depth, not resized): between the
+     * two largest sizes of each, the estimate grows by at least the growth of the peak plus
+     * AbstractBackend::ESTIMATE_MARGIN_PERCENT %, so that it grows at least as fast as the costliest content measured
+     * beyond the largest size measured.
+     */
+    public function testTheEstimateGrowsAtLeastAsFastAsThePeakOfEveryContent(): void
+    {
+        $series = [];
+        foreach (self::peaks() as $row) {
+            if ($row[8] !== $row[10] || $row[9] !== $row[11]) {
+                continue;
+            }
+            $key = implode(' ', [$row[0], $row[1], $row[2], $row[3], $row[4], $row[5], $row[6] ? 'lossless' : 'lossy', $row[7], $row[12]]);
+            $series[$key][$row[8] * $row[9]] = $row;
         }
+        $failures = [];
+        $checked = 0;
+        foreach ($series as $key => $rows) {
+            if (\count($rows) < 2) {
+                continue;
+            }
+            krsort($rows);
+            list($large, $small) = array_values($rows);
+            $growth = $this->estimateOf($large) - $this->estimateOf($small);
+            $needed = ($large[13] - $small[13]) * self::MIB * (100 + AbstractBackend::ESTIMATE_MARGIN_PERCENT) / 100;
+            ++$checked;
+            if ($growth < $needed) {
+                $failures[] = sprintf('%s, %dx%d to %dx%d: %d MiB, not %d', $key, $small[8], $small[9], $large[8], $large[9], intdiv($growth, self::MIB), (int) ($needed / self::MIB));
+            }
+        }
+
+        self::assertGreaterThan(100, $checked);
+        self::assertSame([], $failures);
     }
 
     public function testTheEstimateFollowsTheSettingsThatCostMemory(): void
@@ -127,19 +177,30 @@ final class MemoryEstimateTest extends TestCase
         $png = self::png(2000, 2000, 8);
         $deep = self::png(2000, 2000, 16);
         $webp = new ImageInfo(ImageFormat::WEBP, 2000, 2000, 1, 1000);
+        $gif = new ImageInfo(ImageFormat::GIF, 2000, 2000, 1, 1000);
         $vips = self::backend(VipsBackend::NAME);
         $cwebp = self::backend(CwebpBackend::NAME);
         $imagick = self::backend(ImagickBackend::NAME);
         $avifenc = self::backend(AvifencBackend::NAME);
+        $gd = self::backend(GdBackend::NAME);
+        $gif2webp = self::backend(Gif2webpBackend::NAME);
 
-        foreach ([$vips, $cwebp, $imagick] as $backend) {
-            $job = $this->job($png, ImageFormat::WEBP);
+        foreach ([[$vips, $png], [$cwebp, $png], [$imagick, $png], [$gif2webp, $gif]] as list($backend, $input)) {
+            $job = $this->job($input, ImageFormat::WEBP);
             self::assertGreaterThan(
                 $backend->estimateMemoryBytes($job->withEffort(8)),
                 $backend->estimateMemoryBytes($job->withEffort(9)),
                 $backend->getName() . ': libwebp method 6'
             );
             self::assertSame($backend->estimateMemoryBytes($job->withEffort(0)), $backend->estimateMemoryBytes($job->withEffort(8)));
+        }
+        foreach ([$cwebp, $gif2webp] as $backend) {
+            $job = $this->job($backend === $cwebp ? $png : $gif, ImageFormat::WEBP)->withLossless(true);
+            self::assertGreaterThan(
+                $backend->estimateMemoryBytes($job->withEffort(7)),
+                $backend->estimateMemoryBytes($job->withEffort(8)),
+                $backend->getName() . ': the lossless presets of methods 5 and 6'
+            );
         }
         foreach ([$vips, $imagick] as $backend) {
             $job = $this->job($png, ImageFormat::AVIF);
@@ -152,22 +213,23 @@ final class MemoryEstimateTest extends TestCase
         $job = $this->job($png, ImageFormat::AVIF);
         self::assertSame($vips->estimateMemoryBytes($job->withEffort(3)), $vips->estimateMemoryBytes($job->withEffort(0)->withLossless(true)), 'lossless AV1 at any effort');
         self::assertGreaterThan($avifenc->estimateMemoryBytes($job->withEffort(4)), $avifenc->estimateMemoryBytes($job->withEffort(5)), 'speed 4 and slower');
-        self::assertGreaterThan($avifenc->estimateMemoryBytes($job->withEffort(9)), $avifenc->estimateMemoryBytes($job->withLossless(true)));
+        self::assertGreaterThan($avifenc->estimateMemoryBytes($job->withEffort(4)), $avifenc->estimateMemoryBytes($job->withEffort(4)->withLossless(true)));
         self::assertGreaterThan($avifenc->estimateMemoryBytes($job->withLossless(true)->withEffort(4)), $avifenc->estimateMemoryBytes($job->withLossless(true)->withEffort(5)));
 
-        $job = $this->job($png, ImageFormat::WEBP)->withEffort(9);
-        self::assertGreaterThan($vips->estimateMemoryBytes($job), $vips->estimateMemoryBytes($this->job($deep, ImageFormat::WEBP)->withEffort(9)), 'more than 8 bits');
-        self::assertGreaterThan($vips->estimateMemoryBytes($job), $vips->estimateMemoryBytes($this->job($webp, ImageFormat::WEBP)->withEffort(9)), 'the WEBP decoder');
+        self::assertGreaterThan($imagick->estimateMemoryBytes($job), $imagick->estimateMemoryBytes($this->job($deep, ImageFormat::AVIF)), 'more than 8 bits');
+        self::assertSame($vips->estimateMemoryBytes($job), $vips->estimateMemoryBytes($this->job($deep, ImageFormat::AVIF)), 'the 16-bit rows need no more');
         self::assertGreaterThan(
-            $cwebp->estimateMemoryBytes($this->job($png, ImageFormat::WEBP)),
-            $cwebp->estimateMemoryBytes($this->job($png, ImageFormat::WEBP, 2000, 1999)),
-            'the rescaled copy'
+            $vips->estimateMemoryBytes($this->job($png, ImageFormat::WEBP)),
+            $vips->estimateMemoryBytes($this->job($webp, ImageFormat::WEBP)),
+            'the WEBP decoder'
         );
-        self::assertGreaterThan(
-            $cwebp->estimateMemoryBytes($this->job($png, ImageFormat::WEBP)->withLossless(true)->withEffort(7)),
-            $cwebp->estimateMemoryBytes($this->job($png, ImageFormat::WEBP)->withLossless(true)->withEffort(8)),
-            'the lossless presets of methods 5 and 6'
-        );
+        foreach ([$cwebp, $imagick, $gd] as $backend) {
+            self::assertGreaterThan(
+                $backend->estimateMemoryBytes($this->job($png, ImageFormat::WEBP)),
+                $backend->estimateMemoryBytes($this->job($png, ImageFormat::WEBP, 2000, 1999)),
+                $backend->getName() . ': the resized copy'
+            );
+        }
 
         $animation = new ImageInfo(ImageFormat::GIF, 100, 100, 50, 1000);
         $job = $this->job($animation, ImageFormat::WEBP);
@@ -176,7 +238,12 @@ final class MemoryEstimateTest extends TestCase
             $vips->estimateMemoryBytes($job),
             'every frame is decoded, and every encoded frame kept'
         );
-        self::assertLessThan(64 * self::MIB, self::backend(Gif2webpBackend::NAME)->estimateMemoryBytes($this->job(new ImageInfo(ImageFormat::GIF, 16, 12, 300, 1000), ImageFormat::WEBP)), 'little more for 300 frames');
+        self::assertSame(
+            $gif2webp->estimateMemoryBytes($job->withAnimation(false)) + 50 * 10000 * 2,
+            $gif2webp->estimateMemoryBytes($job),
+            'one frame decoded at a time, every encoded frame kept'
+        );
+        self::assertLessThan(64 * self::MIB, $gif2webp->estimateMemoryBytes($this->job(new ImageInfo(ImageFormat::GIF, 16, 12, 300, 1000), ImageFormat::WEBP)), 'little more for 300 frames');
     }
 
     /**
@@ -188,23 +255,25 @@ final class MemoryEstimateTest extends TestCase
     {
         $rows = [];
         $table = [
-            // output, lossless, effort, bits, megapixels in vips, cwebp, GD, Imagick and avifenc (0: not encoded)
-            [ImageFormat::JPEG, false, 9, 8, [254, 0, 204, 104, 0]],
-            [ImageFormat::GIF, false, 9, 8, [29, 0, 204, 59, 0]],
-            [ImageFormat::WEBP, false, 8, 8, [37, 54, 42, 36, 0]],
-            [ImageFormat::WEBP, false, 9, 8, [25, 35, 42, 27, 0]],
-            [ImageFormat::WEBP, false, 9, 16, [21, 35, 42, 27, 0]],
-            [ImageFormat::WEBP, true, 7, 8, [37, 51, 45, 39, 0]],
-            [ImageFormat::WEBP, true, 8, 8, [37, 32, 45, 39, 0]],
-            [ImageFormat::AVIF, false, 2, 8, [42, 0, 0, 46, 76]],
-            [ImageFormat::AVIF, false, 2, 16, [40, 0, 0, 36, 76]],
-            [ImageFormat::AVIF, false, 3, 8, [30, 0, 0, 33, 76]],
-            [ImageFormat::AVIF, false, 4, 16, [30, 0, 0, 27, 76]],
-            [ImageFormat::AVIF, false, 5, 8, [30, 0, 0, 33, 45]],
-            [ImageFormat::AVIF, true, 4, 8, [30, 0, 0, 0, 39]],
-            [ImageFormat::AVIF, true, 5, 8, [30, 0, 0, 0, 28]],
+            // output, lossless, effort, bits, megapixels in vips, cwebp, gif2webp (from a GIF), GD, Imagick and
+            // avifenc (0: not encoded)
+            [ImageFormat::JPEG, false, 9, 8, [88, 0, 0, 126, 55, 0]],
+            [ImageFormat::JPEG, false, 9, 16, [88, 0, 0, 126, 49, 0]],
+            [ImageFormat::GIF, false, 9, 8, [25, 0, 0, 126, 51, 0]],
+            [ImageFormat::WEBP, false, 8, 8, [23, 47, 27, 38, 33, 0]],
+            [ImageFormat::WEBP, false, 9, 8, [16, 29, 21, 38, 23, 0]],
+            [ImageFormat::WEBP, true, 7, 8, [23, 46, 30, 35, 32, 0]],
+            [ImageFormat::WEBP, true, 9, 8, [23, 24, 24, 35, 32, 0]],
+            [ImageFormat::AVIF, false, 2, 8, [12, 0, 0, 0, 13, 16]],
+            [ImageFormat::AVIF, false, 2, 16, [12, 0, 0, 0, 11, 16]],
+            [ImageFormat::AVIF, false, 4, 8, [9, 0, 0, 0, 10, 16]],
+            [ImageFormat::AVIF, false, 4, 16, [9, 0, 0, 0, 9, 16]],
+            [ImageFormat::AVIF, false, 9, 8, [9, 0, 0, 0, 10, 13]],
+            [ImageFormat::AVIF, false, 9, 16, [9, 0, 0, 0, 9, 13]],
+            [ImageFormat::AVIF, true, 4, 8, [9, 0, 0, 0, 0, 14]],
+            [ImageFormat::AVIF, true, 9, 8, [9, 0, 0, 0, 0, 12]],
         ];
-        $backends = [VipsBackend::NAME, CwebpBackend::NAME, GdBackend::NAME, ImagickBackend::NAME, AvifencBackend::NAME];
+        $backends = [VipsBackend::NAME, CwebpBackend::NAME, Gif2webpBackend::NAME, GdBackend::NAME, ImagickBackend::NAME, AvifencBackend::NAME];
         foreach ($table as list($output, $lossless, $effort, $bits, $sizes)) {
             foreach ($sizes as $index => $megapixels) {
                 if ($megapixels > 0) {
@@ -225,13 +294,40 @@ final class MemoryEstimateTest extends TestCase
     {
         $fits = function (int $megapixels) use ($backend, $output, $lossless, $effort, $bits): bool {
             $side = (int) ceil(sqrt($megapixels * 1000000));
-            $job = $this->job(self::png($side, $side, $bits), $output)->withEffort($effort)->withLossless($lossless);
+            $input = $backend === Gif2webpBackend::NAME ? new ImageInfo(ImageFormat::GIF, $side, $side, 1, 1000) : self::png($side, $side, $bits);
+            $job = $this->job($input, $output)->withEffort($effort)->withLossless($lossless);
 
             return self::backend($backend)->estimateMemoryBytes($job) <= BackendOptions::DEFAULT_MEMORY_CEILING_BYTES;
         };
 
         self::assertTrue($fits($megapixels), sprintf('%d megapixels fit', $megapixels));
         self::assertFalse($fits($megapixels + 1), sprintf('%d megapixels do not fit', $megapixels + 1));
+    }
+
+    /**
+     * The estimate of the job of a row of peaks().
+     *
+     * @param array<int, mixed> $row
+     */
+    private function estimateOf(array $row): int
+    {
+        list($backend, $input, $variant, , $output, $effort, $lossless, $bits, $width, $height, $outputWidth, $outputHeight, $frames) = $row;
+        self::assertIsString($backend);
+        self::assertIsString($input);
+        self::assertIsString($variant);
+        self::assertIsString($output);
+        self::assertIsInt($effort);
+        self::assertIsBool($lossless);
+        self::assertIsInt($bits);
+        self::assertIsInt($width);
+        self::assertIsInt($height);
+        self::assertIsInt($outputWidth);
+        self::assertIsInt($outputHeight);
+        self::assertIsInt($frames);
+        $info = (new ImageInfo($input, $width, $height, $frames, 1000))->withBitDepth($bits)->withVariants($variant !== '' ? [$variant] : []);
+        $job = $this->job($info, $output, $outputWidth, $outputHeight)->withEffort($effort)->withLossless($lossless);
+
+        return self::backend($backend)->estimateMemoryBytes($job);
     }
 
     private static function backend(string $name): BackendInterface
