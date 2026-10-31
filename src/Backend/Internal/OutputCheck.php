@@ -44,7 +44,11 @@ final class OutputCheck
         } catch (ExceptionInterface $exception) {
             return sprintf('it is not a valid %s image', $job->getOutputFormat());
         }
-        if ($info->getWidth() !== $job->getWidth() || $info->getHeight() !== $job->getHeight()) {
+        // A job that keeps the pixels as stored may still get them turned by a decoder that applies the orientation
+        // whatever it is asked (libheif for AVIF): the swapped size is accepted then.
+        $swapped = !$job->needsOrientation() && $job->getInput()->getOrientation() >= BackendJob::FIRST_TRANSPOSING_ORIENTATION
+            && $info->getWidth() === $job->getHeight() && $info->getHeight() === $job->getWidth();
+        if (!$swapped && ($info->getWidth() !== $job->getWidth() || $info->getHeight() !== $job->getHeight())) {
             return sprintf('it is %dx%d instead of %dx%d', $info->getWidth(), $info->getHeight(), $job->getWidth(), $job->getHeight());
         }
         $frames = $info->getFrameCount();
