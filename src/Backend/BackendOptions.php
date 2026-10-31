@@ -16,7 +16,7 @@ use Psr\Log\NullLogger;
  *
  * | Option                     | Default                     | Meaning                                         |
  * | -------------------------- | --------------------------- | ----------------------------------------------- |
- * | memory ceiling             | 2 GiB                       | address space limit of every backend process    |
+ * | memory ceiling             | 2 GiB                       | largest estimate admitted; address space limit  |
  * | working directory parent   | sys_get_temp_dir()          | where each job's private directory is created   |
  * | PHP binary                 | the running CLI, else "php" | PHP CLI that runs the GD and Imagick workers     |
  * | PHP extension directory    | the binary's built-in one   | where the workers load gd and imagick from      |
@@ -32,22 +32,25 @@ use Psr\Log\NullLogger;
  * the PHP user can reach, such as one in the application's own cache directory: withCapabilityCache(true,
  * '/srv/app/var/cache/image-converter'); it is created with mode 0700 when missing.
  *
- * Memory: every backend process runs with the memory ceiling as its address space limit, in place of the address
- * space limit of the runner's ResourceLimits (the CPU time, file size and open file limits of the runner apply
- * unchanged). The ceiling bounds one process; Concurrency\Semaphore bounds how many run at once, so size the two
- * together: slots x ceiling must fit in the memory the host can give to conversions (8 slots of the default 2 GiB
- * take up to 16 GiB of address space, though most jobs use far less). Before a job runs, the backend estimates the
- * address space it needs (BackendInterface::estimateMemoryBytes()) from the pixels it decodes (every frame of a
- * kept animation) and encodes, the output format, the effort, the lossless mode, the bits per channel and the input
- * format; a job whose estimate is above the ceiling is refused with resource_limit before anything runs, and
- * BackendResolver picks another backend or fallback format. The estimate only admits jobs. It is set above the
- * peaks measured on several kinds of content, with a margin (AbstractBackend::estimate()), because the memory an
- * encoder takes depends on the content as well as on the pixels: AV1 needs the most for screenshots and 256-colour
- * images (at effort 4 and 8.3 megapixels, avifenc takes 831 MiB for a screenshot and 212 for noise, vips 1086 and
- * 568). Content that was not measured, such as photographs, and other library versions can need more; a job that
- * then reaches the ceiling fails (see AbstractBackend::estimate()). The largest still image, in megapixels, that each
- * backend admits below the default ceiling, with 8 bits per channel (16 bits in parentheses where fewer); the
- * default Limits allow 40 megapixels per frame, and the default effort is 4:
+ * Memory: at the rlimit and sandbox isolation levels, every backend process runs with the memory ceiling as its address
+ * space limit, in place of the address space limit of the runner's ResourceLimits (the CPU time, file size and open
+ * file limits of the runner apply unchanged). At the none and process levels the runner sets no resource limit: nothing
+ * bounds the address space of a backend process, the PHP workers run with memory_limit=-1, and only ImageMagick's own
+ * memory and map limits, set to the ceiling, bound the pixel cache of the Imagick worker (see ImagickBackend). The
+ * ceiling bounds one process; Concurrency\Semaphore bounds how many run at once, so size the two together: slots x
+ * ceiling must fit in the memory the host can give to conversions (8 slots of the default 2 GiB take up to 16 GiB of
+ * address space, though most jobs use far less). Before a job runs, the backend estimates the address space it needs
+ * (BackendInterface::estimateMemoryBytes()) from the pixels it decodes (every frame of a kept animation) and encodes,
+ * the output format, the effort, the lossless mode, the bits per channel and the input format; a job whose estimate is
+ * above the ceiling is refused with resource_limit before anything runs, and BackendResolver picks another backend or
+ * fallback format. The estimate only admits jobs. It is set above the peaks measured on several kinds of content, with
+ * a margin (AbstractBackend::estimate()), because the memory an encoder takes depends on the content as well as on the
+ * pixels: AV1 needs the most for screenshots and 256-colour images (at effort 4 and 8.3 megapixels, avifenc takes 831
+ * MiB for a screenshot and 212 for noise, vips 1086 and 568). Content that was not measured, such as photographs, and
+ * other library versions can need more; a job that then reaches the ceiling fails at the rlimit and sandbox levels (see
+ * AbstractBackend::estimate()). The largest still image, in megapixels, that each backend admits below the default
+ * ceiling, with 8 bits per channel (16 bits in parentheses where fewer); the default Limits allow 40 megapixels per
+ * frame, and the default effort is 4:
  *
  * | Output               | Effort | vips | cwebp | gif2webp | GD  | Imagick | avifenc |
  * | -------------------- | ------ | ---- | ----- | -------- | --- | ------- | ------- |
@@ -118,7 +121,8 @@ final class BackendOptions
     private $logger;
 
     /**
-     * Address space limit of every backend process, and the largest memory estimate of a job that runs, in bytes.
+     * The largest memory estimate of a job that runs and, at the rlimit and sandbox isolation levels, the address
+     * space limit of every backend process, in bytes.
      */
     public function getMemoryCeilingBytes(): int
     {

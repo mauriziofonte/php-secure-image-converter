@@ -28,10 +28,10 @@ use Mfonte\SecureImageConverter\Isolation\ResourceLimits;
 use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
 
 /**
- * What every backend shares: one private working directory per job, the input linked into it under a fixed name,
- * a memory estimate that admits or refuses the job, a process started through the runner with the memory ceiling and
- * the backend's sandbox allowlist, the output taken without trusting the process, and capabilities probed once and
- * cached.
+ * What every backend shares: one private working directory per job, the input linked into it under a fixed name, a
+ * memory estimate that admits or refuses the job, a process started through the runner with the memory ceiling (as its
+ * address space limit at the rlimit and sandbox levels) and the backend's sandbox allowlist, the output taken without
+ * trusting the process, and capabilities probed once and cached.
  *
  * Each run:
  *
@@ -41,10 +41,11 @@ use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
  *   an empty, read-only file system);
  * - links the input there as "input.<extension>" (the input path is mounted read-only in the sandbox), so that no
  *   path chosen by a client ever reaches a command line;
- * - runs the command with an address space limit equal to the memory ceiling (BackendOptions), the runner's other
- *   limits, and the backend's sandbox allowlist (SandboxPaths, with the library directories that probing traced)
- *   plus any read-only path the operator added to the runner's defaults; the input and the library's own files
- *   (worker scripts, configuration) are mounted for the run, after the sandbox's private /tmp;
+ * - runs the command with the runner's limits, the address space limit set to the memory ceiling (BackendOptions; the
+ *   runner applies limits at the rlimit and sandbox levels only), and the backend's sandbox allowlist (SandboxPaths,
+ *   with the library directories that probing traced) plus any read-only path the operator added to the runner's
+ *   defaults; the input and the library's own files (worker scripts, configuration) are mounted for the run, after the
+ *   sandbox's private /tmp;
  * - maps a failure to its exception (ProcessFailure), or copies "output.<extension>" next to the job's output path
  *   (OutputFile), checks the copy (OutputCheck) and only then renames it over the output path, and removes the
  *   directory.
@@ -178,8 +179,8 @@ abstract class AbstractBackend implements BackendInterface
         if ($unsupported !== null) {
             throw new ConversionFailedException(sprintf('The %s backend cannot convert this job: %s.', $this->getName(), $unsupported));
         }
-        // The estimate only admits the job: the process runs with the ceiling as its address space limit, because
-        // what a job needs depends on the content as well as on the pixels.
+        // The estimate only admits the job: at the rlimit and sandbox levels the process runs with the ceiling as its
+        // address space limit, because what a job needs depends on the content as well as on the pixels.
         $needed = $this->estimateMemoryBytes($job);
         if ($needed > $this->options->getMemoryCeilingBytes()) {
             throw new ResourceLimitException(sprintf(
@@ -206,9 +207,9 @@ abstract class AbstractBackend implements BackendInterface
      * - $perResizedPixel bytes per encoded pixel of one frame when the output size differs from the input size.
      *
      * The estimate admits or refuses a job (convert() refuses it above the memory ceiling); the process then runs with
-     * the ceiling as its address space limit. Each backend's coefficients come from tests/Fixtures/backend/
-     * memory-peaks.csv, the peak address space (VmPeak) of its own command line and environment for one job, and
-     * MemoryEstimateTest checks two rules on them:
+     * the ceiling as its address space limit at the rlimit and sandbox levels, and without one below them. Each
+     * backend's coefficients come from tests/Fixtures/backend/ memory-peaks.csv, the peak address space (VmPeak) of its
+     * own command line and environment for one job, and MemoryEstimateTest checks two rules on them:
      *
      * - every row is at least ESTIMATE_MARGIN_PERCENT % plus ESTIMATE_MARGIN_BYTES below the estimate of its job;
      * - for rows that differ only in size, the estimate grows between the two largest sizes by at least the growth of
@@ -348,7 +349,8 @@ abstract class AbstractBackend implements BackendInterface
 
     /**
      * The runner a job runs with: the memory ceiling as its address space limit (or the given limit, for
-     * diagnostics and tests), the given environment, this backend's sandbox paths.
+     * diagnostics and tests; applied at the rlimit and sandbox levels only), the given environment, this backend's
+     * sandbox paths.
      *
      * @param int|null              $memoryBytes address space limit, or null for the memory ceiling
      * @param array<string, string> $environment variables added to the runner's explicit environment

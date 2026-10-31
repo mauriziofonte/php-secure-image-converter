@@ -11,12 +11,15 @@ use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
  * ImageMagick through ext-imagick in a PHP CLI worker (Worker\ImagickWorker), for still images: the shell-free
  * fallback for formats the command-line tools do not cover, such as BMP.
  *
- * The worker runs under the restrictive policy shipped in resources/imagemagick/policy.xml (it denies every coder
- * but the raster formats of the library, every delegate, filter and indirect read, and caps the resources), found
- * through MAGICK_CONFIGURE_PATH and, in the sandbox, the only policy ImageMagick sees. It also sets the memory and
- * map limits to the memory ceiling and disables the disk cache for each job. MAGICK_TEMPORARY_PATH points to the job's
- * working directory, MAGICK_THREAD_LIMIT is 1 and OpenCL is off. MALLOC_ARENA_MAX=2 bounds the address space that the
- * threads of the AVIF encoder (libheif and libaom run four, whatever the number of processors) reserve for malloc.
+ * The worker runs under the restrictive policy shipped in resources/imagemagick/policy.xml (it denies every coder but
+ * the raster formats of the library, every delegate, filter and indirect read, and caps the resources), found through
+ * MAGICK_CONFIGURE_PATH and, in the sandbox, the only policy ImageMagick sees. Before each job, at every isolation
+ * level, the worker sets ImageMagick's memory and map limits to the memory ceiling (the policy caps them at 1 TiB, the
+ * largest ceiling BackendOptions accepts, so they follow any ceiling; they bound ImageMagick's pixel cache, not what
+ * the codec libraries allocate) and its disk limit to 0, so that the pixel cache never spills to disk.
+ * MAGICK_TEMPORARY_PATH points to the job's working directory, MAGICK_THREAD_LIMIT is 1 and OpenCL is off.
+ * MALLOC_ARENA_MAX=2 bounds the address space that the threads of the AVIF encoder (libheif and libaom run four,
+ * whatever the number of processors) reserve for malloc.
  *
  * Animations are not written: an animated input is converted to its first frame only.
  */

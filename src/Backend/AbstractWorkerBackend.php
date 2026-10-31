@@ -16,19 +16,19 @@ use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
  * A backend whose program is a PHP CLI worker (see AbstractWorker) using one PHP extension.
  *
  * The worker runs as "php -n [-d extension=<name or file>] -d display_errors=stderr -d memory_limit=-1 <script>
- * convert": -n loads no php.ini, so that neither the host configuration (auto_prepend_file, disable_functions, FPM
- * pool secrets in /usr/local/etc) nor its extensions reach the worker; the extension is loaded explicitly when the
- * PHP build does not include it statically (established by probing "php -n -m"): by name from the binary's built-in
- * extension directory, or, when BackendOptions::getPhpExtensionDirectory() is set, by the resolved path of its shared
- * object there, which is loaded only while no other user can have planted or changed it (Internal\ExtensionFile:
- * the directory, the file and the directories above them owned by root or the effective user and not writable by
- * others). Otherwise the backend is unavailable, and a job refused when the directory changed after probing. The
- * configured path is resolved once, on first use: the probes and every job name, and mount, the file it resolved to,
- * checked again before each of them, so a symbolic link in the configured path that is retargeted later is not
- * followed again (only after a check fails is the configured path resolved anew).
- * PHP's own memory limit is off: the address space limit of the process (the memory ceiling) bounds it, including the
- * memory the image library allocates outside PHP. The job is passed in AbstractWorker::JOB_FILE, never on the command
- * line.
+ * convert": -n loads no php.ini, so that neither the host configuration (auto_prepend_file, disable_functions, FPM pool
+ * secrets in /usr/local/etc) nor its extensions reach the worker; the extension is loaded explicitly when the PHP build
+ * does not include it statically (established by probing "php -n -m"): by name from the binary's built-in extension
+ * directory, or, when BackendOptions::getPhpExtensionDirectory() is set, by the resolved path of its shared object
+ * there, which is loaded only while no other user can have planted or changed it (Internal\ExtensionFile: the
+ * directory, the file and the directories above them owned by root or the effective user and not writable by others).
+ * Otherwise the backend is unavailable, and a job refused when the directory changed after probing. The configured path
+ * is resolved once, on first use: the probes and every job name, and mount, the file it resolved to, checked again
+ * before each of them, so a symbolic link in the configured path that is retargeted later is not followed again (only
+ * after a check fails is the configured path resolved anew). PHP's own memory limit is off: at the rlimit and sandbox
+ * isolation levels the address space limit of the process (the memory ceiling) bounds the worker, including the memory
+ * the image library allocates outside PHP; at the none and process levels nothing does (see BackendOptions). The job is
+ * passed in AbstractWorker::JOB_FILE, never on the command line.
  *
  * The sandbox allowlist adds the time zone database (Debian's PHP reads /usr/share/zoneinfo at startup and aborts
  * without it) and what the extension needs; each run mounts the worker scripts and, from a configured extension

@@ -10,9 +10,11 @@ use Mfonte\SecureImageConverter\Backend\BackendOptions;
 use Mfonte\SecureImageConverter\Backend\GdBackend;
 use Mfonte\SecureImageConverter\Backend\ImagickBackend;
 use Mfonte\SecureImageConverter\Contract\Exception\ConversionFailedException;
+use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
 use Mfonte\SecureImageConverter\Contract\ImageFormat;
 use Mfonte\SecureImageConverter\Isolation\ProcessOptions;
 use Mfonte\SecureImageConverter\Isolation\ProcessResult;
+use Mfonte\SecureImageConverter\Isolation\ResourceLimits;
 use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
 use Mfonte\SecureImageConverter\Tests\Unit\Backend\Fake\FakeProcessRunner;
 use PHPUnit\Framework\Attributes\CoversClass;
@@ -75,6 +77,26 @@ final class WorkerBackendTest extends TestCase
         }
         self::assertContains('/usr/share/zoneinfo', $gd->getSandboxPaths());
         self::assertFileExists(ImagickBackend::policyDirectory() . '/policy.xml');
+    }
+
+    /**
+     * The policy caps ImageMagick's memory and map limits at the largest memory ceiling, so that the limits the
+     * worker sets to the ceiling for each job follow it instead of being capped below it.
+     */
+    public function testTheImagickPolicyLetsTheMemoryLimitsFollowTheCeiling(): void
+    {
+        $policy = file_get_contents(ImagickBackend::policyDirectory() . '/policy.xml');
+        self::assertIsString($policy);
+        self::assertGreaterThan(0, preg_match_all('/<policy domain="resource" name="([a-z-]+)" value="([^"]*)"\/>/', $policy, $matches));
+        $limits = array_combine($matches[1], $matches[2]);
+
+        foreach (['memory', 'map'] as $name) {
+            self::assertSame(1, preg_match('/^([0-9]+)TiB$/', $limits[$name] ?? '', $value), $name);
+            self::assertSame(ResourceLimits::MAX_BYTES, (int) $value[1] * 1024 ** 4, $name . ' is capped at the largest memory ceiling');
+        }
+        self::assertSame('0', $limits['disk'] ?? null);
+        $this->expectException(InvalidArgumentException::class);
+        (new BackendOptions())->withMemoryCeilingBytes(ResourceLimits::MAX_BYTES + 1);
     }
 
     public function testAWorkerLoadsItsExtensionWhenPhpDoesNotIncludeIt(): void

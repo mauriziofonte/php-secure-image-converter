@@ -35,7 +35,8 @@ interface BackendInterface
     /**
      * Estimate, in bytes, of the address space that converting this job takes, for admission only: a job whose
      * estimate is above the memory ceiling is refused before anything runs, so that BackendResolver can pick another
-     * backend. The process itself always runs with the memory ceiling as its address space limit. The estimate grows
+     * backend. At the rlimit and sandbox isolation levels the process itself runs with the memory ceiling as its
+     * address space limit; at the none and process levels nothing bounds it. The estimate grows
      * with the decoded pixels (every frame for an animation) and the encoded pixels, plus the fixed overhead of the
      * program; it is set above the peaks measured for the backend on several kinds of content, which are not every
      * image (see AbstractBackend::estimate()).

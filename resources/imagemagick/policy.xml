@@ -17,12 +17,14 @@
   policy ImageMagick can see. For each request, the last matching policy wins: everything is denied
   first, then the raster formats the library converts are allowed again.
 
-  Resource limits are ceilings: the worker lowers memory and map to the job's budget and disk to 0
-  before reading, and ImageMagick never lets a process raise them above these values.
+  Resource limits are ceilings, and ImageMagick never lets a process raise them above these values.
+  Before reading, the worker sets memory and map to the memory ceiling of the backend options and
+  disk to 0. memory and map are 1TiB here, the largest ceiling the options accept, so that they
+  follow the ceiling instead of capping it.
 -->
 <policymap>
-  <policy domain="resource" name="memory" value="2GiB"/>
-  <policy domain="resource" name="map" value="2GiB"/>
+  <policy domain="resource" name="memory" value="1TiB"/>
+  <policy domain="resource" name="map" value="1TiB"/>
   <policy domain="resource" name="disk" value="0"/>
   <policy domain="resource" name="area" value="400MP"/>
   <policy domain="resource" name="width" value="64KP"/>
