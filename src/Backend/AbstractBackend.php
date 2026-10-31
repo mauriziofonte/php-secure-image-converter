@@ -7,11 +7,11 @@ namespace Mfonte\SecureImageConverter\Backend;
 use Mfonte\SecureImageConverter\Backend\Internal\CapabilityCache;
 use Mfonte\SecureImageConverter\Backend\Internal\CapabilityProber;
 use Mfonte\SecureImageConverter\Backend\Internal\Facts;
+use Mfonte\SecureImageConverter\Backend\Internal\OutputCheck;
 use Mfonte\SecureImageConverter\Backend\Internal\OutputFile;
 use Mfonte\SecureImageConverter\Backend\Internal\ProbeImages;
 use Mfonte\SecureImageConverter\Backend\Internal\ProcessFailure;
 use Mfonte\SecureImageConverter\Backend\Internal\SandboxPaths;
-use Mfonte\SecureImageConverter\Contract\Capabilities;
 use Mfonte\SecureImageConverter\Contract\Exception\ConversionFailedException;
 use Mfonte\SecureImageConverter\Contract\Exception\ExceptionInterface;
 use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
@@ -24,8 +24,6 @@ use Mfonte\SecureImageConverter\Isolation\ProcessResult;
 use Mfonte\SecureImageConverter\Isolation\ProcessRunnerInterface;
 use Mfonte\SecureImageConverter\Isolation\ResourceLimits;
 use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
-use Mfonte\SecureImageConverter\Validation\ImageInspector;
-use Mfonte\SecureImageConverter\Validation\Limits;
 
 /**
  * What every backend shares: one private working directory per job, the input linked into it under a fixed name,
@@ -45,7 +43,7 @@ use Mfonte\SecureImageConverter\Validation\Limits;
  *   (SandboxPaths) plus any read-only path the operator added to the runner's defaults; the input and the library's
  *   own files (worker scripts, configuration) are mounted for the run, after the sandbox's private /tmp;
  * - maps a failure to its exception (ProcessFailure), or copies "output.<extension>" next to the job's output path
- *   (OutputFile), checks the copy (verifyOutput()) and only then renames it over the output path, and removes the
+ *   (OutputFile), checks the copy (OutputCheck) and only then renames it over the output path, and removes the
  *   directory.
  *
  * Capabilities are probed with CapabilityProber on first use and kept in the capability cache (BackendOptions), keyed
@@ -470,7 +468,7 @@ abstract class AbstractBackend implements BackendInterface
                 $job->getOutputPath(),
                 $maxBytes,
                 static function (string $copy) use ($job, $maxBytes, $name): void {
-                    $problem = self::verifyOutput($job, $copy, $maxBytes);
+                    $problem = OutputCheck::problem($job, $copy, $maxBytes);
                     if ($problem !== null) {
                         throw new ConversionFailedException(sprintf('The %s conversion produced an unusable output: %s.', $name, $problem));
                     }
@@ -481,34 +479,6 @@ abstract class AbstractBackend implements BackendInterface
         } finally {
             $directory->remove();
         }
-    }
-
-    /**
-     * Why the copy of the output of a job is unusable, or null: its header must parse as the job's format, size and
-     * frame count (at most the job's for an animation: an encoder may merge identical frames). A program can exit
-     * with status 0 and leave a truncated file: vips writing AVIF when the AV1 encoder fails to allocate.
-     */
-    private static function verifyOutput(BackendJob $job, string $path, int $maxBytes): ?string
-    {
-        $limits = new Limits();
-        foreach (Capabilities::limitNames() as $name) {
-            $limits = $limits->withLimit($name, Capabilities::LIMIT_VALUE_MAX);
-        }
-        $limits = $limits->withMaxBytes(max(1, min(Capabilities::LIMIT_VALUE_MAX, $maxBytes)));
-        try {
-            $info = (new ImageInspector($limits, [$job->getOutputFormat()]))->inspect($path);
-        } catch (ExceptionInterface $exception) {
-            return sprintf('it is not a valid %s image', $job->getOutputFormat());
-        }
-        if ($info->getWidth() !== $job->getWidth() || $info->getHeight() !== $job->getHeight()) {
-            return sprintf('it is %dx%d instead of %dx%d', $info->getWidth(), $info->getHeight(), $job->getWidth(), $job->getHeight());
-        }
-        $frames = $info->getFrameCount();
-        if ($job->isAnimated() ? $frames > $job->getFrameCount() : $frames !== 1) {
-            return sprintf('it has %d frames instead of %d', $frames, $job->getFrameCount());
-        }
-
-        return null;
     }
 
     /**
