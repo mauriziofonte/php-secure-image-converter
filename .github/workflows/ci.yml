@@ -316,5 +316,5 @@ jobs:
         env:
           SIC_EXPECTED_BACKENDS: ${{ env.SIC_BACKENDS }}
           SIC_EXPECTED_ISOLATION_LEVEL: sandbox
-          GROUPS: ${{ matrix.backends == 'all-slow' && '--group slow' || '--group backends --exclude-group slow' }}
-        run: vendor/bin/phpunit $GROUPS
+          SIC_PHPUNIT_GROUPS: ${{ matrix.backends == 'all-slow' && '--group slow' || '--group backends --exclude-group slow' }}
+        run: vendor/bin/phpunit $SIC_PHPUNIT_GROUPS
