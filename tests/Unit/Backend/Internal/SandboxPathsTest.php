@@ -57,6 +57,31 @@ final class SandboxPathsTest extends TestCase
         }
     }
 
+    public function testTracedLibraryDirectoriesReplaceTheLibraryRoots(): void
+    {
+        $directory = WorkingDirectory::create();
+
+        try {
+            $root = $directory->getPath();
+            mkdir($root . '/opt/tool/bin', 0700, true);
+            mkdir($root . '/usr/lib/arch', 0700, true);
+            touch($root . '/opt/tool/bin/tool');
+            symlink('usr/lib', $root . '/lib');
+
+            $paths = SandboxPaths::forPrograms([$root . '/opt/tool/bin/tool'], [], [$root . '/lib/arch']);
+
+            self::assertContains($root . '/lib', $paths, 'the link on the way is recreated');
+            self::assertContains($root . '/usr/lib/arch', $paths);
+            self::assertNotContains($root . '/opt/tool/lib', $paths, 'no prefix guess');
+            foreach (SandboxPaths::LIBRARY_DIRECTORIES as $library) {
+                self::assertNotContains($library, $paths);
+            }
+            self::assertContains('/etc/ld.so.cache', file_exists('/etc/ld.so.cache') ? $paths : ['/etc/ld.so.cache']);
+        } finally {
+            $directory->remove();
+        }
+    }
+
     public function testCoverCropTakesTheCentredRegion(): void
     {
         self::assertSame([2, 0, 12, 12], CoverCrop::region(16, 12, 6, 6));

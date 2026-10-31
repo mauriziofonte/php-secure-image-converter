@@ -56,8 +56,19 @@ final class SandboxVisibilityTest extends BackendTestCase
     ];
 
     /**
+     * Host data below the library roots, hidden once the dynamic loader traced the programs.
+     */
+    private const LIBRARY_ROOT_PRIVATE_PATHS = [
+        '/usr/lib/python3',
+        '/usr/lib/apt',
+        '/usr/lib/cgi-bin',
+        '/usr/local/lib/python3.12',
+    ];
+
+    /**
      * Every path of the allowlist is the backend's own: none is or contains a private path, the system directories as
-     * a whole or the checkout of this library.
+     * a whole or the checkout of this library, and once the loader traced the programs, no library root as a whole
+     * (/usr/lib, /usr/local/lib...): only the directories of the libraries they load.
      *
      * @dataProvider enabledBackends
      */
@@ -68,8 +79,23 @@ final class SandboxVisibilityTest extends BackendTestCase
         $private = array_merge(self::PRIVATE_PATHS, ['/usr/share', '/etc/ImageMagick-6', '/etc/ImageMagick-7', '/etc/php', self::checkout() . '/tests', self::checkout() . '/vendor']);
 
         self::assertNotSame([], $paths);
+        $traced = [];
+        foreach (self::backend($name)->getFacts() as $fact => $value) {
+            if (strpos($fact, AbstractBackend::FACT_LIBRARY_PREFIX) === 0) {
+                $traced[] = (string) realpath($value);
+            }
+        }
+        if ($traced === [] && self::isExpected($name) && self::hostDetection()->getLevel() === IsolationLevel::SANDBOX) {
+            self::fail('The dynamic loader trace of the backend could not be read: the sandbox shows the whole library roots.');
+        }
+        if ($traced !== []) {
+            $private = array_merge($private, self::LIBRARY_ROOT_PRIVATE_PATHS);
+        }
         foreach ($paths as $path) {
             self::assertNotContains($path, ['/', '/usr', '/etc', '/usr/local', '/usr/bin', '/usr/share', self::checkout()], 'The allowlist exposes a whole system directory.');
+            if ($traced !== [] && !is_link($path) && in_array($path, SandboxPaths::LIBRARY_DIRECTORIES, true)) {
+                self::assertContains($path, $traced, 'The allowlist exposes a whole library root that holds no traced library.');
+            }
             foreach ($private as $hidden) {
                 self::assertStringStartsNotWith(rtrim($path, '/') . '/', $hidden . '/', sprintf('%s exposes %s.', $path, $hidden));
             }
@@ -101,7 +127,11 @@ final class SandboxVisibilityTest extends BackendTestCase
         $script = (string) $command[count($command) - 2];
         // A private path above an allowed one (/home above a checkout in /home) is visible as an empty skeleton.
         $visible = [self::checkout() . '/composer.json', self::checkout() . '/vendor', \dirname(__DIR__, 2) . '/Fixtures/backend/still.png'];
-        foreach (self::PRIVATE_PATHS as $path) {
+        $private = self::PRIVATE_PATHS;
+        if (isset($backend->getFacts()[AbstractBackend::FACT_LIBRARY_PREFIX . '0'])) {
+            $private = array_merge($private, self::LIBRARY_ROOT_PRIVATE_PATHS);
+        }
+        foreach ($private as $path) {
             $above = false;
             foreach (array_merge($backend->getSandboxPaths(), $backend->getSandboxResourcePaths()) as $allowed) {
                 $above = $above || strpos($allowed, $path . '/') === 0;

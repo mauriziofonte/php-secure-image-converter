@@ -10,7 +10,9 @@ use Mfonte\SecureImageConverter\Backend\BackendOptions;
 use Mfonte\SecureImageConverter\Backend\GdBackend;
 use Mfonte\SecureImageConverter\Backend\ImagickBackend;
 use Mfonte\SecureImageConverter\Contract\ImageFormat;
+use Mfonte\SecureImageConverter\Isolation\ProcessOptions;
 use Mfonte\SecureImageConverter\Isolation\ProcessResult;
+use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
 use Mfonte\SecureImageConverter\Tests\Unit\Backend\Fake\FakeProcessRunner;
 use PHPUnit\Framework\Attributes\CoversClass;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
@@ -130,6 +132,53 @@ final class WorkerBackendTest extends TestCase
             array_slice($backend->commandLine(self::job(self::info(ImageFormat::PNG), ImageFormat::WEBP), ['load' => '1']), 0, 12)
         );
         self::assertContains($extensions, $backend->getSandboxResourcePaths(), 'each run mounts the extension directory');
+    }
+
+    /**
+     * The extension a worker loads is traced like the program: its directory and the directories of its own
+     * libraries become the library directories of the jobs.
+     */
+    public function testTheLibrariesOfTheExtensionAreTraced(): void
+    {
+        $php = $this->fakePrograms() . '/php';
+        $extensions = $this->fakePrograms(['gd.so']);
+        $loader = $this->fakePrograms(['ld.so']) . '/ld.so';
+        $runner = new FakeProcessRunner(
+            static function (array $command, WorkingDirectory $directory, ProcessOptions $options) use ($extensions, $loader): ProcessResult {
+                $arguments = implode(' ', $command);
+                if (isset($options->getEnvironment()['LD_TRACE_LOADED_OBJECTS'])) {
+                    return FakeProcessRunner::result(0, "\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x1)\n\t" . $loader . " (0x2)\n");
+                }
+                if ($command[0] === $loader) {
+                    return FakeProcessRunner::result(0, "\tlibgd.so.3 => /opt/gd/lib/libgd.so.3 (0x3)\n");
+                }
+                if (substr($arguments, -5) === '-n -m') {
+                    return FakeProcessRunner::result(0, "[PHP Modules]\nCore\n");
+                }
+                if (substr($arguments, -2) === '-m') {
+                    return FakeProcessRunner::result(0, "[PHP Modules]\ngd\n");
+                }
+                if (end($command) === 'echo ini_get("extension_dir");') {
+                    return FakeProcessRunner::result(0, $extensions . "\n");
+                }
+
+                return FakeProcessRunner::result(0, '{"inputs":["png"],"outputs":["webp"],"lossless":[]}');
+            },
+            $this->programOptions()
+        );
+        $backend = new GdBackend($runner, (new BackendOptions())->withPhpBinary($php)->withCapabilityCache(false));
+
+        $facts = $backend->getFacts();
+
+        // The fake loader and the extension share one directory.
+        self::assertSame(['/lib/x86_64-linux-gnu', $extensions, '/opt/gd/lib'], array_values(array_intersect_key($facts, array_flip(['library_0', 'library_1', 'library_2']))));
+        self::assertSame(\dirname($loader), $extensions);
+        self::assertArrayNotHasKey('library_3', $facts);
+        $traces = array_values(array_filter($runner->getRuns(), static function (array $run) use ($loader): bool {
+            return $run['command'][0] === $loader;
+        }));
+        self::assertCount(1, $traces);
+        self::assertSame([$loader, '--list', $extensions . '/gd.so'], $traces[0]['command']);
     }
 
     public function testAWorkerWithoutItsExtensionIsUnavailable(): void

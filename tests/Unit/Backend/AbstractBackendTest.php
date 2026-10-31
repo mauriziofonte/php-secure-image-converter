@@ -9,6 +9,7 @@ use Mfonte\SecureImageConverter\Backend\BackendJob;
 use Mfonte\SecureImageConverter\Backend\BackendOptions;
 use Mfonte\SecureImageConverter\Backend\CwebpBackend;
 use Mfonte\SecureImageConverter\Backend\Internal\CapabilityProber;
+use Mfonte\SecureImageConverter\Backend\Internal\SandboxPaths;
 use Mfonte\SecureImageConverter\Contract\Exception\ConversionFailedException;
 use Mfonte\SecureImageConverter\Contract\Exception\ConversionTimeoutException;
 use Mfonte\SecureImageConverter\Contract\Exception\ResourceLimitException;
@@ -45,6 +46,13 @@ final class AbstractBackendTest extends TestCase
     private $behaviour = 'copy';
 
     /**
+     * What the fake dynamic loader prints for a trace (LD_TRACE_LOADED_OBJECTS=1), or null when it fails.
+     *
+     * @var string|null
+     */
+    private $trace;
+
+    /**
      * @var WorkingDirectory|null
      */
     private $files;
@@ -67,7 +75,10 @@ final class AbstractBackendTest extends TestCase
     private function runner(?ProcessOptions $options = null): FakeProcessRunner
     {
         return new FakeProcessRunner(
-            function (array $command, WorkingDirectory $directory): ProcessResult {
+            function (array $command, WorkingDirectory $directory, ProcessOptions $options): ProcessResult {
+                if (isset($options->getEnvironment()['LD_TRACE_LOADED_OBJECTS'])) {
+                    return $this->trace !== null ? FakeProcessRunner::result(0, $this->trace) : FakeProcessRunner::result(1);
+                }
                 $output = $directory->pathOf((string) $command[count($command) - 1]);
                 switch ($this->behaviour) {
                     case 'fail':
@@ -186,6 +197,40 @@ final class AbstractBackendTest extends TestCase
             ['reason' => $directory . ' is not a directory owned by user ' . posix_geteuid() . ' and closed to writes by group and others', 'backends' => 'cwebp'],
             $logger->getRecords()[0]['context']
         );
+    }
+
+    /**
+     * The probe traces the libraries of the program; the jobs then see their directories instead of the whole
+     * library roots, which only the discovery runs (and the jobs of a backend whose trace failed) see.
+     */
+    public function testJobsSeeOnlyTheTracedLibraryDirectories(): void
+    {
+        self::assertNotNull($this->files);
+        $libraries = $this->files->getPath() . '/lib';
+        mkdir($libraries);
+        touch($libraries . '/libwebp.so.7');
+        $this->trace = "\tlinux-vdso.so.1 (0x00007ffd5b9f3000)\n\tlibwebp.so.7 => " . $libraries . "/libwebp.so.7 (0x00007f2c2a000000)\n";
+        $runner = $this->runner();
+        $backend = new CwebpBackend($runner, $this->options()->withCapabilityCache(false));
+
+        self::assertSame($libraries, $backend->getFacts()['library_0'] ?? null);
+        $backend->convert($this->job());
+
+        $runs = $runner->getRuns();
+        $job = $runs[count($runs) - 1]['options']->getSandboxReadOnlyPaths();
+        self::assertContains($libraries, $job);
+        self::assertSame($backend->getSandboxPaths(), $job);
+        foreach (SandboxPaths::LIBRARY_DIRECTORIES as $root) {
+            self::assertNotContains($root, $job);
+        }
+        $trace = $runs[0];
+        self::assertSame([$this->fakePrograms() . '/cwebp'], $trace['command']);
+        self::assertSame('1', $trace['options']->getEnvironment()['LD_TRACE_LOADED_OBJECTS'] ?? null);
+
+        $this->trace = "\tlibwebp.so.7 => not found\n";
+        $broad = new CwebpBackend($runner, $this->options()->withCapabilityCache(false));
+        self::assertArrayNotHasKey('library_0', $broad->getFacts());
+        self::assertSame(SandboxPaths::forPrograms([$this->fakePrograms() . '/cwebp']), $broad->getSandboxPaths(), 'an unreadable trace keeps the library roots');
     }
 
     public function testAJobRunsWithItsLimitsAllowlistAndInput(): void

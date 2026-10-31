@@ -7,6 +7,7 @@ namespace Mfonte\SecureImageConverter\Backend;
 use Mfonte\SecureImageConverter\Backend\Internal\CapabilityCache;
 use Mfonte\SecureImageConverter\Backend\Internal\CapabilityProber;
 use Mfonte\SecureImageConverter\Backend\Internal\Facts;
+use Mfonte\SecureImageConverter\Backend\Internal\LibraryTrace;
 use Mfonte\SecureImageConverter\Backend\Internal\OutputCheck;
 use Mfonte\SecureImageConverter\Backend\Internal\OutputFile;
 use Mfonte\SecureImageConverter\Backend\Internal\ProbeImages;
@@ -17,6 +18,7 @@ use Mfonte\SecureImageConverter\Contract\Exception\ExceptionInterface;
 use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
 use Mfonte\SecureImageConverter\Contract\Exception\ResourceLimitException;
 use Mfonte\SecureImageConverter\Contract\ImageFormat;
+use Mfonte\SecureImageConverter\Contract\IsolationLevel;
 use Mfonte\SecureImageConverter\Isolation\ExecutableFinder;
 use Mfonte\SecureImageConverter\Isolation\PrivateCacheDirectory;
 use Mfonte\SecureImageConverter\Isolation\ProcessOptions;
@@ -40,7 +42,8 @@ use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
  *   path chosen by a client ever reaches a command line;
  * - runs the command with an address space limit equal to estimateMemoryBytes() (at least
  *   ResourceLimits::MIN_ADDRESS_SPACE_BYTES), the runner's other limits, and the backend's sandbox allowlist
- *   (SandboxPaths) plus any read-only path the operator added to the runner's defaults; the input and the library's
+ *   (SandboxPaths, with the library directories that probing traced) plus any read-only path the operator added to
+ *   the runner's defaults; the input and the library's
  *   own files (worker scripts, configuration) are mounted for the run, after the sandbox's private /tmp;
  * - maps a failure to its exception (ProcessFailure), or copies "output.<extension>" next to the job's output path
  *   (OutputFile), checks the copy (OutputCheck) and only then renames it over the output path, and removes the
@@ -74,7 +77,22 @@ abstract class AbstractBackend implements BackendInterface
     /**
      * Version of the probing logic, part of the cache fingerprint.
      */
-    private const PROBE_VERSION = 1;
+    private const PROBE_VERSION = 2;
+
+    /**
+     * Prefix of the facts that hold the directories of the libraries the programs load (library_0 to library_7).
+     */
+    public const FACT_LIBRARY_PREFIX = 'library_';
+
+    /**
+     * Largest number of library directories kept; programs that need more are given the whole library roots.
+     */
+    private const MAX_LIBRARY_DIRECTORIES = 8;
+
+    /**
+     * Address space of a dynamic loader trace, which maps the libraries without running anything.
+     */
+    private const TRACE_BYTES = 536870912;
 
     /**
      * @var ProcessRunnerInterface
@@ -230,24 +248,16 @@ abstract class AbstractBackend implements BackendInterface
     }
 
     /**
-     * The system paths visible in this backend's sandbox (the runner's defaults are replaced by them): the programs,
-     * their libraries, the system files of sandboxData() and the read-only paths the operator added to the runner's
-     * defaults. The sandbox mounts them before its private /tmp.
+     * The system paths visible in this backend's sandbox for its jobs (the runner's defaults are replaced by them):
+     * the programs, the directories of the libraries they load (facts library_N, see probe()), the system files of
+     * sandboxData() and the read-only paths the operator added to the runner's defaults. The sandbox mounts them
+     * before its private /tmp. Probes the capabilities when they are not loaded yet.
      *
      * @return list<string>
      */
     final public function getSandboxPaths(): array
     {
-        $programs = array_values(array_filter($this->locatePrograms(), 'is_string'));
-        $configured = $this->runner->getOptions()->getSandboxReadOnlyPaths();
-
-        return SandboxPaths::forPrograms(
-            $programs,
-            array_merge(
-                $this->sandboxData(),
-                array_values(array_diff($configured, ProcessOptions::DEFAULT_SANDBOX_READ_ONLY_PATHS))
-            )
-        );
+        return $this->sandboxPathsFor($this->getFacts());
     }
 
     /**
@@ -277,12 +287,23 @@ abstract class AbstractBackend implements BackendInterface
      */
     final public function createJobRunner(int $memoryBytes, array $environment = [], ?float $timeoutSeconds = null): ProcessRunnerInterface
     {
+        return $this->runnerFor($memoryBytes, $environment, $timeoutSeconds, $this->getFacts());
+    }
+
+    /**
+     * The runner of createJobRunner(), with the sandbox paths of the given facts.
+     *
+     * @param array<string, string> $environment
+     * @param array<string, string> $facts
+     */
+    private function runnerFor(int $memoryBytes, array $environment, ?float $timeoutSeconds, array $facts): ProcessRunnerInterface
+    {
         $options = $this->runner->getOptions();
         $memoryBytes = max(ResourceLimits::MIN_ADDRESS_SPACE_BYTES, min(ResourceLimits::MAX_BYTES, $memoryBytes));
         $options = $options
             ->withResourceLimits($options->getResourceLimits()->withAddressSpaceBytes($memoryBytes))
             ->withEnvironment(array_merge($options->getEnvironment(), $environment))
-            ->withSandboxReadOnlyPaths($this->getSandboxPaths());
+            ->withSandboxReadOnlyPaths($this->sandboxPathsFor($facts));
         if ($timeoutSeconds !== null && $timeoutSeconds < $options->getTimeoutSeconds()) {
             $options = $options->withTimeoutSeconds($timeoutSeconds);
         }
@@ -305,7 +326,8 @@ abstract class AbstractBackend implements BackendInterface
     }
 
     /**
-     * Runs a command in a working directory with this backend's sandbox and environment; for discover().
+     * Runs a command in a working directory with this backend's environment and its sandbox before the library
+     * directories are known (the whole library roots); for discover().
      *
      * @param list<string>               $command
      * @param array<string, string>|null $environment null for environment() without facts
@@ -314,10 +336,11 @@ abstract class AbstractBackend implements BackendInterface
      */
     final protected function execute(array $command, WorkingDirectory $directory, int $memoryBytes, ?array $environment = null): ProcessResult
     {
-        return $this->createJobRunner(
+        return $this->runnerFor(
             $memoryBytes,
             $environment !== null ? $environment : $this->environment($directory, []),
-            self::PROBE_TIMEOUT_SECONDS
+            self::PROBE_TIMEOUT_SECONDS,
+            []
         )->execute($command, $directory, null, $this->getSandboxResourcePaths());
     }
 
@@ -392,6 +415,22 @@ abstract class AbstractBackend implements BackendInterface
     }
 
     /**
+     * Shared objects the programs load at run time whose own libraries the loader trace must cover, such as a PHP
+     * extension; may run commands with execute().
+     *
+     * @param array<string, string> $programs the located programs, by role
+     * @param array<string, string> $facts
+     *
+     * @throws ExceptionInterface when a run fails to start
+     *
+     * @return list<string> absolute paths
+     */
+    protected function tracedObjects(array $programs, WorkingDirectory $directory, array $facts): array
+    {
+        return [];
+    }
+
+    /**
      * Prepares the working directory before the command runs, such as a job file for a worker.
      *
      * @throws ConversionFailedException when it cannot be prepared
@@ -448,10 +487,11 @@ abstract class AbstractBackend implements BackendInterface
                 throw new ConversionFailedException('The input could not be linked into the working directory.');
             }
             $this->prepare($job, $directory, $input, $output);
-            $runner = $this->createJobRunner(
+            $runner = $this->runnerFor(
                 $this->estimateMemoryBytes($job),
                 $this->environment($directory, $facts),
-                $timeoutSeconds
+                $timeoutSeconds,
+                $facts
             );
             $result = $runner->execute(
                 $this->command($job, $input, $output, $programs, $facts),
@@ -564,6 +604,7 @@ abstract class AbstractBackend implements BackendInterface
             if (isset($facts[self::FACT_UNAVAILABLE])) {
                 return [BackendCapabilities::unavailable($this->getName(), $facts[self::FACT_UNAVAILABLE]), []];
             }
+            $facts = Facts::check(array_merge($facts, $this->libraryFacts($programs, $directory, $facts)));
             $prober = new CapabilityProber(
                 $this->getName(),
                 function (BackendJob $job) use ($facts): void {
@@ -577,6 +618,110 @@ abstract class AbstractBackend implements BackendInterface
         } finally {
             $directory->remove();
         }
+    }
+
+    /**
+     * The directories of the shared libraries the programs load, as the facts library_0 to library_7: the dynamic
+     * loader traces each program (LD_TRACE_LOADED_OBJECTS=1, which loads its libraries without running it) and each
+     * object of tracedObjects() ("<loader> --list <object>"). Returns no fact when a trace cannot be read (another C
+     * library, a missing library) or holds more than MAX_LIBRARY_DIRECTORIES directories: the sandbox then keeps the
+     * whole library roots (SandboxPaths::LIBRARY_DIRECTORIES).
+     *
+     * @param array<string, string> $programs
+     * @param array<string, string> $facts
+     *
+     * @return array<string, string>
+     */
+    private function libraryFacts(array $programs, WorkingDirectory $directory, array $facts): array
+    {
+        if ($this->runner->getLevel() !== IsolationLevel::SANDBOX) {
+            // Only the sandbox has an allowlist to narrow.
+            return [];
+        }
+        $trace = ['LD_TRACE_LOADED_OBJECTS' => '1'];
+        $directories = [];
+        $loader = null;
+
+        try {
+            foreach ($programs as $program) {
+                $libraries = $this->trace([$program], $directory, $trace);
+                if ($libraries === null) {
+                    return [];
+                }
+                $loader = $loader !== null ? $loader : $libraries['loader'];
+                foreach ($libraries['libraries'] as $library) {
+                    $directories[\dirname($library)] = true;
+                }
+            }
+            foreach ($this->tracedObjects($programs, $directory, $facts) as $object) {
+                $libraries = $loader !== null ? $this->trace([$loader, '--list', $object], $directory, []) : null;
+                if ($libraries === null) {
+                    return [];
+                }
+                $directories[\dirname($object)] = true;
+                foreach ($libraries['libraries'] as $library) {
+                    $directories[\dirname($library)] = true;
+                }
+            }
+        } catch (ExceptionInterface $exception) {
+            return [];
+        }
+        if ($directories === [] || count($directories) > self::MAX_LIBRARY_DIRECTORIES) {
+            return [];
+        }
+        $libraryFacts = [];
+        foreach (array_keys($directories) as $index => $path) {
+            if (!ExecutableFinder::isAbsolutePath($path) || preg_match('/\A[\x20-\x7E]{1,200}\z/', $path) !== 1) {
+                return [];
+            }
+            $libraryFacts[self::FACT_LIBRARY_PREFIX . $index] = $path;
+        }
+
+        return $libraryFacts;
+    }
+
+    /**
+     * One loader trace, or null when it fails or cannot be read.
+     *
+     * @param list<string>          $command
+     * @param array<string, string> $environment
+     *
+     * @throws ExceptionInterface when the run cannot start
+     *
+     * @return array{libraries: list<string>, loader: string|null}|null
+     */
+    private function trace(array $command, WorkingDirectory $directory, array $environment): ?array
+    {
+        $result = $this->execute($command, $directory, self::TRACE_BYTES, $environment);
+
+        return $result->isSuccessful() ? LibraryTrace::parse($result->getStdout()) : null;
+    }
+
+    /**
+     * The sandbox paths of the programs: with the library directories of the facts when there are some, the whole
+     * library roots otherwise (discovery, or a trace that could not be read).
+     *
+     * @param array<string, string> $facts
+     *
+     * @return list<string>
+     */
+    private function sandboxPathsFor(array $facts): array
+    {
+        $programs = array_values(array_filter($this->locatePrograms(), 'is_string'));
+        $configured = $this->runner->getOptions()->getSandboxReadOnlyPaths();
+        $libraries = [];
+        for ($index = 0; isset($facts[self::FACT_LIBRARY_PREFIX . $index]); ++$index) {
+            $libraries[] = $facts[self::FACT_LIBRARY_PREFIX . $index];
+        }
+
+        return SandboxPaths::forPrograms(
+            $programs,
+            array_merge(
+                $this->sandboxData(),
+                array_values(array_diff($configured, ProcessOptions::DEFAULT_SANDBOX_READ_ONLY_PATHS))
+            ),
+            $libraries !== [] ? $libraries : null
+        );
     }
 
     /**

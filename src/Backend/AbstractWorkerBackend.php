@@ -158,6 +158,24 @@ abstract class AbstractWorkerBackend extends AbstractBackend
         return $extensions !== null ? array_merge($resources, [$extensions]) : $resources;
     }
 
+    /**
+     * The extension's shared object, when the worker loads it: its libraries are traced like the program's.
+     */
+    protected function tracedObjects(array $programs, WorkingDirectory $directory, array $facts): array
+    {
+        if (($facts['load'] ?? '0') !== '1') {
+            return [];
+        }
+        $result = $this->execute(
+            array_merge($this->php($programs['php']), ['-r', 'echo ini_get("extension_dir");']),
+            $directory,
+            $this->estimateMemoryBytes(self::probeJob())
+        );
+        $object = rtrim(trim($result->getStdout()), '/') . '/' . $this->extension() . '.so';
+
+        return $result->isSuccessful() && ExecutableFinder::isAbsolutePath($object) && is_file($object) ? [$object] : [];
+    }
+
     protected function isWorker(): bool
     {
         return true;
