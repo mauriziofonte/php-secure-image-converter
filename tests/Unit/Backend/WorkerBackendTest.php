@@ -9,12 +9,14 @@ use Mfonte\SecureImageConverter\Backend\AbstractWorkerBackend;
 use Mfonte\SecureImageConverter\Backend\BackendOptions;
 use Mfonte\SecureImageConverter\Backend\GdBackend;
 use Mfonte\SecureImageConverter\Backend\ImagickBackend;
+use Mfonte\SecureImageConverter\Contract\Exception\ConversionFailedException;
 use Mfonte\SecureImageConverter\Contract\ImageFormat;
 use Mfonte\SecureImageConverter\Isolation\ProcessOptions;
 use Mfonte\SecureImageConverter\Isolation\ProcessResult;
 use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
 use Mfonte\SecureImageConverter\Tests\Unit\Backend\Fake\FakeProcessRunner;
 use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
@@ -109,15 +111,19 @@ final class WorkerBackendTest extends TestCase
     public function testAWorkerLoadsItsExtensionFromTheConfiguredDirectory(): void
     {
         $php = $this->fakePrograms() . '/php';
-        $extensions = $this->fakePrograms();
+        $extensions = $this->fakePrograms(['gd.so']);
+        $file = (string) realpath($extensions . '/gd.so');
         $runner = new FakeProcessRunner(
-            static function (array $command) use ($extensions): ProcessResult {
+            static function (array $command) use ($file): ProcessResult {
                 $arguments = implode(' ', $command);
-                if (strpos($arguments, ' -n -d extension_dir=' . $extensions . ' ') === false) {
+                if (substr($arguments, -5) === '-n -m') {
+                    return FakeProcessRunner::result(0, "[PHP Modules]\nCore\n");
+                }
+                if (strpos($arguments, ' -n -d extension=' . $file . ' ') === false) {
                     return FakeProcessRunner::result(1);
                 }
                 if (substr($arguments, -2) === '-m') {
-                    return FakeProcessRunner::result(0, strpos($arguments, '-d extension=gd') !== false ? "[PHP Modules]\ngd\n" : "[PHP Modules]\nCore\n");
+                    return FakeProcessRunner::result(0, "[PHP Modules]\ngd\n");
                 }
 
                 return FakeProcessRunner::result(0, '{"inputs":["png"],"outputs":["webp"],"lossless":[]}');
@@ -128,10 +134,117 @@ final class WorkerBackendTest extends TestCase
 
         self::assertSame(['inputs' => 'png', 'load' => '1', 'lossless' => '', 'outputs' => 'webp'], $backend->discoverFacts());
         self::assertSame(
-            [$php, '-n', '-d', 'extension_dir=' . $extensions, '-d', 'extension=gd', '-d', 'display_errors=stderr', '-d', 'log_errors=0', '-d', 'memory_limit=-1'],
-            array_slice($backend->commandLine(self::job(self::info(ImageFormat::PNG), ImageFormat::WEBP), ['load' => '1']), 0, 12)
+            [$php, '-n', '-d', 'extension=' . $file, '-d', 'display_errors=stderr', '-d', 'log_errors=0', '-d', 'memory_limit=-1'],
+            array_slice($backend->commandLine(self::job(self::info(ImageFormat::PNG), ImageFormat::WEBP), ['load' => '1']), 0, 10)
         );
-        self::assertContains($extensions, $backend->getSandboxResourcePaths(), 'each run mounts the extension directory');
+        self::assertContains($file, $backend->getSandboxResourcePaths(), 'each run mounts the shared object');
+        self::assertNotContains((string) realpath($extensions), $backend->getSandboxResourcePaths(), 'but not the directory');
+    }
+
+    /**
+     * @return array<string, array{0: string, 1: string}>
+     */
+    public static function unsafeExtensionDirectories(): array
+    {
+        $directory = 'the PHP extension directory is not owned by root or the effective user, or others can write to it';
+        $file = 'the extension file is not owned by root or the effective user, or others can write it';
+        $above = 'a directory above the PHP extension directory is not owned by root or the effective user, or others can replace its entries';
+        $target = 'the directory of the extension file is not owned by root or the effective user, or others can write to it';
+
+        return [
+            'world-writable directory' => ['chmod 0777 ext', $directory],
+            'group-writable directory' => ['chmod 0770 ext', $directory],
+            'world-writable directory, sticky' => ['chmod 01777 ext', $directory],
+            'world-writable shared object' => ['chmod 0666 ext/gd.so', $file],
+            'group-writable shared object' => ['chmod 0620 ext/gd.so', $file],
+            'directory above writable by others' => ['chmod 0777 .', $above],
+            'directory above writable by its group' => ['chmod 0770 .', $above],
+            'link to a shared object in a writable directory' => ['link ext/gd.so planted/gd.so', $target],
+            'link to the directory in a writable directory' => ['link ext planted', $directory],
+            'missing directory' => ['remove ext', 'the PHP extension directory does not exist'],
+        ];
+    }
+
+    /**
+     * A shared object that another user could have planted or replaced is never loaded: the backend is unavailable,
+     * and no run names the shared object.
+     *
+     * @dataProvider unsafeExtensionDirectories
+     */
+    #[DataProvider('unsafeExtensionDirectories')]
+    public function testAnExtensionThatOthersCanReplaceIsNotLoaded(string $change, string $problem): void
+    {
+        $root = $this->fakePrograms(['php']);
+        self::assertTrue(mkdir($root . '/ext', 0700) && touch($root . '/ext/gd.so') && chmod($root . '/ext/gd.so', 0600));
+        self::assertTrue(mkdir($root . '/planted', 0777) && chmod($root . '/planted', 0777) && touch($root . '/planted/gd.so') && chmod($root . '/planted/gd.so', 0600));
+        list($action, $path, $argument) = array_pad(explode(' ', $change), 3, '');
+        if ($action === 'chmod') {
+            self::assertTrue(chmod($root . '/' . $argument, (int) octdec($path)));
+        } elseif ($action === 'link') {
+            self::assertTrue(rename($root . '/' . $path, $root . '/old') && symlink($root . '/' . $argument, $root . '/' . $path));
+        } else {
+            self::assertTrue(unlink($root . '/ext/gd.so') && rmdir($root . '/ext'));
+        }
+        $runner = $this->modulesOnlyRunner();
+
+        try {
+            $facts = (new GdBackend($runner, (new BackendOptions())->withPhpBinary($root . '/php')->withPhpExtensionDirectory($root . '/ext')))->discoverFacts();
+        } finally {
+            @chmod($root, 0700);
+        }
+
+        self::assertSame([AbstractBackend::FACT_UNAVAILABLE => $problem], $facts);
+        self::assertCount(1, $runner->getRuns(), 'only php -n -m ran');
+    }
+
+    /**
+     * Owned by another user, the directory or the shared object is refused even with the safe mode; changing the
+     * owner needs root.
+     */
+    public function testAnExtensionOwnedByAnotherUserIsNotLoaded(): void
+    {
+        if (!function_exists('posix_geteuid') || posix_geteuid() !== 0) {
+            self::markTestSkipped('Changing the owner of a file needs root.');
+        }
+        $root = $this->fakePrograms(['php', 'gd.so']);
+        $options = (new BackendOptions())->withPhpBinary($root . '/php')->withPhpExtensionDirectory($root);
+        self::assertTrue(chown($root . '/gd.so', 65534));
+        $file = (new GdBackend($this->modulesOnlyRunner(), $options))->discoverFacts();
+        self::assertTrue(chown($root . '/gd.so', 0) && chown($root, 65534));
+        $directory = (new GdBackend($this->modulesOnlyRunner(), $options))->discoverFacts();
+        self::assertTrue(chown($root, 0));
+
+        self::assertSame([AbstractBackend::FACT_UNAVAILABLE => 'the extension file is not owned by root or the effective user, or others can write it'], $file);
+        self::assertSame([AbstractBackend::FACT_UNAVAILABLE => 'the PHP extension directory is not owned by root or the effective user, or others can write to it'], $directory);
+    }
+
+    /**
+     * A directory that becomes unsafe after probing stops the jobs before they start.
+     */
+    public function testAJobIsRefusedWhenTheExtensionDirectoryBecomesUnsafe(): void
+    {
+        $root = $this->fakePrograms(['php', 'gd.so']);
+        $backend = new GdBackend($this->modulesOnlyRunner(), (new BackendOptions())->withPhpBinary($root . '/php')->withPhpExtensionDirectory($root));
+        $job = self::job(self::info(ImageFormat::PNG), ImageFormat::WEBP);
+        self::assertContains('extension=' . realpath($root . '/gd.so'), $backend->commandLine($job, ['load' => '1']));
+        self::assertTrue(chmod($root . '/gd.so', 0666));
+
+        $this->expectException(ConversionFailedException::class);
+        $this->expectExceptionMessage('The gd backend does not load its extension: the extension file is not owned by root or the effective user, or others can write it.');
+        $backend->commandLine($job, ['load' => '1']);
+    }
+
+    /**
+     * A runner whose PHP lists no gd module and fails every other command.
+     */
+    private function modulesOnlyRunner(): FakeProcessRunner
+    {
+        return new FakeProcessRunner(
+            static function (array $command): ProcessResult {
+                return substr(implode(' ', $command), -5) === '-n -m' ? FakeProcessRunner::result(0, "[PHP Modules]\nCore\n") : FakeProcessRunner::result(1);
+            },
+            $this->programOptions()
+        );
     }
 
     /**

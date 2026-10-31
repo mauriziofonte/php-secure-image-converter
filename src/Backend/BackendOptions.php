@@ -189,7 +189,10 @@ final class BackendOptions
      * Directory the workers load their extension (gd.so, imagick.so) from when the PHP build does not include it, or
      * null for the extension directory built into the binary. The workers run "php -n", which reads no php.ini: an
      * extension_dir set there does not apply, so a host whose extensions live elsewhere (such as /opt/php/ext) sets
-     * it here. Each run mounts the directory in the sandbox (AbstractBackend::getSandboxResourcePaths()).
+     * it here. The extension is loaded from it only when the directory, the shared object and every directory above
+     * them are owned by root or the effective user and not writable by others (a directory above may be, with its
+     * sticky bit set, as /tmp); the backend is unavailable otherwise. Each run mounts the shared object alone,
+     * read-only, in the sandbox.
      */
     public function getPhpExtensionDirectory(): ?string
     {

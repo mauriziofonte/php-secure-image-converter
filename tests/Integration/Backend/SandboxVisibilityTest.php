@@ -227,8 +227,8 @@ final class SandboxVisibilityTest extends BackendTestCase
 
     /**
      * A PHP worker whose extension is not in the binary's built-in extension directory loads it from the directory
-     * configured in BackendOptions (here a copy below /tmp), which each run mounts; a directory without it leaves
-     * the backend unavailable.
+     * configured in BackendOptions (here a copy below /tmp) by the path of its shared object, which each run mounts
+     * alone; a directory without it, or one that others can write to, leaves the backend unavailable.
      */
     public function testAPhpWorkerLoadsItsExtensionFromTheConfiguredDirectory(): void
     {
@@ -256,11 +256,21 @@ final class SandboxVisibilityTest extends BackendTestCase
             $found = BackendFactory::create($backend->getName(), self::hostRunner(), $options->withPhpExtensionDirectory($moved->getPath()));
             $missing = BackendFactory::create($backend->getName(), self::hostRunner(), $options->withPhpExtensionDirectory($empty->getPath()));
 
+            self::assertInstanceOf(AbstractBackend::class, $found);
             self::assertTrue($found->getCapabilities()->isAvailable(), (string) $found->getCapabilities()->getUnavailableReason());
             self::assertSame($backend->getCapabilities()->getOutputFormats(), $found->getCapabilities()->getOutputFormats());
+            self::assertContains((string) realpath($moved->pathOf($extension)), $found->getSandboxResourcePaths());
+            self::assertNotContains((string) realpath($moved->getPath()), $found->getSandboxResourcePaths(), 'only the shared object is mounted');
+            self::assertNull(self::check($found, $this->job(self::still(ImageFormat::PNG), ImageFormat::PNG)));
             self::assertSame(
                 'the ' . $backend->getName() . ' extension is not available to the PHP CLI',
                 $missing->getCapabilities()->getUnavailableReason()
+            );
+            self::assertTrue(chmod($moved->getPath(), 0777));
+            $writable = BackendFactory::create($backend->getName(), self::hostRunner(), $options->withPhpExtensionDirectory($moved->getPath()));
+            self::assertSame(
+                'the PHP extension directory is not owned by root or the effective user, or others can write to it',
+                $writable->getCapabilities()->getUnavailableReason()
             );
         } finally {
             $moved->remove();

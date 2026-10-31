@@ -261,7 +261,7 @@ abstract class AbstractBackend implements BackendInterface
      *
      * @param array<string, string>|null $facts
      *
-     * @throws ConversionFailedException when a program is missing
+     * @throws ConversionFailedException when a program is missing or the job must not run
      *
      * @return list<string>
      */
@@ -429,6 +429,8 @@ abstract class AbstractBackend implements BackendInterface
      *
      * @param array<string, string> $programs the located programs, by role
      * @param array<string, string> $facts
+     *
+     * @throws ConversionFailedException when the job must not run (such as a PHP extension that is no longer safe)
      *
      * @return list<string>
      */
@@ -705,12 +707,16 @@ abstract class AbstractBackend implements BackendInterface
                     $directories[\dirname($library)] = true;
                 }
             }
+            $resources = $this->getSandboxResourcePaths();
             foreach ($this->tracedObjects($programs, $directory, $facts) as $object) {
                 $libraries = $loader !== null ? $this->trace([$loader, '--list', $object], $directory, []) : null;
                 if ($libraries === null) {
                     return [];
                 }
-                $directories[\dirname($object)] = true;
+                if (!in_array($object, $resources, true)) {
+                    // An object that each run mounts by itself does not expose its directory.
+                    $directories[\dirname($object)] = true;
+                }
                 foreach ($libraries['libraries'] as $library) {
                     $directories[\dirname($library)] = true;
                 }
