@@ -56,6 +56,41 @@ final class OutputFileTest extends TestCase
         self::assertSame(['destination.webp', 'output.webp'], self::files($this->directory->getPath()));
     }
 
+    public function testTheCopyIsVerifiedBeforeItReplacesTheDestination(): void
+    {
+        file_put_contents($this->path('output.webp'), 'RIFF....WEBP');
+        file_put_contents($this->path('destination.webp'), 'old');
+        $seen = [];
+
+        OutputFile::copy($this->path('output.webp'), $this->path('destination.webp'), 1024, function (string $copy) use (&$seen): void {
+            $seen = [file_get_contents($copy), file_get_contents($this->path('destination.webp')), \dirname($copy)];
+        });
+
+        self::assertNotNull($this->directory);
+        self::assertSame(['RIFF....WEBP', 'old', $this->directory->getPath()], $seen, 'the verifier sees the copy, next to the untouched destination');
+        self::assertSame('RIFF....WEBP', file_get_contents($this->path('destination.webp')));
+        self::assertSame(['destination.webp', 'output.webp'], self::files($this->directory->getPath()));
+    }
+
+    public function testARefusedCopyLeavesTheDestinationAlone(): void
+    {
+        file_put_contents($this->path('output.webp'), 'not a webp');
+        file_put_contents($this->path('destination.webp'), 'old');
+
+        try {
+            OutputFile::copy($this->path('output.webp'), $this->path('destination.webp'), 1024, static function (string $copy): void {
+                throw new ConversionFailedException('refused');
+            });
+            self::fail('The verifier refuses the copy.');
+        } catch (ConversionFailedException $exception) {
+            self::assertSame('refused', $exception->getMessage());
+        }
+
+        self::assertSame('old', file_get_contents($this->path('destination.webp')));
+        self::assertNotNull($this->directory);
+        self::assertSame(['destination.webp', 'output.webp'], self::files($this->directory->getPath()), 'the copy is removed');
+    }
+
     public function testASymbolicLinkIsRefused(): void
     {
         file_put_contents($this->path('secret'), 'secret');

@@ -188,6 +188,7 @@ final class AbstractBackendTest extends TestCase
         ];
         foreach ($expected as $behaviour => $class) {
             $this->behaviour = $behaviour;
+            file_put_contents($this->job()->getOutputPath(), 'previous');
             try {
                 $backend->convert($this->job());
                 self::fail('The conversion must fail: ' . $behaviour);
@@ -200,7 +201,8 @@ final class AbstractBackendTest extends TestCase
                     self::assertSame('The cwebp conversion produced an unusable output: it has 3 frames instead of 1.', $exception->getMessage());
                 }
             }
-            self::assertFileDoesNotExist($this->job()->getOutputPath());
+            self::assertSame('previous', file_get_contents($this->job()->getOutputPath()), $behaviour . ': the destination is left alone');
+            self::assertSame([], glob(\dirname($this->job()->getOutputPath()) . '/.sic-*'), $behaviour . ': no copy is left behind');
         }
     }
 

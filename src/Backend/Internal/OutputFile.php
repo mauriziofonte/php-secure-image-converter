@@ -14,8 +14,9 @@ use Mfonte\SecureImageConverter\Contract\Exception\ConversionFailedException;
  * when lstat() shows a regular, non-empty file with a single link, owned by this process's effective user (when the
  * posix extension can tell), and the descriptor opened on it (non-blocking, so that a FIFO swapped in cannot block)
  * shows the same file again. Its bytes are then copied through that descriptor into a new file next to the
- * destination, which is renamed over the destination: a process that still holds the original open cannot change
- * the copy.
+ * destination: a process that still holds the original open cannot change the copy. The copy is checked (the
+ * caller's verifier) before it is renamed over the destination, so that an output that fails the check never
+ * replaces the destination, nor appears at its path.
  *
  * @internal
  */
@@ -24,13 +25,16 @@ final class OutputFile
     /**
      * Copies the output of a run to its destination.
      *
-     * @param string $source      the output file inside the working directory
-     * @param string $destination absolute path to write, replaced atomically
-     * @param int    $maxBytes    largest accepted size
+     * @param string                        $source      the output file inside the working directory
+     * @param string                        $destination absolute path to write, replaced atomically
+     * @param int                           $maxBytes    largest accepted size
+     * @param (callable(string): void)|null $verify      called with the path of the copy before it replaces the
+     *                                                   destination; it throws to refuse the copy, which is removed
      *
      * @throws ConversionFailedException when the source is not an acceptable output, or the copy fails
+     * @throws \Throwable                what the verifier throws, the destination left as it was
      */
-    public static function copy(string $source, string $destination, int $maxBytes): void
+    public static function copy(string $source, string $destination, int $maxBytes, ?callable $verify = null): void
     {
         $stream = self::open($source, $maxBytes);
         $temporary = \dirname($destination) . '/.sic-' . bin2hex(random_bytes(8)) . '.tmp';
@@ -43,10 +47,23 @@ final class OutputFile
         $copied = stream_copy_to_stream($stream, $target);
         $closed = fclose($target);
         fclose($stream);
-        if ($copied === false || $copied < 1 || !$closed || !@rename($temporary, $destination)) {
-            @unlink($temporary);
+        $renamed = false;
 
-            throw new ConversionFailedException('The output file could not be written.');
+        try {
+            if ($copied === false || $copied < 1 || !$closed) {
+                throw new ConversionFailedException('The output file could not be written.');
+            }
+            if ($verify !== null) {
+                $verify($temporary);
+            }
+            $renamed = @rename($temporary, $destination);
+            if (!$renamed) {
+                throw new ConversionFailedException('The output file could not be written.');
+            }
+        } finally {
+            if (!$renamed) {
+                @unlink($temporary);
+            }
         }
     }
 
