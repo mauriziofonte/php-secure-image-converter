@@ -17,11 +17,12 @@ use Mfonte\SecureImageConverter\Validation\Limits;
  * - At most MAX_SEGMENTS segments are accepted before the first scan, and at most MAX_FILL_BYTES fill bytes before a
  *   marker: a flood of EXIF or other segments is refused instead of walked.
  * - Exactly one frame header must precede the first scan, of a process 8-bit libjpeg decodes: baseline, extended
- *   sequential or progressive, Huffman or arithmetic coded (SOF0, SOF1, SOF2, SOF9, SOF10), with a sample precision
- *   of 8. Lossless (SOF3, SOF11) and hierarchical (SOF5 to SOF7, SOF13 to SOF15) processes and 12 or 16-bit
- *   precision are refused as unsupported. Width and height from 1 (a zero height announcing a later DNL marker is
- *   refused), 1 to 4 components with sampling factors from 1 to 4; four components are a CMYK or YCCK image
- *   (ImageInfo::VARIANT_JPEG_CMYK). The dimensions are checked against the limits as soon as the frame header is
+ *   sequential or progressive, Huffman or arithmetic coded (SOF0, SOF1, SOF2, SOF9, SOF10), with a sample precision of
+ *   8. Lossless (SOF3, SOF11) and hierarchical (SOF5 to SOF7, SOF13 to SOF15) processes and 12 or 16-bit precision are
+ *   refused as unsupported. Width and height from 1 (a zero height announcing a later DNL marker is refused), 1, 3 or 4
+ *   components with sampling factors from 1 to 4; four components are a CMYK or YCCK image
+ *   (ImageInfo::VARIANT_JPEG_CMYK). Two components, which no standard colour space uses and of the backends only vips
+ *   decodes, are refused as unsupported. The dimensions are checked against the limits as soon as the frame header is
  *   read.
  * - Every segment must fit in the file; a truncated header is refused. Once the first scan is reached, the image
  *   must end with an EOI marker (FF D9). The entropy-coded data of a scan holds no marker but RSTn (FF D0 to FF D7)
@@ -344,6 +345,9 @@ final class JpegParser implements ParserInterface
         }
         if ($components < 1 || $components > 4 || $payloadLength !== 6 + 3 * $components) {
             throw self::invalid('the frame header has an invalid component count or length');
+        }
+        if ($components === 2) {
+            throw new UnsupportedFormatException('JPEG images of two components are not supported.');
         }
         for ($index = 0; $index < $components; ++$index) {
             $component = $reader->read(3);

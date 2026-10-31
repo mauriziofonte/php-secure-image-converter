@@ -169,7 +169,9 @@ final class ImageCorpus
             'jpeg/spoof-two-frame-headers.jpg' => self::committed(str_replace($frameHeader, $frameHeader . $frameHeader, $valid), self::reject(ErrorCode::INVALID_IMAGE)),
             'jpeg/spoof-zero-height.jpg' => self::committed(ImageBuilder::patch($grey, $greySof + 5, pack('n', 0)), self::reject(ErrorCode::INVALID_IMAGE)),
             'jpeg/spoof-precision-7.jpg' => self::committed(ImageBuilder::patch($grey, $greySof + 4, "\x07"), self::reject(ErrorCode::INVALID_IMAGE)),
-            // libjpeg decodes neither lossless nor hierarchical JPEG, nor 12 or 16 bits per sample as built by GD.
+            // libjpeg decodes neither lossless nor hierarchical JPEG, nor 12 or 16 bits per sample as built by GD; of
+            // the backends, only vips decodes two components.
+            'jpeg/unsupported-2-components.jpg' => self::committed(ImageBuilder::jpeg(8, 8, 2), self::reject(ErrorCode::UNSUPPORTED_FORMAT, true)),
             'jpeg/unsupported-12-bit.jpg' => self::committed(ImageBuilder::jpeg(8, 8, 1, '', 0xC1, 12), self::reject(ErrorCode::UNSUPPORTED_FORMAT, true)),
             'jpeg/unsupported-lossless.jpg' => self::committed(ImageBuilder::jpeg(8, 8, 1, '', 0xC3), self::reject(ErrorCode::UNSUPPORTED_FORMAT, true)),
             'jpeg/unsupported-hierarchical.jpg' => self::committed(
