@@ -5,19 +5,17 @@ declare(strict_types=1);
 namespace Mfonte\SecureImageConverter\Backend\Internal;
 
 use Mfonte\SecureImageConverter\Backend\BackendJob;
-use Mfonte\SecureImageConverter\Contract\Capabilities;
 use Mfonte\SecureImageConverter\Contract\Exception\ExceptionInterface;
 use Mfonte\SecureImageConverter\Contract\ImageFormat;
 use Mfonte\SecureImageConverter\Validation\ImageInspector;
-use Mfonte\SecureImageConverter\Validation\Limits;
 
 /**
  * Checks the output of a job before it is delivered: a program can exit with status 0 and leave a file that is cut
  * short or holds no image, such as the 222-byte AVIF (a meta box without its image item) that vips writes when the AV1
  * encoder fails to allocate under the address space limit.
  *
- * The output must parse, with the header parser of its format (ImageInspector, every limit at its maximum but the
- * size, which is the runner's file size limit), as the job's format, size and frame count (at most the job's for an
+ * The output must parse, with the header parser of its format (ImageInspector::forOutput(): every limit at its
+ * maximum but the size, which is the runner's file size limit, and walks bounded by that size), as the job's format, size and frame count (at most the job's for an
  * animation: an encoder may merge identical frames). The parsers refuse a file cut anywhere, and one without image
  * data: the AVIF boxes must tile the file and the image item hold an AV1 sequence header; a PNG needs IDAT chunks and
  * IEND, a JPEG a scan and EOI, a GIF an image and its trailer, a WebP its bitstream within the RIFF size, a BMP its
@@ -41,14 +39,8 @@ final class OutputCheck
      */
     public static function problem(BackendJob $job, string $path, int $maxBytes): ?string
     {
-        $limits = new Limits();
-        foreach (Capabilities::limitNames() as $name) {
-            $limits = $limits->withLimit($name, Capabilities::LIMIT_VALUE_MAX);
-        }
-        $limits = $limits->withMaxBytes(max(1, min(Capabilities::LIMIT_VALUE_MAX, $maxBytes)));
-
         try {
-            $info = (new ImageInspector($limits, [$job->getOutputFormat()]))->inspect($path);
+            $info = ImageInspector::forOutput([$job->getOutputFormat()], $maxBytes)->inspect($path);
         } catch (ExceptionInterface $exception) {
             return sprintf('it is not a valid %s image', $job->getOutputFormat());
         }

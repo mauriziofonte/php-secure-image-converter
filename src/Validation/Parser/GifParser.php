@@ -33,8 +33,9 @@ use Mfonte\SecureImageConverter\Validation\Limits;
 final class GifParser implements ParserInterface
 {
     /**
-     * Largest number of units of work: blocks and sub-blocks walked. Encoders write image data in sub-blocks of 255
-     * bytes, so a real file reaches this only beyond 64 MB.
+     * Largest number of units of work in an input file: blocks and sub-blocks walked. Encoders write image data in
+     * sub-blocks of 255 bytes, so a real file reaches this only beyond 64 MB. Outputs are walked with a limit that
+     * grows with their allowed size (ImageInspector::forOutput()).
      */
     public const MAX_BLOCKS = 262144;
 
@@ -67,6 +68,20 @@ final class GifParser implements ParserInterface
     private const LABEL_GRAPHIC_CONTROL = 0xF9;
     private const LABEL_APPLICATION = 0xFF;
 
+    /**
+     * @var int
+     */
+    private $maxBlocks;
+
+    /**
+     * @param int $maxBlocks largest number of units of work: MAX_BLOCKS for untrusted input; ImageInspector::forOutput()
+     *                       raises it with the size of the files a backend may write
+     */
+    public function __construct(int $maxBlocks = self::MAX_BLOCKS)
+    {
+        $this->maxBlocks = max(self::MAX_BLOCKS, $maxBlocks);
+    }
+
     public function parse(ByteReader $reader, Limits $limits): ImageInfo
     {
         $reader->seek(6);
@@ -88,7 +103,7 @@ final class GifParser implements ParserInterface
 
         while (true) {
             $blocks += self::BLOCK_COST;
-            if ($blocks > self::MAX_BLOCKS) {
+            if ($blocks > $this->maxBlocks) {
                 throw self::tooManyBlocks();
             }
             $introducer = $reader->readUint8();
@@ -139,7 +154,7 @@ final class GifParser implements ParserInterface
                 throw self::invalid('the file has an unknown block');
             }
 
-            $consumed = $reader->skipSubBlocks(self::MAX_BLOCKS - $blocks);
+            $consumed = $reader->skipSubBlocks($this->maxBlocks - $blocks);
             if ($consumed < 0) {
                 throw self::tooManyBlocks();
             }

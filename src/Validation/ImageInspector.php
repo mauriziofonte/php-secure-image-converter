@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Mfonte\SecureImageConverter\Validation;
 
+use Mfonte\SecureImageConverter\Contract\Capabilities;
 use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
 use Mfonte\SecureImageConverter\Contract\Exception\InvalidImageException;
 use Mfonte\SecureImageConverter\Contract\Exception\LimitExceededException;
@@ -55,7 +56,7 @@ use Mfonte\SecureImageConverter\Validation\Parser\WebpParser;
  * (invalid_image); a dimension, pixel or frame limit is exceeded, LimitExceededException (image_too_large). Messages
  * never quote the file content or its path.
  */
-final class ImageInspector
+final class ImageInspector implements ImageInspectorInterface
 {
     /**
      * Input formats enabled when none are given: JPEG, PNG, GIF and BMP.
@@ -82,6 +83,14 @@ final class ImageInspector
     private $sniffer;
 
     /**
+     * Size of the largest file whose structures the parsers walk in full (see forOutput()), or null for input files,
+     * whose walks stop at the constants of the parsers.
+     *
+     * @var int|null
+     */
+    private $outputBytes;
+
+    /**
      * @param Limits|null       $limits       limits to enforce; the defaults of Limits when null
      * @param list<string>|null $inputFormats ImageFormat values to accept; DEFAULT_INPUT_FORMATS when null. An empty
      *                                        list refuses every input.
@@ -93,6 +102,35 @@ final class ImageInspector
         $this->limits = $limits === null ? new Limits() : $limits;
         $this->enabledFormats = self::checkFormats($inputFormats === null ? self::DEFAULT_INPUT_FORMATS : $inputFormats);
         $this->sniffer = new FormatSniffer();
+    }
+
+    /**
+     * An inspector for the files a backend writes, of up to $maxBytes bytes: every dimension, pixel and frame limit
+     * at Capabilities::LIMIT_VALUE_MAX (the caller compares the output with what it expects), max_bytes at $maxBytes,
+     * and walks bounded by the file size instead of the constants that bound untrusted input. Encoders legitimately
+     * write more structures than an input may hold: vips splits PNG data into 8 KiB IDAT chunks, so a PNG output
+     * above 134 MB has more than PngParser::MAX_CHUNKS chunks. A PNG chunk takes at least 12 bytes, a WEBP chunk 8 and
+     * each unit of GifParser::MAX_BLOCKS at least one byte per GifParser::BLOCK_COST units, so these walks stay
+     * linear in the file size, which $maxBytes bounds. The other parsers' constants already exceed what any output
+     * of OUTPUT_DIMENSION_MAX pixels per side holds (a TIFF of at most 16383 rows has at most 16383 strips per plane
+     * in the layouts the backends write).
+     *
+     * @param list<string> $formats  ImageFormat values to accept
+     * @param int          $maxBytes largest accepted file size, from 1 to Capabilities::LIMIT_VALUE_MAX (clamped)
+     *
+     * @throws InvalidArgumentException when a format is unknown or listed twice
+     */
+    public static function forOutput(array $formats, int $maxBytes): self
+    {
+        $limits = new Limits();
+        foreach (Capabilities::limitNames() as $name) {
+            $limits = $limits->withLimit($name, Capabilities::LIMIT_VALUE_MAX);
+        }
+        $maxBytes = max(1, min(Capabilities::LIMIT_VALUE_MAX, $maxBytes));
+        $inspector = new self($limits->withMaxBytes($maxBytes), $formats);
+        $inspector->outputBytes = $maxBytes;
+
+        return $inspector;
     }
 
     /**
@@ -208,7 +246,7 @@ final class ImageInspector
             throw new UnsupportedFormatException(sprintf('The input format %s is not enabled.', $format));
         }
 
-        return self::parserFor($format)->parse($reader, $this->limits);
+        return $this->parserFor($format)->parse($reader, $this->limits);
     }
 
     /**
@@ -246,19 +284,21 @@ final class ImageInspector
     /**
      * @throws UnsupportedFormatException
      */
-    private static function parserFor(string $format): ParserInterface
+    private function parserFor(string $format): ParserInterface
     {
+        // A file of n bytes holds at most n / 12 PNG chunks, n / 8 WEBP chunks and BLOCK_COST x n GIF units.
+        $bytes = $this->outputBytes;
         switch ($format) {
             case ImageFormat::JPEG:
                 return new JpegParser();
             case ImageFormat::PNG:
-                return new PngParser();
+                return new PngParser($bytes !== null ? intdiv($bytes, 12) + 1 : PngParser::MAX_CHUNKS);
             case ImageFormat::GIF:
-                return new GifParser();
+                return new GifParser($bytes !== null ? GifParser::BLOCK_COST * $bytes + 1 : GifParser::MAX_BLOCKS);
             case ImageFormat::BMP:
                 return new BmpParser();
             case ImageFormat::WEBP:
-                return new WebpParser();
+                return new WebpParser($bytes !== null ? intdiv($bytes, 8) + 1 : WebpParser::MAX_CHUNKS);
             case ImageFormat::AVIF:
                 return new AvifParser();
             case ImageFormat::TIFF:

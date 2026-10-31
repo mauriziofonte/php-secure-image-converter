@@ -55,6 +55,20 @@ final class WebpParser implements ParserInterface
     private const ANIM_SIZE = 6;
     private const ANMF_SIZE = 16;
 
+    /**
+     * @var int
+     */
+    private $maxChunks;
+
+    /**
+     * @param int $maxChunks largest number of chunks walked: MAX_CHUNKS for untrusted input; ImageInspector::forOutput()
+     *                       raises it with the size of the files a backend may write
+     */
+    public function __construct(int $maxChunks = self::MAX_CHUNKS)
+    {
+        $this->maxChunks = max(self::MAX_CHUNKS, $maxChunks);
+    }
+
     public function parse(ByteReader $reader, Limits $limits): ImageInfo
     {
         $reader->seek(0);
@@ -86,7 +100,7 @@ final class WebpParser implements ParserInterface
             throw self::invalid('the first chunk is not VP8, VP8L or VP8X');
         }
 
-        $info = self::parseExtended($reader, $limits, $length, $end);
+        $info = $this->parseExtended($reader, $limits, $length, $end);
 
         return $info->withTrailingData($trailingData || $info->hasTrailingData());
     }
@@ -95,7 +109,7 @@ final class WebpParser implements ParserInterface
      * @throws InvalidImageException
      * @throws \Mfonte\SecureImageConverter\Contract\Exception\LimitExceededException
      */
-    private static function parseExtended(ByteReader $reader, Limits $limits, int $length, int $end): ImageInfo
+    private function parseExtended(ByteReader $reader, Limits $limits, int $length, int $end): ImageInfo
     {
         // libwebp decodes a still image only when VP8X has its exact size, while its demuxer takes a longer chunk.
         if ($length !== self::VP8X_SIZE) {
@@ -124,8 +138,8 @@ final class WebpParser implements ParserInterface
         $previous = 'VP8X';
 
         for ($chunks = 2; $reader->getPosition() < $end; ++$chunks) {
-            if ($chunks > self::MAX_CHUNKS) {
-                throw self::invalid(sprintf('the file has more than %d chunks', self::MAX_CHUNKS));
+            if ($chunks > $this->maxChunks) {
+                throw self::invalid(sprintf('the file has more than %d chunks', $this->maxChunks));
             }
             $start = $reader->getPosition();
             list($type, $length) = self::readChunkHeader($reader, $end);

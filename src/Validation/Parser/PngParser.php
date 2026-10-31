@@ -37,8 +37,9 @@ use Mfonte\SecureImageConverter\Validation\Limits;
 final class PngParser implements ParserInterface
 {
     /**
-     * Largest number of chunks in a file, IHDR and IEND included. Encoders split the image data into IDAT chunks of
-     * 8 KiB or more, so a real file reaches this only beyond 128 MB, or with more than 8000 animation frames.
+     * Largest number of chunks in an input file, IHDR and IEND included. Encoders split the image data into IDAT
+     * chunks of 8 KiB or more, so a real file reaches this only beyond 128 MB, or with more than 8000 animation
+     * frames. Outputs are walked with a limit that grows with their allowed size (ImageInspector::forOutput()).
      */
     public const MAX_CHUNKS = 16384;
 
@@ -84,6 +85,20 @@ final class PngParser implements ParserInterface
 
     private const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
 
+    /**
+     * @var int
+     */
+    private $maxChunks;
+
+    /**
+     * @param int $maxChunks largest number of chunks walked: MAX_CHUNKS for untrusted input; ImageInspector::forOutput()
+     *                       raises it with the size of the files a backend may write
+     */
+    public function __construct(int $maxChunks = self::MAX_CHUNKS)
+    {
+        $this->maxChunks = max(self::MAX_CHUNKS, $maxChunks);
+    }
+
     public function parse(ByteReader $reader, Limits $limits): ImageInfo
     {
         $reader->seek(0);
@@ -108,8 +123,8 @@ final class PngParser implements ParserInterface
         $orientation = ImageInfo::ORIENTATION_NORMAL;
 
         for ($chunks = 2; ; ++$chunks) {
-            if ($chunks > self::MAX_CHUNKS) {
-                throw self::invalid(sprintf('the file has more than %d chunks', self::MAX_CHUNKS));
+            if ($chunks > $this->maxChunks) {
+                throw self::invalid(sprintf('the file has more than %d chunks', $this->maxChunks));
             }
             list($length, $type) = self::readChunkHeader($reader);
             if ($imageData > 0 && $type !== 'IDAT') {

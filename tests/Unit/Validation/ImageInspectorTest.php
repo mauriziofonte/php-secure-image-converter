@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Mfonte\SecureImageConverter\Tests\Unit\Validation;
 
+use Mfonte\SecureImageConverter\Contract\Capabilities;
 use Mfonte\SecureImageConverter\Contract\Exception\ErrorCode;
 use Mfonte\SecureImageConverter\Contract\Exception\ExceptionInterface;
 use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
@@ -15,6 +16,9 @@ use Mfonte\SecureImageConverter\Tests\Fixtures\ImageBuilder;
 use Mfonte\SecureImageConverter\Validation\ImageInfo;
 use Mfonte\SecureImageConverter\Validation\ImageInspector;
 use Mfonte\SecureImageConverter\Validation\Limits;
+use Mfonte\SecureImageConverter\Validation\Parser\GifParser;
+use Mfonte\SecureImageConverter\Validation\Parser\PngParser;
+use Mfonte\SecureImageConverter\Validation\Parser\WebpParser;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
@@ -396,6 +400,57 @@ final class ImageInspectorTest extends TestCase
             return $exception;
         }
         self::fail('The input must be refused.');
+    }
+
+    /**
+     * Encoders write more structures than an untrusted input may hold (vips splits PNG data into 8 KiB IDAT chunks,
+     * so a PNG output above 134 MB has more than PngParser::MAX_CHUNKS chunks): an output inspector scales its walks
+     * with the allowed size, while an input inspector keeps the constants.
+     *
+     * @return array<string, array{string, string}>
+     */
+    public static function structureHeavyFiles(): array
+    {
+        $gif = ImageBuilder::gifScreen(8, 8) . "\x21\xFE" . ImageBuilder::repeat("\x01A", GifParser::MAX_BLOCKS) . "\x00"
+            . ImageBuilder::gifImage(0, 0, 8, 8) . "\x3B";
+
+        return [
+            'png' => [ImageFormat::PNG, ImageBuilder::png(8, 8, 8, 2, ImageBuilder::repeat(ImageBuilder::pngChunk('tEXt', "k\0"), PngParser::MAX_CHUNKS))],
+            'gif' => [ImageFormat::GIF, $gif],
+            'webp' => [ImageFormat::WEBP, ImageBuilder::riff(ImageBuilder::vp8x(0, 8, 8) . ImageBuilder::webpChunk('VP8L', ImageBuilder::vp8l(8, 8))
+                . ImageBuilder::repeat(ImageBuilder::webpChunk('ABCD', ''), WebpParser::MAX_CHUNKS))],
+        ];
+    }
+
+    /**
+     * @dataProvider structureHeavyFiles
+     */
+    #[DataProvider('structureHeavyFiles')]
+    public function testAnOutputInspectorWalksAsManyStructuresAsItsSizeAllows(string $format, string $bytes): void
+    {
+        $limits = (new Limits())->withMaxBytes(Capabilities::LIMIT_VALUE_MAX);
+        $output = ImageInspector::forOutput([$format], strlen($bytes));
+
+        $info = $output->inspect($this->temporaryFile($bytes));
+        self::assertSame($format, $info->getFormat());
+        self::assertSame(strlen($bytes), $output->getLimits()->getMaxBytes());
+        self::assertSame(Capabilities::LIMIT_VALUE_MAX, $output->getLimits()->getMaxWidth());
+        self::assertSame([$format], $output->getInputFormats());
+
+        try {
+            (new ImageInspector($limits, [$format]))->inspect($this->temporaryFile($bytes));
+            self::fail('An input inspector walked more structures than its constant allows.');
+        } catch (InvalidImageException $exception) {
+            self::assertSame(ErrorCode::INVALID_IMAGE, $exception->getErrorCode());
+        }
+    }
+
+    public function testAnOutputInspectorRefusesAFileAboveItsSize(): void
+    {
+        $bytes = ImageBuilder::png(8, 8);
+
+        $this->expectException(LimitExceededException::class);
+        ImageInspector::forOutput([ImageFormat::PNG], strlen($bytes) - 1)->inspect($this->temporaryFile($bytes));
     }
 
     /**
