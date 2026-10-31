@@ -47,7 +47,8 @@ use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
  *   directory.
  *
  * Capabilities are probed with CapabilityProber on first use and kept in the capability cache (BackendOptions), keyed
- * by the programs (path, size, modification time, inode), the isolation level and the isolation options.
+ * by the programs (path, size, modification time, inode), the isolation level and the isolation options. A cache that
+ * is enabled but cannot be used (its directory is not private) is logged as a warning.
  *
  * Subclasses provide the programs, what to probe, the command line and the memory estimate.
  */
@@ -520,8 +521,12 @@ abstract class AbstractBackend implements BackendInterface
                 return;
             }
         }
+        $unusable = CapabilityCache::unusableReason($this->options);
+        if ($unusable !== null) {
+            CapabilityCache::warnUnusable($this->options, $unusable, [$this->getName()]);
+        }
         $cache = new CapabilityCache(
-            $this->options->isCapabilityCacheEnabled()
+            $this->options->isCapabilityCacheEnabled() && $unusable === null
                 ? new PrivateCacheDirectory($this->options->getCapabilityCacheDirectory())
                 : null,
             $this->options->getCapabilityCacheTtlSeconds()

@@ -9,8 +9,10 @@ use Mfonte\SecureImageConverter\Backend\BackendResult;
 use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
 use Mfonte\SecureImageConverter\Contract\ImageFormat;
 use Mfonte\SecureImageConverter\Contract\IsolationLevel;
+use Mfonte\SecureImageConverter\Tests\Fixtures\Log\MemoryLogger;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
+use Psr\Log\NullLogger;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
@@ -33,6 +35,7 @@ final class BackendOptionsTest extends TestCase
         self::assertTrue($options->isCapabilityCacheEnabled());
         self::assertNull($options->getCapabilityCacheDirectory());
         self::assertSame(86400, $options->getCapabilityCacheTtlSeconds());
+        self::assertInstanceOf(NullLogger::class, $options->getLogger());
     }
 
     public function testWithersReturnCopies(): void
@@ -42,7 +45,8 @@ final class BackendOptionsTest extends TestCase
             ->withWorkingDirectoryParent('/var/tmp')
             ->withPhpBinary('/usr/bin/php8.3')
             ->withCapabilityCache(false, '/var/cache/sic')
-            ->withCapabilityCacheTtlSeconds(60);
+            ->withCapabilityCacheTtlSeconds(60)
+            ->withLogger($logger = new MemoryLogger());
 
         self::assertSame(2147483648, $options->getMemoryCeilingBytes());
         self::assertSame(536870912, $changed->getMemoryCeilingBytes());
@@ -51,6 +55,8 @@ final class BackendOptionsTest extends TestCase
         self::assertFalse($changed->isCapabilityCacheEnabled());
         self::assertSame('/var/cache/sic', $changed->getCapabilityCacheDirectory());
         self::assertSame(60, $changed->getCapabilityCacheTtlSeconds());
+        self::assertSame($logger, $changed->getLogger());
+        self::assertInstanceOf(NullLogger::class, $options->getLogger());
     }
 
     /**

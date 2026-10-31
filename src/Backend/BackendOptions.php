@@ -7,6 +7,8 @@ namespace Mfonte\SecureImageConverter\Backend;
 use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
 use Mfonte\SecureImageConverter\Isolation\ExecutableFinder;
 use Mfonte\SecureImageConverter\Isolation\ResourceLimits;
+use Psr\Log\LoggerInterface;
+use Psr\Log\NullLogger;
 
 /**
  * How backends run their jobs and keep their capabilities. Immutable value object; every with*() method returns a
@@ -19,6 +21,15 @@ use Mfonte\SecureImageConverter\Isolation\ResourceLimits;
  * | PHP binary                 | the running CLI, else "php" | PHP CLI that runs the GD and Imagick workers     |
  * | capability cache directory | PrivateCacheDirectory       | where probed capabilities are kept              |
  * | capability cache TTL       | 1 day                       | age after which capabilities are probed again   |
+ * | logger                     | NullLogger                  | receives the warnings of the backends           |
+ *
+ * Capability cache: probing every backend takes seconds and dozens of sandboxed runs, so the capabilities are kept
+ * in a directory private to the effective user, by default sys_get_temp_dir()/secure-image-converter-<euid>. On a
+ * host where other users share that temporary directory (shared hosting, several PHP-FPM pools), another user can
+ * create the default directory first: it is then not private and is ignored, every process probes again, and a
+ * warning is logged (once per BackendFactory call, and once per backend created directly). Pass a directory that only
+ * the PHP user can reach, such as one in the application's own cache directory: withCapabilityCache(true,
+ * '/srv/app/var/cache/image-converter'); it is created with mode 0700 when missing.
  *
  * Memory: every backend estimates the address space a job needs from its pixels (every frame of an animation), the
  * output pixels and the program's own overhead (BackendInterface::estimateMemoryBytes()), and runs the process with
@@ -72,6 +83,11 @@ final class BackendOptions
      * @var int
      */
     private $capabilityCacheTtlSeconds = self::DEFAULT_CAPABILITY_CACHE_TTL_SECONDS;
+
+    /**
+     * @var LoggerInterface|null
+     */
+    private $logger;
 
     /**
      * Largest per-job address space limit, in bytes.
@@ -163,7 +179,10 @@ final class BackendOptions
 
     /**
      * @param bool        $enabled   false to probe again in every process
-     * @param string|null $directory absolute, normalised path of a private directory, or null for the default
+     * @param string|null $directory absolute, normalised path of a directory only the effective user can write
+     *                               (created with mode 0700 when missing), or null for the default, which another
+     *                               user of the same temporary directory can make unusable (see the class
+     *                               description)
      *
      * @throws InvalidArgumentException when the path is not absolute and normalised
      */
@@ -197,6 +216,22 @@ final class BackendOptions
         }
         $clone = clone $this;
         $clone->capabilityCacheTtlSeconds = $seconds;
+
+        return $clone;
+    }
+
+    /**
+     * The logger that receives the warnings of the backends: a capability cache that cannot be used.
+     */
+    public function getLogger(): LoggerInterface
+    {
+        return $this->logger !== null ? $this->logger : new NullLogger();
+    }
+
+    public function withLogger(LoggerInterface $logger): self
+    {
+        $clone = clone $this;
+        $clone->logger = $logger;
 
         return $clone;
     }

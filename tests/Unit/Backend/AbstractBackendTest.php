@@ -16,9 +16,11 @@ use Mfonte\SecureImageConverter\Contract\ImageFormat;
 use Mfonte\SecureImageConverter\Isolation\ProcessOptions;
 use Mfonte\SecureImageConverter\Isolation\ProcessResult;
 use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
+use Mfonte\SecureImageConverter\Tests\Fixtures\Log\MemoryLogger;
 use Mfonte\SecureImageConverter\Tests\Unit\Backend\Fake\FakeProcessRunner;
 use Mfonte\SecureImageConverter\Validation\ImageInspector;
 use PHPUnit\Framework\Attributes\CoversClass;
+use Psr\Log\LogLevel;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
@@ -150,6 +152,40 @@ final class AbstractBackendTest extends TestCase
 
         $second->refreshCapabilities();
         self::assertCount(2 * $probes, $runner->getRuns());
+    }
+
+    /**
+     * A cache directory that another user could write (here: one open to group and others) is not used: each backend
+     * warns once, probes, and stores nothing.
+     */
+    public function testAnUnusableCacheIsReportedOncePerBackend(): void
+    {
+        if (!function_exists('posix_geteuid')) {
+            self::markTestSkipped('The capability cache needs the posix extension.');
+        }
+        self::assertNotNull($this->files);
+        $directory = $this->files->getPath() . '/shared';
+        mkdir($directory);
+        chmod($directory, 0777);
+        $logger = new MemoryLogger();
+        $options = (new BackendOptions())->withCapabilityCache(true, $directory)->withLogger($logger);
+        $runner = $this->runner();
+        $backend = new CwebpBackend($runner, $options);
+
+        self::assertTrue($backend->getCapabilities()->isAvailable());
+        $backend->getCapabilities();
+        $probes = count($runner->getRuns());
+        (new CwebpBackend($runner, $options))->getCapabilities();
+
+        self::assertCount(2 * $probes, $runner->getRuns(), 'the second backend probes again');
+        self::assertSame([], array_values(array_diff((array) scandir($directory), ['.', '..'])), 'nothing is stored');
+        $warnings = $logger->getMessages(LogLevel::WARNING);
+        self::assertCount(2, $warnings, 'one warning per backend');
+        self::assertStringContainsString('BackendOptions::withCapabilityCache(true, $directory)', $warnings[0]);
+        self::assertSame(
+            ['reason' => $directory . ' is not a directory owned by user ' . posix_geteuid() . ' and closed to writes by group and others', 'backends' => 'cwebp'],
+            $logger->getRecords()[0]['context']
+        );
     }
 
     public function testAJobRunsWithItsLimitsAllowlistAndInput(): void

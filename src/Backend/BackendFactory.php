@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Mfonte\SecureImageConverter\Backend;
 
+use Mfonte\SecureImageConverter\Backend\Internal\CapabilityCache;
 use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
 use Mfonte\SecureImageConverter\Isolation\ProcessRunnerInterface;
 
@@ -62,7 +63,8 @@ final class BackendFactory
     }
 
     /**
-     * Creates backends, in order of preference.
+     * Creates backends, in order of preference. When the capability cache of the options cannot be used, one warning
+     * is logged for all of them and they are given options without the cache.
      *
      * @param list<string>|null $names backends to enable (any order, see parseNames()), or null for all
      *
@@ -72,8 +74,16 @@ final class BackendFactory
      */
     public static function createAll(ProcessRunnerInterface $runner, ?BackendOptions $options = null, ?array $names = null): array
     {
+        $names = self::sort($names === null ? self::NAMES : $names);
+        $options = $options !== null ? $options : new BackendOptions();
+        $unusable = CapabilityCache::unusableReason($options);
+        if ($unusable !== null) {
+            // Warned once here; the backends then probe without the cache, as they would, and do not warn again.
+            CapabilityCache::warnUnusable($options, $unusable, $names);
+            $options = $options->withCapabilityCache(false);
+        }
         $backends = [];
-        foreach (self::sort($names === null ? self::NAMES : $names) as $name) {
+        foreach ($names as $name) {
             $backends[] = self::create($name, $runner, $options);
         }
 

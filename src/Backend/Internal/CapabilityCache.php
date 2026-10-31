@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Mfonte\SecureImageConverter\Backend\Internal;
 
 use Mfonte\SecureImageConverter\Backend\BackendCapabilities;
+use Mfonte\SecureImageConverter\Backend\BackendOptions;
 use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
 use Mfonte\SecureImageConverter\Isolation\PrivateCacheDirectory;
 
@@ -42,6 +43,45 @@ final class CapabilityCache
     {
         $this->directory = $directory;
         $this->ttlSeconds = $ttlSeconds;
+    }
+
+    /**
+     * Why the capability cache of the options is enabled but cannot be used, or null: the posix extension is
+     * missing, or the directory is not private to the effective user (see PrivateCacheDirectory).
+     */
+    public static function unusableReason(BackendOptions $options): ?string
+    {
+        if (!$options->isCapabilityCacheEnabled()) {
+            return null;
+        }
+        if (!function_exists('posix_geteuid')) {
+            return 'the posix extension, which checks the owner of the cache directory, is missing';
+        }
+        $configured = $options->getCapabilityCacheDirectory();
+        if ((new PrivateCacheDirectory($configured))->resolve() !== null) {
+            return null;
+        }
+
+        return sprintf(
+            '%s is not a directory owned by user %d and closed to writes by group and others',
+            $configured !== null ? $configured : rtrim(sys_get_temp_dir(), '/') . '/' . PrivateCacheDirectory::DEFAULT_NAME_PREFIX . posix_geteuid(),
+            posix_geteuid()
+        );
+    }
+
+    /**
+     * Logs that the cache cannot be used, as a warning.
+     *
+     * @param list<string> $backends names of the backends concerned
+     */
+    public static function warnUnusable(BackendOptions $options, string $reason, array $backends): void
+    {
+        $options->getLogger()->warning(
+            'The capability cache cannot be used: {reason}. The backends ({backends}) probe their capabilities in '
+            . 'every process, which takes seconds; configure a private directory with '
+            . 'BackendOptions::withCapabilityCache(true, $directory).',
+            ['reason' => $reason, 'backends' => implode(', ', $backends)]
+        );
     }
 
     /**
