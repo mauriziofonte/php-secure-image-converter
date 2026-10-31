@@ -233,6 +233,30 @@ final class AbstractBackendTest extends TestCase
         self::assertSame(SandboxPaths::forPrograms([$this->fakePrograms() . '/cwebp']), $broad->getSandboxPaths(), 'an unreadable trace keeps the library roots');
     }
 
+    public function testAJobWithTimeLimitsReplacesThoseOfTheRunner(): void
+    {
+        $runner = $this->runner();
+        $backend = new CwebpBackend($runner, $this->options());
+        $backend->getCapabilities();
+
+        $backend->convert($this->job()->withTimeLimits(900.0, 1800));
+        $runs = $runner->getRuns();
+        $run = $runs[count($runs) - 1];
+        self::assertSame(900.0, $run['options']->getTimeoutSeconds(), 'above the runner default of 30 seconds');
+        self::assertSame(1800, $run['options']->getResourceLimits()->getCpuSeconds());
+
+        $backend->convert($this->job()->withTimeLimits(2.5, 3));
+        $runs = $runner->getRuns();
+        $run = $runs[count($runs) - 1];
+        self::assertSame(2.5, $run['options']->getTimeoutSeconds(), 'below it as well');
+        self::assertSame(3, $run['options']->getResourceLimits()->getCpuSeconds());
+
+        $backend->convert($this->job());
+        $runs = $runner->getRuns();
+        $run = $runs[count($runs) - 1];
+        self::assertSame(ProcessOptions::DEFAULT_TIMEOUT_SECONDS, $run['options']->getTimeoutSeconds(), 'the runner default without');
+    }
+
     public function testAJobRunsWithItsLimitsAllowlistAndInput(): void
     {
         $runner = $this->runner();

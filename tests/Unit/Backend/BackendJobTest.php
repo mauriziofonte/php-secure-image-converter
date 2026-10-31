@@ -185,6 +185,16 @@ final class BackendJobTest extends TestCase
         self::assertSame(9, $changed->getEffort());
     }
 
+    public function testTimeLimitsAreUnsetUntilGiven(): void
+    {
+        $job = self::job(self::info(ImageFormat::PNG), ImageFormat::WEBP);
+        $limited = $job->withTimeLimits(12.5, 25);
+
+        self::assertNull($job->getTimeoutSeconds());
+        self::assertNull($job->getCpuSeconds());
+        self::assertSame([12.5, 25], [$limited->getTimeoutSeconds(), $limited->getCpuSeconds()]);
+    }
+
     public function testPixelCountsSaturate(): void
     {
         $huge = new BackendJob('/a', self::info(ImageFormat::GIF, 2000000000, 2000000000, 4), '/b', ImageFormat::WEBP, 16, 12);
@@ -212,6 +222,12 @@ final class BackendJobTest extends TestCase
             }],
             'zero width' => [static function () use ($info) {
                 return new BackendJob('/a.png', $info, '/b.webp', ImageFormat::WEBP, 0, 1);
+            }],
+            'zero timeout' => [static function () use ($info) {
+                return (new BackendJob('/a.png', $info, '/b.webp', ImageFormat::WEBP, 1, 1))->withTimeLimits(0.0, 1);
+            }],
+            'zero CPU time' => [static function () use ($info) {
+                return (new BackendJob('/a.png', $info, '/b.webp', ImageFormat::WEBP, 1, 1))->withTimeLimits(1.0, 0);
             }],
             'orientation 0' => [static function () use ($info) {
                 return (new BackendJob('/a.png', $info, '/b.webp', ImageFormat::WEBP, 1, 1))->withOrientation(0);

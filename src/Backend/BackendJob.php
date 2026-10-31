@@ -10,6 +10,8 @@ use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
 use Mfonte\SecureImageConverter\Contract\Exception\InvalidImageException;
 use Mfonte\SecureImageConverter\Contract\ImageFormat;
 use Mfonte\SecureImageConverter\Isolation\ExecutableFinder;
+use Mfonte\SecureImageConverter\Isolation\ProcessOptions;
+use Mfonte\SecureImageConverter\Isolation\ResourceLimits;
 use Mfonte\SecureImageConverter\Validation\ImageInfo;
 
 /**
@@ -39,6 +41,10 @@ use Mfonte\SecureImageConverter\Validation\ImageInfo;
  *   size is computed from the upright size. An output with metadata kept carries no orientation other than 1 once it
  *   is applied. Only backends whose capabilities list the input format among their oriented formats apply it
  *   (BackendCapabilities::getOrientedFormats()); fromRequest() asks for it whenever the input declares one.
+ *
+ * - Time: getTimeoutSeconds() and getCpuSeconds(), when set (withTimeLimits()), replace the wall-clock timeout and the
+ *   CPU time limit of the runner for this job, so that the budget can follow the work (Pipeline\ProcessingBudget);
+ *   unset, the runner's own limits apply.
  *
  * Paths are absolute and normalised (no ".", ".." or empty segment, no NUL byte). The input path is never passed to a
  * program as it is (a backend links it into its private working directory under a fixed name), so it may contain any
@@ -120,6 +126,16 @@ final class BackendJob
      * @var int
      */
     private $orientation = ImageInfo::ORIENTATION_NORMAL;
+
+    /**
+     * @var float|null
+     */
+    private $timeoutSeconds;
+
+    /**
+     * @var int|null
+     */
+    private $cpuSeconds;
 
     /**
      * A job with the defaults of ConversionRequest: fit contain, default quality, effort 4, lossy, metadata stripped
@@ -326,6 +342,46 @@ final class BackendJob
         }
         $clone = clone $this;
         $clone->orientation = $orientation;
+
+        return $clone;
+    }
+
+    /**
+     * Wall-clock timeout of this job in seconds, or null for the runner's.
+     */
+    public function getTimeoutSeconds(): ?float
+    {
+        return $this->timeoutSeconds;
+    }
+
+    /**
+     * CPU time limit of this job in seconds, or null for the runner's.
+     */
+    public function getCpuSeconds(): ?int
+    {
+        return $this->cpuSeconds;
+    }
+
+    /**
+     * @param float $timeoutSeconds wall-clock timeout, above 0 and at most ProcessOptions::MAX_TIMEOUT_SECONDS
+     * @param int   $cpuSeconds     CPU time limit, from 1 to ResourceLimits::MAX_CPU_SECONDS
+     *
+     * @throws InvalidArgumentException when a value is out of range
+     */
+    public function withTimeLimits(float $timeoutSeconds, int $cpuSeconds): self
+    {
+        if (!($timeoutSeconds > 0.0) || $timeoutSeconds > ProcessOptions::MAX_TIMEOUT_SECONDS
+            || $cpuSeconds < 1 || $cpuSeconds > ResourceLimits::MAX_CPU_SECONDS
+        ) {
+            throw new InvalidArgumentException(sprintf(
+                'BackendJob: the timeout must be above 0 and at most %d seconds, the CPU time from 1 to %d seconds.',
+                (int) ProcessOptions::MAX_TIMEOUT_SECONDS,
+                ResourceLimits::MAX_CPU_SECONDS
+            ));
+        }
+        $clone = clone $this;
+        $clone->timeoutSeconds = $timeoutSeconds;
+        $clone->cpuSeconds = $cpuSeconds;
 
         return $clone;
     }

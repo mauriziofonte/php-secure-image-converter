@@ -42,7 +42,8 @@ use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
  * - links the input there as "input.<extension>" (the input path is mounted read-only in the sandbox), so that no
  *   path chosen by a client ever reaches a command line;
  * - runs the command with the runner's limits, the address space limit set to the memory ceiling (BackendOptions; the
- *   runner applies limits at the rlimit and sandbox levels only), and the backend's sandbox allowlist (SandboxPaths,
+ *   runner applies limits at the rlimit and sandbox levels only), the wall-clock timeout and CPU time limit replaced
+ *   by the job's own when it has some (BackendJob::withTimeLimits()), and the backend's sandbox allowlist (SandboxPaths,
  *   with the library directories that probing traced) plus any read-only path the operator added to the runner's
  *   defaults; the input and the library's own files (worker scripts, configuration) are mounted for the run, after the
  *   sandbox's private /tmp;
@@ -582,6 +583,13 @@ abstract class AbstractBackend implements BackendInterface
                 $timeoutSeconds,
                 $facts
             );
+            if ($job->getTimeoutSeconds() !== null && $job->getCpuSeconds() !== null) {
+                // The job's own budget replaces the runner's time limits, in either direction.
+                $options = $runner->getOptions();
+                $runner = $runner->withOptions($options
+                    ->withTimeoutSeconds($job->getTimeoutSeconds())
+                    ->withResourceLimits($options->getResourceLimits()->withCpuSeconds($job->getCpuSeconds())));
+            }
             // The command first: it checks the files that the run then mounts (AbstractWorkerBackend).
             $command = $this->command($job, $input, $output, $programs, $facts);
             $result = $runner->execute(
