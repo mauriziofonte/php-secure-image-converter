@@ -25,14 +25,15 @@ final class CwebpBackend extends AbstractBackend
     public const NAME = 'cwebp';
 
     /**
-     * Fixed address space and bytes per decoded and encoded pixel, measured with prlimit (about 15 MiB and 5.2) and
-     * rounded up.
+     * Fixed address space and bytes per decoded and encoded pixel. Measured in the sandbox on RGBA noise (the
+     * costliest content): 47 MiB at 1 megapixel and 143 MiB at 4, about 15 MiB plus 34 bytes per pixel (lossless: 63
+     * and 151 MiB); with about 15 % added.
      */
     private const BASE_BYTES = 33554432;
 
     private const BYTES_PER_INPUT_PIXEL = 8;
 
-    private const BYTES_PER_OUTPUT_PIXEL = 8;
+    private const BYTES_PER_OUTPUT_PIXEL = 32;
 
     public function getName(): string
     {
@@ -41,9 +42,7 @@ final class CwebpBackend extends AbstractBackend
 
     public function estimateMemoryBytes(BackendJob $job): int
     {
-        return self::BASE_BYTES
-            + (int) min(PHP_INT_MAX / 4, self::BYTES_PER_INPUT_PIXEL * (float) $job->getInputPixels())
-            + (int) min(PHP_INT_MAX / 4, self::BYTES_PER_OUTPUT_PIXEL * (float) $job->getOutputPixels());
+        return self::addressSpace(self::BASE_BYTES, self::BYTES_PER_INPUT_PIXEL, $job->getInputPixels(), self::BYTES_PER_OUTPUT_PIXEL, $job->getOutputPixels());
     }
 
     protected function programs(ExecutableFinder $finder): array

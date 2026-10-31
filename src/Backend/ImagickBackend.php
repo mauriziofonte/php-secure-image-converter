@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Mfonte\SecureImageConverter\Backend;
 
+use Mfonte\SecureImageConverter\Contract\ImageFormat;
 use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
 
 /**
@@ -23,14 +24,22 @@ final class ImagickBackend extends AbstractWorkerBackend
     public const NAME = 'imagick';
 
     /**
-     * Fixed address space of PHP with ImageMagick, and bytes per decoded and encoded pixel (16 bits per channel in
-     * the pixel cache, plus a working copy), rounded up.
+     * Fixed address space of PHP with ImageMagick, bytes per decoded pixel (16 bits per channel in the pixel cache),
+     * and fixed bytes and bytes per encoded pixel by output format. Measured in the sandbox on RGBA noise (the
+     * costliest content), about 15 % added: 87 and 119 MiB at 1 and 4 megapixels for JPEG, PNG, BMP and TIFF, 119 and
+     * 247 MiB for WEBP (lossless: 127 and 239 MiB), 223 and 271 MiB for GIF, 159 and 438 MiB for AVIF.
      */
-    private const BASE_BYTES = 268435456;
+    private const BASE_BYTES = 134217728;
 
-    private const BYTES_PER_INPUT_PIXEL = 16;
+    private const BYTES_PER_INPUT_PIXEL = 12;
 
-    private const BYTES_PER_OUTPUT_PIXEL = 16;
+    private const OUTPUT_BYTES = [
+        ImageFormat::WEBP => [0, 40],
+        ImageFormat::GIF => [134217728, 12],
+        ImageFormat::AVIF => [0, 96],
+    ];
+
+    private const BYTES_PER_OTHER_OUTPUT_PIXEL = 8;
 
     public function getName(): string
     {
@@ -39,9 +48,9 @@ final class ImagickBackend extends AbstractWorkerBackend
 
     public function estimateMemoryBytes(BackendJob $job): int
     {
-        return self::BASE_BYTES
-            + (int) min(PHP_INT_MAX / 4, self::BYTES_PER_INPUT_PIXEL * (float) $job->getInputPixels())
-            + (int) min(PHP_INT_MAX / 4, self::BYTES_PER_OUTPUT_PIXEL * (float) $job->getOutputPixels());
+        list($extra, $perPixel) = self::OUTPUT_BYTES[$job->getOutputFormat()] ?? [0, self::BYTES_PER_OTHER_OUTPUT_PIXEL];
+
+        return self::addressSpace(self::BASE_BYTES + $extra, self::BYTES_PER_INPUT_PIXEL, $job->getInputPixels(), $perPixel, $job->getOutputPixels());
     }
 
     /**

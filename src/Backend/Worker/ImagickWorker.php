@@ -149,7 +149,8 @@ final class ImagickWorker extends AbstractWorker
                     throw new \RuntimeException('Imagick does not encode a lossless AVIF.', self::EXIT_FAILED);
                 }
                 $image->setImageCompressionQuality($job['quality']);
-                $image->setOption('heic:speed', (string) (9 - $job['effort']));
+                // Speed 0 takes over six times as long as speed 1 for a negligible gain.
+                $image->setOption('heic:speed', (string) max(1, 9 - $job['effort']));
                 break;
             case 'jpeg':
                 $image->setImageCompressionQuality($job['quality']);

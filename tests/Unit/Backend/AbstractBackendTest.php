@@ -78,6 +78,14 @@ final class AbstractBackendTest extends TestCase
                         symlink('/etc/hostname', $output);
 
                         return FakeProcessRunner::result(0);
+                    case 'truncated':
+                        file_put_contents($output, substr((string) file_get_contents(__DIR__ . '/../../../resources/probe/still.webp'), 0, 20));
+
+                        return FakeProcessRunner::result(0);
+                    case 'wrong size':
+                        copy(__DIR__ . '/../../../resources/probe/anim.webp', $output);
+
+                        return FakeProcessRunner::result(0);
                     default:
                         copy(__DIR__ . '/../../../resources/probe/still.webp', $output);
 
@@ -123,7 +131,7 @@ final class AbstractBackendTest extends TestCase
         self::assertSame([], $capabilities->getLosslessFormats(), 'the copied probe image is lossy');
         self::assertFalse($capabilities->keepsIccProfile());
         self::assertFalse($capabilities->keepsMetadata());
-        self::assertContains('its resize with fit cover had the wrong size', $capabilities->getNotes());
+        self::assertContains('it failed to convert a resize with fit cover', $capabilities->getNotes(), 'the backend refuses an output of the wrong size');
         self::assertContains('its lossless webp output was lossy', $capabilities->getNotes());
     }
 
@@ -175,6 +183,8 @@ final class AbstractBackendTest extends TestCase
             'signal' => ResourceLimitException::class,
             'timeout' => ConversionTimeoutException::class,
             'link' => ConversionFailedException::class,
+            'truncated' => ConversionFailedException::class,
+            'wrong size' => ConversionFailedException::class,
         ];
         foreach ($expected as $behaviour => $class) {
             $this->behaviour = $behaviour;
@@ -183,9 +193,31 @@ final class AbstractBackendTest extends TestCase
                 self::fail('The conversion must fail: ' . $behaviour);
             } catch (\Exception $exception) {
                 self::assertInstanceOf($class, $exception, $behaviour);
+                if ($behaviour === 'truncated') {
+                    self::assertSame('The cwebp conversion produced an unusable output: it is not a valid webp image.', $exception->getMessage());
+                }
+                if ($behaviour === 'wrong size') {
+                    self::assertSame('The cwebp conversion produced an unusable output: it has 3 frames instead of 1.', $exception->getMessage());
+                }
             }
             self::assertFileDoesNotExist($this->job()->getOutputPath());
         }
+    }
+
+    public function testAJobOutsideTheCapabilitiesDoesNotRun(): void
+    {
+        $runner = $this->runner();
+        $backend = new CwebpBackend($runner, $this->options());
+        $backend->getCapabilities();
+        $runs = count($runner->getRuns());
+
+        try {
+            $backend->convert($this->job()->withOutputFormat(ImageFormat::AVIF));
+            self::fail('The job must be refused.');
+        } catch (ConversionFailedException $exception) {
+            self::assertSame('The cwebp backend cannot convert this job: it does not encode avif.', $exception->getMessage());
+        }
+        self::assertCount($runs, $runner->getRuns());
     }
 
     public function testAJobAboveTheMemoryCeilingDoesNotRun(): void

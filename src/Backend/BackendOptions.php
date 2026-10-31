@@ -23,10 +23,13 @@ use Mfonte\SecureImageConverter\Isolation\ResourceLimits;
  * Memory: every backend estimates the address space a job needs from its pixels (every frame of an animation), the
  * output pixels and the program's own overhead (BackendInterface::estimateMemoryBytes()), and runs the process with
  * exactly that limit instead of the fixed address space limit of the runner's ResourceLimits. A job whose estimate is
- * above the ceiling is not run by that backend: BackendResolver picks another, or reports resource_limit. With the
- * default Limits (40 megapixels per frame, 400 megapixels in all frames) every still image fits below the default
- * ceiling in every backend; the largest animations fit only in the backends that keep few frames in memory
- * (gif2webp). The CPU time, file size and open file limits of the runner apply unchanged.
+ * above the ceiling is not run by that backend: BackendResolver picks another, or reports resource_limit. The
+ * estimates were measured on noise, the costliest content, so that any real image fits. With the default Limits (40
+ * megapixels per frame, 400 megapixels in all frames), every still image fits below the default ceiling in cwebp
+ * and avifenc, and every lossy one in vips and GD; above it are lossless WEBP beyond about 26 megapixels in vips,
+ * and WEBP beyond about 38 and AVIF beyond about 18 in Imagick. The largest animations fit only in gif2webp, which
+ * keeps one frame in memory (vips decodes every frame). The CPU time, file size and open file limits of the runner
+ * apply unchanged.
  */
 final class BackendOptions
 {

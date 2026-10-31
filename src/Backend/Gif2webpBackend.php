@@ -18,22 +18,24 @@ use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
  * | effort   | -m 0 to 6 (scaled)                                                                       |
  * | metadata | -metadata none, icc or all (the default would copy XMP)                                  |
  *
- * It keeps only the canvas and the frame being encoded in memory, so its estimate does not grow with the frame
- * count: it converts animations too large for vips under the memory ceiling.
+ * It decodes one frame at a time and keeps only the canvas, the frame being encoded and the encoded output in
+ * memory, so its estimate grows little with the frame count: it converts animations too large for vips under the
+ * memory ceiling.
  */
 final class Gif2webpBackend extends AbstractBackend
 {
     public const NAME = 'gif2webp';
 
     /**
-     * Fixed address space and bytes per pixel of one frame, measured with prlimit (35 MiB for 30 frames of
-     * 0.75 megapixels) and rounded up; plus a little per frame for the encoded output it keeps.
+     * Fixed address space and bytes per pixel of one frame, and per encoded pixel of every frame for the output it
+     * keeps. Measured in the sandbox: 23 and 39 MiB for 6 frames of 0.25 and 1 megapixel, 35 MiB for 30 frames of
+     * 0.75 megapixels; rounded up.
      */
     private const BASE_BYTES = 33554432;
 
     private const BYTES_PER_FRAME_PIXEL = 32;
 
-    private const BYTES_PER_FRAME = 65536;
+    private const BYTES_PER_OUTPUT_PIXEL = 2;
 
     public function getName(): string
     {
@@ -44,9 +46,13 @@ final class Gif2webpBackend extends AbstractBackend
     {
         $input = $job->getInput();
 
-        return self::BASE_BYTES
-            + (int) min(PHP_INT_MAX / 4, self::BYTES_PER_FRAME_PIXEL * (float) $input->getWidth() * $input->getHeight())
-            + (int) min(PHP_INT_MAX / 4, self::BYTES_PER_FRAME * (float) $job->getFrameCount());
+        return self::addressSpace(
+            self::BASE_BYTES,
+            self::BYTES_PER_FRAME_PIXEL,
+            $input->getWidth() * $input->getHeight(),
+            self::BYTES_PER_OUTPUT_PIXEL,
+            $job->getOutputPixels()
+        );
     }
 
     protected function programs(ExecutableFinder $finder): array

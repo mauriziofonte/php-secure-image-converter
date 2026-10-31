@@ -66,6 +66,7 @@ final class GdWorker extends AbstractWorker
     protected function convert(array $job): void
     {
         $input = $job['input'];
+        error_clear_last();
         switch ($job['input_format']) {
             case 'jpeg':
                 $image = @imagecreatefromjpeg($input);
@@ -86,6 +87,14 @@ final class GdWorker extends AbstractWorker
                 $image = false;
         }
         if ($image === false) {
+            // libgd reports a failed allocation as a warning ("cannot allocate image data", libjpeg's "Insufficient
+            // memory"), which tells the memory limit from a broken file.
+            $error = error_get_last();
+            $message = is_array($error) ? strtolower($error['message']) : '';
+            if (strpos($message, 'alloc') !== false || strpos($message, 'memory') !== false) {
+                throw new \RuntimeException('The input could not be decoded within the memory limit.', self::EXIT_RESOURCE_LIMIT);
+            }
+
             throw new \RuntimeException('The input could not be decoded.', self::EXIT_FAILED);
         }
         if (!imageistruecolor($image)) {

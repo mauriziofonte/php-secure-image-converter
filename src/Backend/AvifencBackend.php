@@ -14,7 +14,7 @@ use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
  * | Setting  | Mapping                                                                                  |
  * | -------- | ---------------------------------------------------------------------------------------- |
  * | quality  | -q (libavif 1.0 and later), or the equivalent quantizer with --min and --max             |
- * | effort   | -s: speed 10 (effort 0) to 0 (effort 9)                                                  |
+ * | effort   | -s: speed 10 (effort 0) to 1 (efforts 8 and 9; speed 0 is over twice as slow again)     |
  * | lossless | -l                                                                                       |
  * | metadata | --ignore-exif, --ignore-xmp and --ignore-icc as requested                                |
  *
@@ -25,11 +25,14 @@ final class AvifencBackend extends AbstractBackend
     public const NAME = 'avifenc';
 
     /**
-     * Fixed address space and bytes per decoded pixel, measured with prlimit (about 67 MiB and 34) and rounded up.
+     * Fixed address space and bytes per decoded pixel, lossy and lossless. Measured in the sandbox on RGBA noise
+     * (the costliest content): 71 and 127 MiB at 1 and 4 megapixels, 95 and 215 MiB lossless; rounded up.
      */
     private const BASE_BYTES = 83886080;
 
-    private const BYTES_PER_INPUT_PIXEL = 40;
+    private const BYTES_PER_INPUT_PIXEL = 32;
+
+    private const LOSSLESS_BYTES_PER_INPUT_PIXEL = 48;
 
     public function getName(): string
     {
@@ -38,8 +41,13 @@ final class AvifencBackend extends AbstractBackend
 
     public function estimateMemoryBytes(BackendJob $job): int
     {
-        return self::BASE_BYTES
-            + (int) min(PHP_INT_MAX / 4, self::BYTES_PER_INPUT_PIXEL * (float) $job->getInputPixels());
+        return self::addressSpace(
+            self::BASE_BYTES,
+            $job->needsLosslessMode() ? self::LOSSLESS_BYTES_PER_INPUT_PIXEL : self::BYTES_PER_INPUT_PIXEL,
+            $job->getInputPixels(),
+            0,
+            0
+        );
     }
 
     protected function programs(ExecutableFinder $finder): array
@@ -74,7 +82,7 @@ final class AvifencBackend extends AbstractBackend
 
     protected function command(BackendJob $job, string $input, string $output, array $programs, array $facts): array
     {
-        $speed = 10 - (int) round($job->getEffort() * 10 / 9);
+        $speed = max(1, 10 - (int) round($job->getEffort() * 10 / 9));
         $command = [$programs['avifenc'], '-j', '1', '-s', (string) $speed, '-d', '8'];
         if ($job->needsLosslessMode()) {
             $command[] = '-l';

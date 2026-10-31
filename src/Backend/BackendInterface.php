@@ -16,8 +16,8 @@ use Mfonte\SecureImageConverter\Contract\Exception\ResourceLimitException;
  * A backend declares what it can do on this host in getCapabilities(), established by probing (it converts small
  * images shipped with the library and checks the outputs), and estimates the memory one job needs. It does not choose
  * formats, sizes or animation: BackendResolver checks a job against the capabilities before convert() is called, and
- * convert() does exactly what the job says. The output is checked only for being a regular file the process created;
- * verifying its content is the caller's task.
+ * convert() does exactly what the job says, or refuses a job its capabilities do not cover. The output is checked
+ * only for being a regular file the process created; verifying its content is the caller's task.
  */
 interface BackendInterface
 {
@@ -46,7 +46,8 @@ interface BackendInterface
      *                                       its memory, CPU time or file size budget
      * @throws ConversionTimeoutException    when the process exceeded its wall-clock timeout
      * @throws IsolationUnavailableException when the isolation level of the runner is not available on the host
-     * @throws ConversionFailedException     when the program is missing, fails, or leaves no regular output file
+     * @throws ConversionFailedException     when the backend is unavailable, its capabilities do not cover the job,
+     *                                       or the program fails or leaves no regular output file
      */
     public function convert(BackendJob $job): BackendResult;
 }

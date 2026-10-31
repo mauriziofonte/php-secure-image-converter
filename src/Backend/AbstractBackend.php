@@ -11,6 +11,7 @@ use Mfonte\SecureImageConverter\Backend\Internal\OutputFile;
 use Mfonte\SecureImageConverter\Backend\Internal\ProbeImages;
 use Mfonte\SecureImageConverter\Backend\Internal\ProcessFailure;
 use Mfonte\SecureImageConverter\Backend\Internal\SandboxPaths;
+use Mfonte\SecureImageConverter\Contract\Capabilities;
 use Mfonte\SecureImageConverter\Contract\Exception\ConversionFailedException;
 use Mfonte\SecureImageConverter\Contract\Exception\ExceptionInterface;
 use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
@@ -23,6 +24,8 @@ use Mfonte\SecureImageConverter\Isolation\ProcessResult;
 use Mfonte\SecureImageConverter\Isolation\ProcessRunnerInterface;
 use Mfonte\SecureImageConverter\Isolation\ResourceLimits;
 use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
+use Mfonte\SecureImageConverter\Validation\ImageInspector;
+use Mfonte\SecureImageConverter\Validation\Limits;
 
 /**
  * What every backend shares: one private working directory per job, the input linked into it under a fixed name,
@@ -41,7 +44,7 @@ use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
  *   ResourceLimits::MIN_ADDRESS_SPACE_BYTES), the runner's other limits, and the backend's sandbox allowlist
  *   (SandboxPaths) plus any read-only path the operator added to the runner's defaults;
  * - maps a failure to its exception (ProcessFailure), or copies "output.<extension>" to the job's output path
- *   (OutputFile), and removes the directory.
+ *   (OutputFile) and checks its header (verifyOutput()), and removes the directory.
  *
  * Capabilities are probed with CapabilityProber on first use and kept in the capability cache (BackendOptions), keyed
  * by the programs (path, size, modification time, inode), the isolation level and the isolation options.
@@ -144,6 +147,12 @@ abstract class AbstractBackend implements BackendInterface
                 (string) $capabilities->getUnavailableReason()
             ));
         }
+        // A job outside the capabilities is refused, so that no program is asked for what it would do differently
+        // (gif2webp would keep every frame of a first-frame job).
+        $unsupported = $capabilities->explainUnsupported($job);
+        if ($unsupported !== null) {
+            throw new ConversionFailedException(sprintf('The %s backend cannot convert this job: %s.', $this->getName(), $unsupported));
+        }
         $needed = $this->estimateMemoryBytes($job);
         if ($needed > $this->options->getMemoryCeilingBytes()) {
             throw new ResourceLimitException(sprintf(
@@ -155,6 +164,15 @@ abstract class AbstractBackend implements BackendInterface
         }
 
         return $this->perform($job, $this->facts, null);
+    }
+
+    /**
+     * An address space estimate: $base bytes, plus $perInputPixel bytes per decoded pixel and $perOutputPixel per
+     * encoded pixel, saturated at a quarter of PHP_INT_MAX (far above any memory ceiling).
+     */
+    final protected static function addressSpace(int $base, int $perInputPixel, int $inputPixels, int $perOutputPixel, int $outputPixels): int
+    {
+        return (int) min(PHP_INT_MAX / 4, $base + $perInputPixel * (float) $inputPixels + $perOutputPixel * (float) $outputPixels);
     }
 
     /**
@@ -411,16 +429,47 @@ abstract class AbstractBackend implements BackendInterface
             if (!$result->isSuccessful()) {
                 throw ProcessFailure::exception($this->getName(), $result, $this->isWorker());
             }
-            OutputFile::copy(
-                $directory->pathOf($output),
-                $job->getOutputPath(),
-                $runner->getOptions()->getResourceLimits()->getFileSizeBytes()
-            );
+            $maxBytes = $runner->getOptions()->getResourceLimits()->getFileSizeBytes();
+            OutputFile::copy($directory->pathOf($output), $job->getOutputPath(), $maxBytes);
+            $problem = self::verifyOutput($job, $maxBytes);
+            if ($problem !== null) {
+                @unlink($job->getOutputPath());
+
+                throw new ConversionFailedException(sprintf('The %s conversion produced an unusable output: %s.', $this->getName(), $problem));
+            }
 
             return new BackendResult($this->getName(), $job, $result->getDurationMs(), $result->getIsolationLevel());
         } finally {
             $directory->remove();
         }
+    }
+
+    /**
+     * Why the output written for a job is unusable, or null: its header must parse as the job's format, size and
+     * frame count (at most the job's for an animation: an encoder may merge identical frames). A program can exit
+     * with status 0 and leave a truncated file: vips writing AVIF when the AV1 encoder fails to allocate.
+     */
+    private static function verifyOutput(BackendJob $job, int $maxBytes): ?string
+    {
+        $limits = new Limits();
+        foreach (Capabilities::limitNames() as $name) {
+            $limits = $limits->withLimit($name, Capabilities::LIMIT_VALUE_MAX);
+        }
+        $limits = $limits->withMaxBytes(max(1, min(Capabilities::LIMIT_VALUE_MAX, $maxBytes)));
+        try {
+            $info = (new ImageInspector($limits, [$job->getOutputFormat()]))->inspect($job->getOutputPath());
+        } catch (ExceptionInterface $exception) {
+            return sprintf('it is not a valid %s image', $job->getOutputFormat());
+        }
+        if ($info->getWidth() !== $job->getWidth() || $info->getHeight() !== $job->getHeight()) {
+            return sprintf('it is %dx%d instead of %dx%d', $info->getWidth(), $info->getHeight(), $job->getWidth(), $job->getHeight());
+        }
+        $frames = $info->getFrameCount();
+        if ($job->isAnimated() ? $frames > $job->getFrameCount() : $frames !== 1) {
+            return sprintf('it has %d frames instead of %d', $frames, $job->getFrameCount());
+        }
+
+        return null;
     }
 
     /**

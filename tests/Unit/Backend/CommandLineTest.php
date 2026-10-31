@@ -59,7 +59,7 @@ final class CommandLineTest extends TestCase
             $vips->commandLine(self::job(self::info(ImageFormat::PNG), ImageFormat::WEBP), self::VIPS_FACTS)
         );
         self::assertSame(
-            [$this->program('vips'), 'tiffload', 'input.tiff', 'output.avif[compression=av1,Q=50,effort=9,bitdepth=8,lossless=true,keep=none]', '--page', '0', '--n', '1', '--fail-on', 'error'],
+            [$this->program('vips'), 'tiffload', 'input.tiff', 'output.avif[compression=av1,Q=50,effort=8,bitdepth=8,lossless=true,keep=none]', '--page', '0', '--n', '1', '--fail-on', 'error'],
             $vips->commandLine(
                 self::job(self::info(ImageFormat::TIFF), ImageFormat::AVIF)->withQuality(50)->withEffort(9)->withLossless(true)->withKeepIccProfile(false),
                 self::VIPS_FACTS
@@ -102,9 +102,17 @@ final class CommandLineTest extends TestCase
         $small = self::job(self::info(ImageFormat::PNG), ImageFormat::WEBP);
         $large = self::job(self::info(ImageFormat::PNG, 8000, 5000), ImageFormat::WEBP, 800, 500);
 
-        self::assertGreaterThan(200 * 1048576, $vips->estimateMemoryBytes($small));
-        self::assertLessThan(300 * 1048576, $vips->estimateMemoryBytes($small));
-        self::assertGreaterThan($vips->estimateMemoryBytes($small) + 40000000 * 9, $vips->estimateMemoryBytes($large));
+        self::assertGreaterThanOrEqual(192 * 1048576, $vips->estimateMemoryBytes($small));
+        self::assertLessThan(224 * 1048576, $vips->estimateMemoryBytes($small));
+        self::assertGreaterThanOrEqual(256 * 1048576, $vips->estimateMemoryBytes($small->withOutputFormat(ImageFormat::AVIF)), 'an AVIF below 256 MiB may come out empty');
+        self::assertGreaterThan($vips->estimateMemoryBytes($small) + 40000000 * 8, $vips->estimateMemoryBytes($large));
+
+        $animation = self::job(self::info(ImageFormat::GIF, 100, 100, 50), ImageFormat::WEBP);
+        self::assertSame(
+            $vips->estimateMemoryBytes($animation->withAnimation(false)) + 49 * 10000 * 8 + 50 * 10000 * 4,
+            $vips->estimateMemoryBytes($animation),
+            'every frame is decoded, and every encoded frame kept'
+        );
     }
 
     public function testCwebpCropsForCoverAndSelectsTheLosslessPreset(): void
@@ -139,7 +147,7 @@ final class CommandLineTest extends TestCase
             [$this->program('gif2webp'), '-quiet', '-q', '100', '-m', '6', '-metadata', 'none', 'input.gif', '-o', 'output.webp'],
             $gif2webp->commandLine($animation->withLossless(true)->withEffort(9)->withKeepIccProfile(false), [])
         );
-        self::assertLessThan(64 * 1048576, $gif2webp->estimateMemoryBytes($animation), 'independent of the frame count');
+        self::assertLessThan(64 * 1048576, $gif2webp->estimateMemoryBytes($animation), 'little more for 300 frames');
     }
 
     public function testAvifencMapsQualitySpeedAndMetadata(): void
@@ -156,7 +164,7 @@ final class CommandLineTest extends TestCase
             $avifenc->commandLine($job->withEffort(0)->withKeepIccProfile(false), ['qcolor' => '0'])
         );
         self::assertSame(
-            [$this->program('avifenc'), '-j', '1', '-s', '0', '-d', '8', '-l', 'input.jpg', 'output.avif'],
+            [$this->program('avifenc'), '-j', '1', '-s', '1', '-d', '8', '-l', 'input.jpg', 'output.avif'],
             $avifenc->commandLine(
                 self::job(self::info(ImageFormat::JPEG), ImageFormat::AVIF)->withLossless(true)->withEffort(9)->withStripMetadata(false),
                 ['qcolor' => '1']
