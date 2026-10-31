@@ -62,7 +62,9 @@ final class ExtensionFile
      */
     public static function resolve(string $directory, string $extension): self
     {
-        clearstatcache();
+        // With true the realpath() cache is cleared too: a link retargeted since a failed check must not resolve to
+        // its old target from the cache.
+        clearstatcache(true);
         $real = realpath($directory);
         if (!is_string($real) || !is_dir($real)) {
             return new self(null, null, 'the PHP extension directory does not exist');
@@ -86,7 +88,7 @@ final class ExtensionFile
         if ($this->directory === null || $this->path === null) {
             return $this;
         }
-        clearstatcache();
+        clearstatcache(true);
 
         return self::check($this->directory, $this->path);
     }
