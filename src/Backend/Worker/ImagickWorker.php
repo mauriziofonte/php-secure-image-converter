@@ -162,6 +162,11 @@ final class ImagickWorker extends AbstractWorker
             case 'tiff':
                 $image->setImageCompression(\Imagick::COMPRESSION_ZIP);
                 break;
+            case 'bmp':
+                // ImageMagick codes an indexed image with RLE8 otherwise, in runs of one pixel where neighbours
+                // differ, and BmpParser refuses an output of more than BmpParser::MAX_RUNS runs.
+                $image->setCompression(\Imagick::COMPRESSION_NO);
+                break;
         }
     }
 

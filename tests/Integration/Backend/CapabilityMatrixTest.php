@@ -18,6 +18,7 @@ use Mfonte\SecureImageConverter\Contract\ConversionRequest;
 use Mfonte\SecureImageConverter\Contract\Exception\ConversionFailedException;
 use Mfonte\SecureImageConverter\Contract\Exception\UnsupportedFormatException;
 use Mfonte\SecureImageConverter\Contract\ImageFormat;
+use Mfonte\SecureImageConverter\Tests\Fixtures\ContentImages;
 use Mfonte\SecureImageConverter\Validation\ImageInfo;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -103,6 +104,33 @@ final class CapabilityMatrixTest extends BackendTestCase
             foreach ($capabilities->getOutputFormats() as $output) {
                 $jobs[] = $this->job(self::still($input), $output);
             }
+        }
+
+        self::assertConversions($backend, $jobs);
+    }
+
+    /**
+     * A noisy indexed PNG of 800 x 600 pixels (256 colours) to every output format: an encoder that codes it with
+     * run lengths (ImageMagick's RLE8 BMP) would write more runs than BmpParser::MAX_RUNS, and the output would be
+     * refused.
+     *
+     * @dataProvider enabledBackends
+     */
+    #[DataProvider('enabledBackends')]
+    public function testANoisyIndexedImageConvertsToEveryOutput(string $name): void
+    {
+        $backend = self::backend($name);
+        $capabilities = $backend->getCapabilities();
+        if (!in_array(ImageFormat::PNG, $capabilities->getInputFormats(), true)) {
+            self::markTestSkipped(sprintf('The %s backend does not decode PNG.', $name));
+        }
+        $path = $this->workingDirectory()->pathOf('indexed-noise.png');
+        file_put_contents($path, ContentImages::indexedPng(ContentImages::PALETTE_NOISE, 800, 600));
+        $info = self::inspect($path);
+        self::assertNotNull($info);
+        $jobs = [];
+        foreach ($capabilities->getOutputFormats() as $output) {
+            $jobs[] = $this->job([$path, $info], $output);
         }
 
         self::assertConversions($backend, $jobs);
