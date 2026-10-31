@@ -58,6 +58,7 @@ final class ImageInfoTest extends TestCase
             'metadata' => true,
             'orientation' => 6,
             'trailing_data' => true,
+            'variants' => [],
         ], $info->toArray());
         self::assertFalse($info->isAnimated());
     }
@@ -170,12 +171,53 @@ final class ImageInfoTest extends TestCase
         (new ImageInfo(ImageFormat::JPEG, 1, 1, 1, 1))->withOrientation($orientation);
     }
 
+    public function testVariantsAreSetOnCopiesInCanonicalOrder(): void
+    {
+        $info = new ImageInfo(ImageFormat::BMP, 10, 10, 1, 10);
+        $variant = $info->withVariants([ImageInfo::VARIANT_BMP_V3_HEADER, ImageInfo::VARIANT_BMP_BIT_FIELDS]);
+
+        self::assertSame([], $info->getVariants());
+        self::assertSame([ImageInfo::VARIANT_BMP_BIT_FIELDS, ImageInfo::VARIANT_BMP_V3_HEADER], $variant->getVariants());
+        self::assertSame([ImageInfo::VARIANT_BMP_BIT_FIELDS, ImageInfo::VARIANT_BMP_V3_HEADER], $variant->toArray()['variants']);
+        self::assertSame([], $variant->withVariants([])->getVariants());
+        foreach (ImageInfo::VARIANTS as $name => $format) {
+            self::assertSame([$name], (new ImageInfo($format, 1, 1, 1, 1))->withVariants([$name])->getVariants());
+        }
+    }
+
+    /**
+     * @return array<string, array{0: string, 1: list<string>}>
+     */
+    public static function invalidVariants(): array
+    {
+        return [
+            'variant of another format' => [ImageFormat::PNG, [ImageInfo::VARIANT_JPEG_CMYK]],
+            'unknown variant' => [ImageFormat::JPEG, ['progressive']],
+            'repeated variant' => [ImageFormat::BMP, [ImageInfo::VARIANT_BMP_2_BIT, ImageInfo::VARIANT_BMP_2_BIT]],
+        ];
+    }
+
+    /**
+     * @param list<string> $variants
+     *
+     * @dataProvider invalidVariants
+     */
+    #[DataProvider('invalidVariants')]
+    public function testVariantsMustBeDistinctVariantsOfTheFormat(string $format, array $variants): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        (new ImageInfo($format, 1, 1, 1, 1))->withVariants($variants);
+    }
+
     public function testSerializationRoundTrip(): void
     {
         $info = (new ImageInfo(ImageFormat::GIF, 5, 6, 7, 8))->withBitDepth(16)->withMetadata(true, true, true)
             ->withOrientation(3)->withTrailingData(true);
+        $cmyk = (new ImageInfo(ImageFormat::JPEG, 5, 6, 1, 8))->withVariants([ImageInfo::VARIANT_JPEG_CMYK]);
 
         self::assertEquals($info, unserialize(serialize($info), ['allowed_classes' => [ImageInfo::class]]));
+        self::assertEquals($cmyk, unserialize(serialize($cmyk), ['allowed_classes' => [ImageInfo::class]]));
     }
 
     /**
@@ -197,6 +239,11 @@ final class ImageInfoTest extends TestCase
             'orientation nine' => ['orientation', 9],
             'string orientation' => ['orientation', '1'],
             'integer trailing data flag' => ['trailingData', 0],
+            'variant of another format' => ['variants', [ImageInfo::VARIANT_BMP_2_BIT]],
+            'unknown variant' => ['variants', ['progressive']],
+            'repeated variant' => ['variants', [ImageInfo::VARIANT_JPEG_CMYK, ImageInfo::VARIANT_JPEG_CMYK]],
+            'string variants' => ['variants', ImageInfo::VARIANT_JPEG_CMYK],
+            'variants keyed by name' => ['variants', ['cmyk' => ImageInfo::VARIANT_JPEG_CMYK]],
         ];
     }
 

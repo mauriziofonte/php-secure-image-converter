@@ -23,6 +23,7 @@ use Mfonte\SecureImageConverter\Validation\ImageInfo;
  * | output format    | the probe source converted with metadata stripped: the format and size are right, and  |
  * |                  | neither the ICC profile nor EXIF of the JPEG source survives                            |
  * | input format     | its still image converted: the size is right (page 0 of the TIFF, not its larger page) |
+ * | input variant    | the variant's still image (such as a CMYK JPEG) converted: the size is right           |
  * | fit              | the source scaled to an exact size with that fit                                       |
  * | first frame      | an animation converted to a still image of the right size                              |
  * | animated in/out  | an animation converted with every frame kept                                           |
@@ -156,7 +157,13 @@ final class CapabilityProber
                 $inputs[] = $format;
             }
         }
-        $capabilities = new BackendCapabilities($this->backend, $inputs, $outputs);
+        $variants = [];
+        foreach (ImageInfo::VARIANTS as $variant => $format) {
+            if (in_array($format, $inputs, true) && $this->convertsVariant($variant, $reference)) {
+                $variants[] = $variant;
+            }
+        }
+        $capabilities = (new BackendCapabilities($this->backend, $inputs, $outputs))->withInputVariants($variants);
         $fits = [];
         foreach ($candidates['fits'] as $fit) {
             if (isset(self::FIT_PROBES[$fit]) && $this->resizes($source, $reference, $fit, false)) {
@@ -259,6 +266,20 @@ final class CapabilityProber
         return $info !== null && $this->check(
             self::matches($info, $output, $image[1]->getWidth(), $image[1]->getHeight(), 1),
             sprintf('its output from %s had the wrong size or page', $format)
+        );
+    }
+
+    private function convertsVariant(string $variant, string $output): bool
+    {
+        $image = $this->images->variant($variant);
+        if ($image === null) {
+            return false;
+        }
+        $info = $this->run($this->job($image, $output, $image[1]->getWidth(), $image[1]->getHeight()), 'the ' . $variant . ' variant');
+
+        return $info !== null && $this->check(
+            self::matches($info, $output, $image[1]->getWidth(), $image[1]->getHeight(), 1),
+            sprintf('its output from the %s variant had the wrong size', $variant)
         );
     }
 

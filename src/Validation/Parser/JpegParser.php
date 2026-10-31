@@ -20,8 +20,9 @@ use Mfonte\SecureImageConverter\Validation\Limits;
  *   sequential or progressive, Huffman or arithmetic coded (SOF0, SOF1, SOF2, SOF9, SOF10), with a sample precision
  *   of 8. Lossless (SOF3, SOF11) and hierarchical (SOF5 to SOF7, SOF13 to SOF15) processes and 12 or 16-bit
  *   precision are refused as unsupported. Width and height from 1 (a zero height announcing a later DNL marker is
- *   refused), 1 to 4 components with sampling factors from 1 to 4. The dimensions are checked against the limits as
- *   soon as the frame header is read.
+ *   refused), 1 to 4 components with sampling factors from 1 to 4; four components are a CMYK or YCCK image
+ *   (ImageInfo::VARIANT_JPEG_CMYK). The dimensions are checked against the limits as soon as the frame header is
+ *   read.
  * - Every segment must fit in the file; a truncated header is refused. Once the first scan is reached, the image
  *   must end with an EOI marker (FF D9). The entropy-coded data of a scan holds no marker but RSTn (FF D0 to FF D7)
  *   and stuffed FF 00 bytes: the parser searches it for the next marker, without decoding it, and skips the segments
@@ -163,7 +164,8 @@ final class JpegParser implements ParserInterface
                 return (new ImageInfo(ImageFormat::JPEG, $frame[0], $frame[1], 1, $reader->getSize()))
                     ->withMetadata($this->iccProfile, $this->exif, $this->otherMetadata)
                     ->withOrientation($this->orientation)
-                    ->withTrailingData($endOfImage + 2 < $reader->getSize());
+                    ->withTrailingData($endOfImage + 2 < $reader->getSize())
+                    ->withVariants($frame[2] === 4 ? [ImageInfo::VARIANT_JPEG_CMYK] : []);
             } else {
                 $this->readMetadata($reader, $marker, $payloadLength, $payloadEnd);
             }
@@ -319,7 +321,7 @@ final class JpegParser implements ParserInterface
      * @throws InvalidImageException
      * @throws UnsupportedFormatException
      *
-     * @return array{0: int, 1: int} width and height
+     * @return array{0: int, 1: int, 2: int} width, height and number of components
      */
     private static function readFrameHeader(ByteReader $reader, int $payloadLength): array
     {
@@ -352,7 +354,7 @@ final class JpegParser implements ParserInterface
             }
         }
 
-        return [$width, $height];
+        return [$width, $height, $components];
     }
 
     /**

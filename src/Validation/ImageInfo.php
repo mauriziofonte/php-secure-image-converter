@@ -37,6 +37,9 @@ use Mfonte\SecureImageConverter\Contract\ValidatedSerializationTrait;
  *   uses, unused bytes inside other structures that decoders skip, and data inside the colour profile or the metadata
  *   (which hasIccProfile(), hasExif() and hasMetadata() report). A consumer that must never return bytes it has not
  *   decoded re-encodes every image, and strips or rebuilds the colour profile, whatever the flag.
+ * - getVariants() names the variants of the format that some decoders do not read (see VARIANTS): a CMYK JPEG, a BMP
+ *   with bit-field masks, 2 or 64 bits per pixel, or a V2 or V3 header. Backends probe which of them they decode, so
+ *   that an image is never given to a decoder that cannot read it.
  *
  * Only the first image is described, and backends must decode it alone (page, scene or item 0): for TIFF, the first
  * page (IFD0) is read and checked against the limits, later pages are neither counted nor checked. A BMP file from
@@ -62,6 +65,54 @@ final class ImageInfo
      * Largest EXIF orientation value: displayed after a quarter turn anticlockwise.
      */
     public const ORIENTATION_MAX = 8;
+
+    /**
+     * A JPEG of four components: CMYK, or YCCK (Adobe transform 2).
+     */
+    public const VARIANT_JPEG_CMYK = 'jpeg_cmyk';
+
+    /**
+     * A BMP whose pixels are described by colour masks (BI_BITFIELDS), with 16 or 32 bits per pixel.
+     */
+    public const VARIANT_BMP_BIT_FIELDS = 'bmp_bit_fields';
+
+    /**
+     * A BMP whose pixels are described by colour and alpha masks (BI_ALPHABITFIELDS), with 16 or 32 bits per pixel.
+     */
+    public const VARIANT_BMP_ALPHA_BIT_FIELDS = 'bmp_alpha_bit_fields';
+
+    /**
+     * A BMP of 2 bits per pixel.
+     */
+    public const VARIANT_BMP_2_BIT = 'bmp_2_bit';
+
+    /**
+     * A BMP of 64 bits per pixel.
+     */
+    public const VARIANT_BMP_64_BIT = 'bmp_64_bit';
+
+    /**
+     * A BMP with a BITMAPV2INFOHEADER (52 bytes).
+     */
+    public const VARIANT_BMP_V2_HEADER = 'bmp_v2_header';
+
+    /**
+     * A BMP with a BITMAPV3INFOHEADER (56 bytes).
+     */
+    public const VARIANT_BMP_V3_HEADER = 'bmp_v3_header';
+
+    /**
+     * Every variant, in canonical order, with the format it belongs to.
+     */
+    public const VARIANTS = [
+        self::VARIANT_JPEG_CMYK => ImageFormat::JPEG,
+        self::VARIANT_BMP_BIT_FIELDS => ImageFormat::BMP,
+        self::VARIANT_BMP_ALPHA_BIT_FIELDS => ImageFormat::BMP,
+        self::VARIANT_BMP_2_BIT => ImageFormat::BMP,
+        self::VARIANT_BMP_64_BIT => ImageFormat::BMP,
+        self::VARIANT_BMP_V2_HEADER => ImageFormat::BMP,
+        self::VARIANT_BMP_V3_HEADER => ImageFormat::BMP,
+    ];
 
     /**
      * @var string
@@ -117,6 +168,11 @@ final class ImageInfo
      * @var bool
      */
     private $trailingData = false;
+
+    /**
+     * @var list<string>
+     */
+    private $variants = [];
 
     /**
      * Describes an 8-bit image without colour profile or metadata; see withBitDepth() and withMetadata().
@@ -207,6 +263,27 @@ final class ImageInfo
     {
         $clone = clone $this;
         $clone->trailingData = $trailingData;
+
+        return $clone;
+    }
+
+    /**
+     * @param list<string> $variants VARIANT_* values of this image's format, without duplicates
+     *
+     * @throws InvalidArgumentException when a variant is unknown, repeated or of another format
+     */
+    public function withVariants(array $variants): self
+    {
+        foreach ($variants as $variant) {
+            if (!in_array($variant, array_keys(self::VARIANTS), true) || self::VARIANTS[$variant] !== $this->format) {
+                throw new InvalidArgumentException(sprintf('ImageInfo: a variant is not one of the %s format.', $this->format));
+            }
+        }
+        if (count(array_unique($variants)) !== count($variants)) {
+            throw new InvalidArgumentException('ImageInfo: a variant is listed twice.');
+        }
+        $clone = clone $this;
+        $clone->variants = array_values(array_intersect(array_keys(self::VARIANTS), $variants));
 
         return $clone;
     }
@@ -317,9 +394,20 @@ final class ImageInfo
     }
 
     /**
+     * Variants of the format that some decoders do not read (VARIANT_* values), in canonical order; empty for most
+     * images.
+     *
+     * @return list<string>
+     */
+    public function getVariants(): array
+    {
+        return $this->variants;
+    }
+
+    /**
      * Every value with snake_case keys, e.g. for logs.
      *
-     * @return array{format: string, mime_type: string, width: int, height: int, frame_count: int, byte_size: int, bit_depth: int, icc_profile: bool, exif: bool, metadata: bool, orientation: int, trailing_data: bool}
+     * @return array{format: string, mime_type: string, width: int, height: int, frame_count: int, byte_size: int, bit_depth: int, icc_profile: bool, exif: bool, metadata: bool, orientation: int, trailing_data: bool, variants: list<string>}
      */
     public function toArray(): array
     {
@@ -336,6 +424,7 @@ final class ImageInfo
             'metadata' => $this->hasMetadata(),
             'orientation' => $this->orientation,
             'trailing_data' => $this->trailingData,
+            'variants' => $this->variants,
         ];
     }
 
@@ -352,7 +441,8 @@ final class ImageInfo
                 ->withBitDepth($this->bitDepth)
                 ->withMetadata($this->iccProfile, $this->exif, $this->otherMetadata)
                 ->withOrientation($this->orientation)
-                ->withTrailingData($this->trailingData);
+                ->withTrailingData($this->trailingData)
+                ->withVariants($this->variants);
         } catch (\TypeError $exception) {
             // unserialize() can give a property any type, whatever its @var tag says; strict_types makes a property
             // of the wrong type a TypeError instead of a silent conversion.

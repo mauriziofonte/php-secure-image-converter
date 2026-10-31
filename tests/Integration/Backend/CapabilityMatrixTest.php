@@ -16,7 +16,9 @@ use Mfonte\SecureImageConverter\Backend\ImagickBackend;
 use Mfonte\SecureImageConverter\Backend\VipsBackend;
 use Mfonte\SecureImageConverter\Contract\ConversionRequest;
 use Mfonte\SecureImageConverter\Contract\Exception\ConversionFailedException;
+use Mfonte\SecureImageConverter\Contract\Exception\UnsupportedFormatException;
 use Mfonte\SecureImageConverter\Contract\ImageFormat;
+use Mfonte\SecureImageConverter\Validation\ImageInfo;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\Group;
@@ -104,6 +106,39 @@ final class CapabilityMatrixTest extends BackendTestCase
         }
 
         self::assertConversions($backend, $jobs);
+    }
+
+    /**
+     * Each input variant the backend declares (ImageInfo::VARIANTS) converts to every output format; a variant of
+     * an input format it reads but does not declare is refused before anything runs.
+     *
+     * @dataProvider enabledBackends
+     */
+    #[DataProvider('enabledBackends')]
+    public function testEveryDeclaredInputVariantConverts(string $name): void
+    {
+        $backend = self::backend($name);
+        $capabilities = $backend->getCapabilities();
+        $jobs = [];
+        $refused = [];
+        foreach (ImageInfo::VARIANTS as $variant => $format) {
+            if (!in_array($format, $capabilities->getInputFormats(), true)) {
+                continue;
+            }
+            $fixture = self::fixtures()->variant($variant);
+            self::assertNotNull($fixture, 'No fixture for the variant ' . $variant);
+            foreach ($capabilities->getOutputFormats() as $output) {
+                $job = $this->job($fixture, $output);
+                if (in_array($variant, $capabilities->getInputVariants(), true)) {
+                    $jobs[] = $job;
+                } elseif ($capabilities->explainUnsupported($job) === null) {
+                    $refused[] = $variant . ' -> ' . $output;
+                }
+            }
+        }
+
+        self::assertSame([], $refused, 'Undeclared variants must be refused.');
+        self::assertConversions($backend, $jobs, false);
     }
 
     /**
@@ -251,7 +286,8 @@ final class CapabilityMatrixTest extends BackendTestCase
     /**
      * The resolver with every available enabled backend: for each still and animated fixture, asked for WEBP, AVIF
      * and its own format, it chooses a backend and a fallback format whose conversion works, or refuses the job only
-     * when no backend covers any fallback format.
+     * when no backend covers any fallback format: with UnsupportedFormatException when none of them decodes the
+     * input (a BMP with vips alone), else with ConversionFailedException.
      */
     public function testTheResolverChoosesConversionsThatWork(): void
     {
@@ -275,13 +311,18 @@ final class CapabilityMatrixTest extends BackendTestCase
                 $job = $this->job($fixture, $requested);
                 try {
                     $selection = $resolver->resolve($job);
-                } catch (ConversionFailedException $exception) {
+                } catch (ConversionFailedException | UnsupportedFormatException $exception) {
+                    $decodable = false;
                     foreach (self::variants($job) as $variant) {
                         foreach ($backends as $backend) {
+                            $decodable = $decodable || $backend->getCapabilities()->explainUndecodable($variant) === null;
                             if ($backend->getCapabilities()->explainUnsupported($variant) === null) {
                                 $failures[] = sprintf('%s: refused, but %s can convert %s', self::label($job), $backend->getName(), self::label($variant));
                             }
                         }
+                    }
+                    if (($exception instanceof UnsupportedFormatException) === $decodable) {
+                        $failures[] = sprintf('%s: refused with %s, but %s', self::label($job), get_class($exception), $decodable ? 'a backend decodes it' : 'no backend decodes it');
                     }
                     continue;
                 }
@@ -299,6 +340,72 @@ final class CapabilityMatrixTest extends BackendTestCase
 
         self::assertSame([], $failures);
         self::assertGreaterThan(0, $resolved, 'The available backends convert nothing.');
+    }
+
+    /**
+     * Each input variant, asked for WEBP, AVIF and its own format: the resolver with every available enabled backend
+     * chooses one that declares the variant and converts it, or, when none does, refuses the job with
+     * UnsupportedFormatException (unsupported_format, 415), as does a resolver of each backend alone that reads the
+     * format but not the variant.
+     */
+    public function testTheResolverSendsAnInputVariantOnlyToABackendThatDecodesIt(): void
+    {
+        $backends = self::availableBackends();
+        $failures = [];
+        $checked = 0;
+        foreach (ImageInfo::VARIANTS as $variant => $format) {
+            $fixture = self::fixtures()->variant($variant);
+            self::assertNotNull($fixture, 'No fixture for the variant ' . $variant);
+            $decoders = [];
+            foreach ($backends as $backend) {
+                if (in_array($variant, $backend->getCapabilities()->getInputVariants(), true)) {
+                    $decoders[] = $backend->getName();
+                }
+            }
+            foreach (array_unique([ImageFormat::WEBP, ImageFormat::AVIF, $format]) as $requested) {
+                $job = $this->job($fixture, $requested);
+                foreach (array_merge([$backends], array_map(static function (AbstractBackend $backend): array {
+                    return [$backend];
+                }, $backends)) as $set) {
+                    $names = array_map(static function (AbstractBackend $backend): string {
+                        return $backend->getName();
+                    }, $set);
+                    $label = sprintf('%s -> %s with %s', $variant, $requested, implode(',', $names));
+                    $reads = array_filter($set, static function (AbstractBackend $backend) use ($format): bool {
+                        return in_array($format, $backend->getCapabilities()->getInputFormats(), true);
+                    });
+                    if ($reads === []) {
+                        continue;
+                    }
+                    ++$checked;
+                    try {
+                        $selection = (new BackendResolver($set))->resolve($job);
+                    } catch (UnsupportedFormatException $exception) {
+                        if (array_intersect($names, $decoders) !== []) {
+                            $failures[] = $label . ': refused, but a backend decodes it';
+                        }
+                        continue;
+                    } catch (ConversionFailedException $exception) {
+                        $failures[] = $label . ': ' . $exception->getMessage();
+                        continue;
+                    }
+                    $chosen = $selection->getBackend()->getName();
+                    if (!in_array($chosen, $decoders, true)) {
+                        $failures[] = sprintf('%s: %s was chosen, but it does not decode the variant', $label, $chosen);
+                        continue;
+                    }
+                    $problem = self::check($selection->getBackend(), $selection->getJob());
+                    if ($problem !== null) {
+                        $failures[] = sprintf('%s: %s: %s', $label, $chosen, $problem);
+                    }
+                }
+            }
+        }
+
+        if ($checked === 0) {
+            self::markTestSkipped('No enabled backend reads JPEG or BMP.');
+        }
+        self::assertSame([], $failures);
     }
 
     /**

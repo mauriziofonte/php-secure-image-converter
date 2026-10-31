@@ -12,6 +12,7 @@ use Mfonte\SecureImageConverter\Contract\Exception\LimitExceededException;
 use Mfonte\SecureImageConverter\Contract\Exception\UnsupportedFormatException;
 use Mfonte\SecureImageConverter\Contract\ImageFormat;
 use Mfonte\SecureImageConverter\Tests\Fixtures\ImageBuilder;
+use Mfonte\SecureImageConverter\Validation\ImageInfo;
 use Mfonte\SecureImageConverter\Validation\ImageInspector;
 use Mfonte\SecureImageConverter\Validation\Limits;
 use PHPUnit\Framework\Attributes\CoversClass;
@@ -295,6 +296,42 @@ final class ImageInspectorTest extends TestCase
                 self::assertStringNotContainsString(basename($path), $exception->getMessage());
             }
         }
+    }
+
+    /**
+     * @return array<string, array{0: string, 1: list<string>}>
+     */
+    public static function variants(): array
+    {
+        return [
+            'grey JPEG' => [ImageBuilder::jpeg(8, 8, 1), []],
+            'colour JPEG' => [ImageBuilder::jpeg(8, 8, 3), []],
+            'CMYK JPEG' => [ImageBuilder::jpeg(8, 8, 4), [ImageInfo::VARIANT_JPEG_CMYK]],
+            '24-bit BMP' => [ImageBuilder::bmp(4, 4), []],
+            'run-length encoded BMP' => [ImageBuilder::bmp(4, 4, 8, 1), []],
+            'core header BMP' => [ImageBuilder::bmpCore(4, 4), []],
+            'V5 header 24-bit BMP' => [ImageBuilder::bmp(4, 4, 24, 0, 124), []],
+            '16-bit bit-field BMP' => [ImageBuilder::bmp(4, 4, 16, 3), [ImageInfo::VARIANT_BMP_BIT_FIELDS]],
+            '32-bit bit-field V5 BMP' => [ImageBuilder::bmp(4, 4, 32, 3, 124), [ImageInfo::VARIANT_BMP_BIT_FIELDS]],
+            'alpha bit-field BMP' => [ImageBuilder::bmp(4, 4, 32, 6), [ImageInfo::VARIANT_BMP_ALPHA_BIT_FIELDS]],
+            '2-bit BMP' => [ImageBuilder::bmp(4, 4, 2), [ImageInfo::VARIANT_BMP_2_BIT]],
+            '64-bit BMP' => [ImageBuilder::bmp(4, 4, 64), [ImageInfo::VARIANT_BMP_64_BIT]],
+            'V2 header BMP' => [ImageBuilder::bmp(4, 4, 24, 0, 52), [ImageInfo::VARIANT_BMP_V2_HEADER]],
+            'V3 header bit-field BMP' => [ImageBuilder::bmp(4, 4, 32, 3, 56), [ImageInfo::VARIANT_BMP_BIT_FIELDS, ImageInfo::VARIANT_BMP_V3_HEADER]],
+        ];
+    }
+
+    /**
+     * The variants of a format that some decoders do not read are reported, so that backends can be chosen by them.
+     *
+     * @param list<string> $expected
+     *
+     * @dataProvider variants
+     */
+    #[DataProvider('variants')]
+    public function testVariantsThatSomeDecodersDoNotReadAreReported(string $data, array $expected): void
+    {
+        self::assertSame($expected, (new ImageInspector())->inspectStream(self::stream($data))->getVariants());
     }
 
     public function testInspectStreamReadsFromTheStartWhateverThePosition(): void

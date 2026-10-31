@@ -9,6 +9,7 @@ use Mfonte\SecureImageConverter\Backend\BackendJob;
 use Mfonte\SecureImageConverter\Contract\ConversionRequest;
 use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
 use Mfonte\SecureImageConverter\Contract\ImageFormat;
+use Mfonte\SecureImageConverter\Validation\ImageInfo;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
@@ -24,6 +25,7 @@ final class BackendCapabilitiesTest extends TestCase
     private static function full(): BackendCapabilities
     {
         return (new BackendCapabilities('vips', [ImageFormat::WEBP, ImageFormat::PNG, ImageFormat::GIF, ImageFormat::JPEG], [ImageFormat::WEBP, ImageFormat::PNG, ImageFormat::AVIF]))
+            ->withInputVariants([ImageInfo::VARIANT_JPEG_CMYK])
             ->withFirstFrameFormats([ImageFormat::GIF, ImageFormat::WEBP])
             ->withAnimatedInputFormats([ImageFormat::GIF])
             ->withAnimatedOutputFormats([ImageFormat::WEBP])
@@ -44,6 +46,7 @@ final class BackendCapabilitiesTest extends TestCase
         self::assertNull($capabilities->getUnavailableReason());
         self::assertSame([ImageFormat::JPEG, ImageFormat::PNG, ImageFormat::GIF, ImageFormat::WEBP], $capabilities->getInputFormats());
         self::assertSame([ImageFormat::PNG, ImageFormat::WEBP, ImageFormat::AVIF], $capabilities->getOutputFormats());
+        self::assertSame([ImageInfo::VARIANT_JPEG_CMYK], $capabilities->getInputVariants());
         self::assertSame([ImageFormat::GIF, ImageFormat::WEBP], $capabilities->getFirstFrameFormats());
         self::assertSame(ConversionRequest::fitModes(), $capabilities->getFits());
         self::assertSame([ConversionRequest::FIT_CONTAIN], $capabilities->getAnimatedFits());
@@ -79,7 +82,10 @@ final class BackendCapabilitiesTest extends TestCase
         $valid = self::full()->toArray();
         $unavailable = BackendCapabilities::unavailable('gd', 'missing')->toArray();
         $cases = [
-            'other schema' => ['schema' => 2] + $valid,
+            'other schema' => ['schema' => 1] + $valid,
+            'variant of a format that is not an input' => ['input_variants' => [ImageInfo::VARIANT_BMP_BIT_FIELDS]] + $valid,
+            'unknown variant' => ['input_variants' => ['progressive']] + $valid,
+            'repeated variant' => ['input_variants' => [ImageInfo::VARIANT_JPEG_CMYK, ImageInfo::VARIANT_JPEG_CMYK]] + $valid,
             'unknown key' => $valid + ['extra' => true],
             'available with a reason' => ['unavailable_reason' => 'x'] + $valid,
             'unavailable with formats' => ['input_formats' => [ImageFormat::PNG]] + $unavailable,
@@ -131,6 +137,9 @@ final class BackendCapabilitiesTest extends TestCase
             'unknown input' => ['it does not decode bmp', static function () {
                 return self::job(self::info(ImageFormat::BMP), ImageFormat::WEBP);
             }],
+            'variant decoded' => [null, static function () {
+                return self::job(self::info(ImageFormat::JPEG)->withVariants([ImageInfo::VARIANT_JPEG_CMYK]), ImageFormat::WEBP);
+            }],
             'unknown output' => ['it does not encode jpeg', static function () {
                 return self::job(self::info(ImageFormat::PNG), ImageFormat::JPEG);
             }],
@@ -176,6 +185,24 @@ final class BackendCapabilitiesTest extends TestCase
     public function testExplainUnsupported(?string $expected, callable $job): void
     {
         self::assertSame($expected, self::full()->explainUnsupported($job()));
+    }
+
+    public function testAnInputOfAVariantNotProbedIsNotDecoded(): void
+    {
+        $capabilities = self::capabilities('gd', [ImageFormat::JPEG, ImageFormat::BMP], [ImageFormat::PNG])
+            ->withInputVariants([ImageInfo::VARIANT_BMP_64_BIT]);
+        $cmyk = self::job(self::info(ImageFormat::JPEG)->withVariants([ImageInfo::VARIANT_JPEG_CMYK]), ImageFormat::PNG);
+        $bitFields = self::info(ImageFormat::BMP)->withVariants([ImageInfo::VARIANT_BMP_BIT_FIELDS, ImageInfo::VARIANT_BMP_V3_HEADER]);
+
+        self::assertSame('it does not decode the jpeg_cmyk variant of jpeg', $capabilities->explainUndecodable($cmyk));
+        self::assertSame('it does not decode the jpeg_cmyk variant of jpeg', $capabilities->explainUnsupported($cmyk));
+        self::assertSame(
+            'it does not decode the bmp_bit_fields and bmp_v3_header variant of bmp',
+            $capabilities->explainUnsupported(self::job($bitFields, ImageFormat::PNG))
+        );
+        self::assertNull($capabilities->explainUnsupported(self::job(self::info(ImageFormat::BMP)->withVariants([ImageInfo::VARIANT_BMP_64_BIT]), ImageFormat::PNG)));
+        self::assertNull($capabilities->explainUndecodable(self::job(self::info(ImageFormat::JPEG), ImageFormat::GIF)), 'the output is not checked');
+        self::assertSame('it does not encode gif', $capabilities->explainUnsupported(self::job(self::info(ImageFormat::JPEG), ImageFormat::GIF)));
     }
 
     public function testABackendWithoutFitsDoesNotResize(): void

@@ -8,6 +8,7 @@ use Mfonte\SecureImageConverter\Contract\Capabilities;
 use Mfonte\SecureImageConverter\Contract\ConversionRequest;
 use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
 use Mfonte\SecureImageConverter\Contract\ImageFormat;
+use Mfonte\SecureImageConverter\Validation\ImageInfo;
 
 /**
  * What one backend can do on this host, as established by probing what is installed (never by reading version
@@ -16,6 +17,8 @@ use Mfonte\SecureImageConverter\Contract\ImageFormat;
  * | Capability              | Meaning                                                                               |
  * | ----------------------- | ------------------------------------------------------------------------------------- |
  * | input formats           | formats whose still images it decodes                                                 |
+ * | input variants          | variants of its input formats that it decodes too (ImageInfo::VARIANTS), such as CMYK |
+ * |                         | JPEG; an input of any other variant is not given to it                                |
  * | first frame formats     | formats whose animated images it decodes as their first frame alone                  |
  * | animated input formats  | formats whose animated images it decodes frame by frame                               |
  * | output formats          | formats it encodes as a still image                                                   |
@@ -38,7 +41,7 @@ final class BackendCapabilities
     /**
      * Version of the array shape of toArray() and fromArray().
      */
-    public const SCHEMA_VERSION = 1;
+    public const SCHEMA_VERSION = 2;
 
     /**
      * Maximum length of a note or of the reason a backend is unavailable, in characters.
@@ -54,6 +57,7 @@ final class BackendCapabilities
         'available',
         'unavailable_reason',
         'input_formats',
+        'input_variants',
         'first_frame_formats',
         'animated_input_formats',
         'output_formats',
@@ -80,6 +84,11 @@ final class BackendCapabilities
      * @var list<string>
      */
     private $inputFormats = [];
+
+    /**
+     * @var list<string>
+     */
+    private $inputVariants = [];
 
     /**
      * @var list<string>
@@ -209,6 +218,7 @@ final class BackendCapabilities
             self::stringList('input formats', $data['input_formats']),
             self::stringList('output formats', $data['output_formats'])
         ))
+            ->withInputVariants(self::stringList('input variants', $data['input_variants']))
             ->withFirstFrameFormats(self::stringList('first frame formats', $data['first_frame_formats']))
             ->withAnimatedInputFormats(self::stringList('animated input formats', $data['animated_input_formats']))
             ->withAnimatedOutputFormats(self::stringList('animated output formats', $data['animated_output_formats']))
@@ -252,6 +262,42 @@ final class BackendCapabilities
     public function getInputFormats(): array
     {
         return $this->inputFormats;
+    }
+
+    /**
+     * Variants of the input formats (ImageInfo::VARIANT_*) that the backend decodes too, in canonical order. An input
+     * of a variant that is not listed is not decoded, whatever its format.
+     *
+     * @return list<string>
+     */
+    public function getInputVariants(): array
+    {
+        return $this->inputVariants;
+    }
+
+    /**
+     * @param list<string> $variants ImageInfo::VARIANT_* values of the input formats
+     *
+     * @throws InvalidArgumentException when a variant is unknown, repeated or of a format that is not an input format
+     */
+    public function withInputVariants(array $variants): self
+    {
+        $clone = $this->availableClone();
+        $known = [];
+        foreach (ImageInfo::VARIANTS as $variant => $format) {
+            if (in_array($format, $this->inputFormats, true)) {
+                $known[] = $variant;
+            }
+        }
+        if (count(array_unique($variants)) !== count($variants) || array_diff($variants, $known) !== []) {
+            throw new InvalidArgumentException(sprintf(
+                'BackendCapabilities: the input variants must be distinct values among: %s.',
+                implode(', ', $known)
+            ));
+        }
+        $clone->inputVariants = array_values(array_intersect($known, $variants));
+
+        return $clone;
     }
 
     /**
@@ -479,36 +525,52 @@ final class BackendCapabilities
     }
 
     /**
-     * Why the backend cannot perform a job, or null when it can. Only the hard requirements are checked: the input
-     * (still, first frame or every frame), the output (still or animated), the fit when the size changes, and the
-     * lossless mode. The
-     * metadata requirements are reported by getMetadataGaps().
+     * Why the backend cannot decode the input of a job as the job reads it, or null when it can: its format (still,
+     * first frame or every frame) and its variants (ImageInfo::getVariants()).
      */
-    public function explainUnsupported(BackendJob $job): ?string
+    public function explainUndecodable(BackendJob $job): ?string
     {
         if ($this->unavailableReason !== null) {
             return 'it is unavailable: ' . $this->unavailableReason;
         }
         $input = $job->getInputFormat();
-        $output = $job->getOutputFormat();
         if ($job->isAnimated()) {
             if (!in_array($input, $this->animatedInputFormats, true)) {
                 return sprintf('it does not decode every frame of an animated %s', $input);
             }
+        } elseif ($job->getInput()->isAnimated()) {
+            if (!in_array($input, $this->firstFrameFormats, true)) {
+                return sprintf('it does not decode the first frame of an animated %s alone', $input);
+            }
+        } elseif (!in_array($input, $this->inputFormats, true)) {
+            return sprintf('it does not decode %s', $input);
+        }
+        $variants = array_values(array_diff($job->getInput()->getVariants(), $this->inputVariants));
+        if ($variants !== []) {
+            return sprintf('it does not decode the %s variant of %s', implode(' and ', $variants), $input);
+        }
+
+        return null;
+    }
+
+    /**
+     * Why the backend cannot perform a job, or null when it can. Only the hard requirements are checked: the input
+     * (explainUndecodable()), the output (still or animated), the fit when the size changes, and the lossless mode.
+     * The metadata requirements are reported by getMetadataGaps().
+     */
+    public function explainUnsupported(BackendJob $job): ?string
+    {
+        $undecodable = $this->explainUndecodable($job);
+        if ($undecodable !== null) {
+            return $undecodable;
+        }
+        $output = $job->getOutputFormat();
+        if ($job->isAnimated()) {
             if (!in_array($output, $this->animatedOutputFormats, true)) {
                 return sprintf('it does not encode an animated %s', $output);
             }
-        } else {
-            if ($job->getInput()->isAnimated()) {
-                if (!in_array($input, $this->firstFrameFormats, true)) {
-                    return sprintf('it does not decode the first frame of an animated %s alone', $input);
-                }
-            } elseif (!in_array($input, $this->inputFormats, true)) {
-                return sprintf('it does not decode %s', $input);
-            }
-            if (!in_array($output, $this->outputFormats, true)) {
-                return sprintf('it does not encode %s', $output);
-            }
+        } elseif (!in_array($output, $this->outputFormats, true)) {
+            return sprintf('it does not encode %s', $output);
         }
         if ($job->isResized()) {
             $fits = $job->isAnimated() ? $this->animatedFits : $this->fits;
@@ -551,7 +613,7 @@ final class BackendCapabilities
     /**
      * Array representation, for the capability cache and for diagnostics (/healthz, check-env).
      *
-     * @return array{schema: int, backend: string, available: bool, unavailable_reason: string|null, input_formats: list<string>, first_frame_formats: list<string>, animated_input_formats: list<string>, output_formats: list<string>, animated_output_formats: list<string>, lossless_formats: list<string>, fits: list<string>, animated_fits: list<string>, icc_profile: bool, metadata: bool, notes: list<string>}
+     * @return array{schema: int, backend: string, available: bool, unavailable_reason: string|null, input_formats: list<string>, input_variants: list<string>, first_frame_formats: list<string>, animated_input_formats: list<string>, output_formats: list<string>, animated_output_formats: list<string>, lossless_formats: list<string>, fits: list<string>, animated_fits: list<string>, icc_profile: bool, metadata: bool, notes: list<string>}
      */
     public function toArray(): array
     {
@@ -561,6 +623,7 @@ final class BackendCapabilities
             'available' => $this->unavailableReason === null,
             'unavailable_reason' => $this->unavailableReason,
             'input_formats' => $this->inputFormats,
+            'input_variants' => $this->inputVariants,
             'first_frame_formats' => $this->firstFrameFormats,
             'animated_input_formats' => $this->animatedInputFormats,
             'output_formats' => $this->outputFormats,

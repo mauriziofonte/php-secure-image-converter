@@ -33,6 +33,9 @@ use Mfonte\SecureImageConverter\Validation\Limits;
  *   ImageMagick walks it, without producing pixels, up to MAX_RUNS runs (an escape or the first of consecutive runs
  *   counting as ESCAPE_COST runs); longer data is refused as unsupported.
  *
+ * Bit-field and alpha bit-field compressions, 2 and 64 bits per pixel and the V2 and V3 headers are reported as
+ * variants (ImageInfo::VARIANT_BMP_*), which some decoders do not read.
+ *
  * BMP carries no metadata besides the colour profile. The bit depth is 16 for 64-bit images and 8 otherwise. Decoders
  * read the headers and bit masks, the palette of an image of 8 bits or less (images of more bits have none to read,
  * whatever the colours-used field says), the pixel data (as far as its declared size for run-length encoded data) and
@@ -208,7 +211,35 @@ final class BmpParser implements ParserInterface
         return (new ImageInfo(ImageFormat::BMP, $width, $height, 1, $size))
             ->withBitDepth($bitCount === 64 ? 16 : 8)
             ->withMetadata($profileEnd > 0, false, false)
-            ->withTrailingData(!self::covers($regions, $size));
+            ->withTrailingData(!self::covers($regions, $size))
+            ->withVariants(self::variants($headerSize, $bitCount, $compression));
+    }
+
+    /**
+     * The variants (ImageInfo::VARIANT_BMP_*) of a header size, bit count and compression.
+     *
+     * @return list<string>
+     */
+    private static function variants(int $headerSize, int $bitCount, int $compression): array
+    {
+        $variants = [];
+        if ($compression === self::BI_BITFIELDS) {
+            $variants[] = ImageInfo::VARIANT_BMP_BIT_FIELDS;
+        } elseif ($compression === self::BI_ALPHABITFIELDS) {
+            $variants[] = ImageInfo::VARIANT_BMP_ALPHA_BIT_FIELDS;
+        }
+        if ($bitCount === 2) {
+            $variants[] = ImageInfo::VARIANT_BMP_2_BIT;
+        } elseif ($bitCount === 64) {
+            $variants[] = ImageInfo::VARIANT_BMP_64_BIT;
+        }
+        if ($headerSize === 52) {
+            $variants[] = ImageInfo::VARIANT_BMP_V2_HEADER;
+        } elseif ($headerSize === 56) {
+            $variants[] = ImageInfo::VARIANT_BMP_V3_HEADER;
+        }
+
+        return $variants;
     }
 
     /**

@@ -442,7 +442,7 @@ final class ImageBuilder
     // BMP -----------------------------------------------------------------------------------------------------------
 
     /**
-     * A black BMP with an info (40), V4 (108) or V5 (124) header. Bit counts up to 8 get a palette of two colours, black and red;
+     * A black BMP with an info (40), V2 (52), V3 (56), V4 (108) or V5 (124) header. Bit counts up to 8 get a palette of two colours, black and red;
      * RLE8 data codes each row as runs; bit fields are 5-6-5 for 16 bits and 8-8-8-8 for 32 bits.
      */
     public static function bmp(int $width, int $height, int $bitCount = 24, int $compression = 0, int $headerSize = 40, bool $topDown = false, string $colourSpace = 'sRGB', string $profile = ''): string
@@ -457,6 +457,10 @@ final class ImageBuilder
         $afterHeader = $palette;
         if ($headerSize === 40 && ($compression === 3 || $compression === 6)) {
             $afterHeader = substr($masks, 0, $compression === 3 ? 12 : 16) . $palette;
+        }
+        if ($headerSize === 52 || $headerSize === 56) {
+            // The V2 header adds the colour masks, the V3 header the alpha mask too.
+            $dib .= substr($masks, 0, $headerSize - 40);
         }
         if ($headerSize >= 108) {
             // Masks, colour space type, end points and gamma; V5 adds the intent, the profile location and a reserved

@@ -13,8 +13,10 @@ use Mfonte\SecureImageConverter\Contract\Exception\ConversionFailedException;
 use Mfonte\SecureImageConverter\Contract\Exception\ErrorCode;
 use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
 use Mfonte\SecureImageConverter\Contract\Exception\ResourceLimitException;
+use Mfonte\SecureImageConverter\Contract\Exception\UnsupportedFormatException;
 use Mfonte\SecureImageConverter\Contract\ImageFormat;
 use Mfonte\SecureImageConverter\Tests\Unit\Backend\Fake\FakeBackend;
+use Mfonte\SecureImageConverter\Validation\ImageInfo;
 use PHPUnit\Framework\Attributes\CoversClass;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
@@ -195,6 +197,48 @@ final class BackendResolverTest extends TestCase
         $this->expectException(ConversionFailedException::class);
         $this->expectExceptionMessage('no backend is configured');
         (new BackendResolver([]))->resolve(self::job(self::info(ImageFormat::PNG), ImageFormat::WEBP));
+    }
+
+    /**
+     * cwebp and avifenc do not decode a CMYK JPEG, gd does not decode a bit-field BMP: the resolver picks a backend
+     * that probed the variant, and refuses the image as unsupported_format when no available backend did.
+     */
+    public function testAnInputVariantGoesToABackendThatDecodesIt(): void
+    {
+        $cmyk = self::job(self::info(ImageFormat::JPEG)->withVariants([ImageInfo::VARIANT_JPEG_CMYK]), ImageFormat::AVIF);
+        $cwebp = new FakeBackend(self::capabilities('cwebp', [ImageFormat::JPEG, ImageFormat::PNG], [ImageFormat::WEBP]));
+        $avifenc = new FakeBackend(new BackendCapabilities('avifenc', [ImageFormat::JPEG, ImageFormat::PNG], [ImageFormat::AVIF]));
+        $gd = new FakeBackend(
+            self::capabilities('gd', [ImageFormat::JPEG, ImageFormat::BMP], [ImageFormat::JPEG, ImageFormat::WEBP])
+                ->withInputVariants([ImageInfo::VARIANT_JPEG_CMYK])
+        );
+
+        $selection = (new BackendResolver([$cwebp, $avifenc, $gd]))->resolve($cmyk);
+        self::assertSame('gd', $selection->getBackend()->getName());
+        self::assertSame(ImageFormat::WEBP, $selection->getJob()->getOutputFormat());
+        self::assertSame([
+            'avif: cwebp: it does not decode the jpeg_cmyk variant of jpeg',
+            'avif: avifenc: it does not decode the jpeg_cmyk variant of jpeg',
+            'avif: gd: it does not encode avif',
+            'webp: cwebp: it does not decode the jpeg_cmyk variant of jpeg',
+            'webp: avifenc: it does not decode the jpeg_cmyk variant of jpeg',
+        ], $selection->getReasons());
+
+        $bitFields = self::job(self::info(ImageFormat::BMP)->withVariants([ImageInfo::VARIANT_BMP_BIT_FIELDS]), ImageFormat::WEBP);
+        $imagick = new FakeBackend(
+            self::capabilities('imagick', [ImageFormat::BMP], [ImageFormat::WEBP])->withInputVariants([ImageInfo::VARIANT_BMP_BIT_FIELDS])
+        );
+        self::assertSame('imagick', (new BackendResolver([$gd, $imagick]))->resolve($bitFields)->getBackend()->getName());
+
+        foreach ([[[$cwebp, $avifenc], $cmyk], [[$gd, new FakeBackend(BackendCapabilities::unavailable('imagick', 'php is not installed'))], $bitFields]] as list($backends, $job)) {
+            try {
+                (new BackendResolver($backends))->resolve($job);
+                self::fail('No backend decodes the variant.');
+            } catch (UnsupportedFormatException $exception) {
+                self::assertSame(ErrorCode::UNSUPPORTED_FORMAT, $exception->getErrorCode());
+                self::assertStringStartsWith('No available backend decodes this image: ', $exception->getMessage());
+            }
+        }
     }
 
     public function testABackendKeepingTheMetadataIsPreferred(): void

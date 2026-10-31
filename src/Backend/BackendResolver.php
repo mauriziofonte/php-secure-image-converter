@@ -7,6 +7,7 @@ namespace Mfonte\SecureImageConverter\Backend;
 use Mfonte\SecureImageConverter\Contract\Exception\ConversionFailedException;
 use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
 use Mfonte\SecureImageConverter\Contract\Exception\ResourceLimitException;
+use Mfonte\SecureImageConverter\Contract\Exception\UnsupportedFormatException;
 use Mfonte\SecureImageConverter\Contract\ImageFormat;
 use Mfonte\SecureImageConverter\Isolation\ResourceLimits;
 
@@ -25,8 +26,10 @@ use Mfonte\SecureImageConverter\Isolation\ResourceLimits;
  *   chosen and the selection carries a warning (metadata is a preference, not a requirement).
  *
  * The selection lists why every backend and variant tried before was not chosen. When nothing can perform the job,
- * the exception says why for every candidate: ResourceLimitException when only the memory ceiling stood in the way,
- * ConversionFailedException otherwise.
+ * the exception says why for every candidate: UnsupportedFormatException (unsupported_format) when no available
+ * backend decodes the input, such as a CMYK JPEG with only cwebp and avifenc enabled (its format or one of its
+ * variants, ImageInfo::getVariants()); ResourceLimitException when only the memory ceiling stood in the way;
+ * ConversionFailedException otherwise, also when no backend is available at all.
  */
 final class BackendResolver
 {
@@ -122,14 +125,17 @@ final class BackendResolver
     /**
      * Chooses the backend and the job it performs.
      *
-     * @throws ResourceLimitException    when capable backends exist but every one needs more memory than the ceiling
-     * @throws ConversionFailedException when no backend can perform the job in any fallback format
+     * @throws UnsupportedFormatException when backends are available but none of them decodes the input
+     * @throws ResourceLimitException     when capable backends exist but every one needs more memory than the ceiling
+     * @throws ConversionFailedException  when no backend can perform the job in any fallback format
      */
     public function resolve(BackendJob $job): BackendSelection
     {
         $reasons = [];
         $limitedOnly = true;
         $capable = false;
+        $available = false;
+        $decodable = false;
         foreach (self::fallbackFormats($job->getOutputFormat(), $job->getInputFormat()) as $format) {
             $variants = [$job->withOutputFormat($format)];
             if ($job->isAnimated()) {
@@ -140,6 +146,8 @@ final class BackendResolver
                 $fallback = null;
                 foreach ($this->backends as $backend) {
                     $capabilities = $backend->getCapabilities();
+                    $available = $available || $capabilities->isAvailable();
+                    $decodable = $decodable || $capabilities->explainUndecodable($variant) === null;
                     $unsupported = $capabilities->explainUnsupported($variant);
                     if ($unsupported !== null) {
                         $reasons[] = sprintf('%s: %s: %s', $label, $backend->getName(), $unsupported);
@@ -179,6 +187,9 @@ final class BackendResolver
             }
         }
         $message = self::message($reasons);
+        if ($available && !$decodable) {
+            throw new UnsupportedFormatException('No available backend decodes this image: ' . $message);
+        }
         if ($capable && $limitedOnly) {
             throw new ResourceLimitException('Every capable backend needs more memory than the ceiling allows: ' . $message);
         }

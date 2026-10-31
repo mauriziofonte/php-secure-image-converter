@@ -38,8 +38,9 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
  *
  * Capabilities are probed once per backend and test run, without the file cache. The images converted are those of
  * tests/Fixtures/backend: still.* is a 40 x 30 still of every raster format (the JPEG carries EXIF and an ICC
- * profile, the TIFF a 64 x 64 second page that must be ignored), anim.gif and anim.webp 4 frames of 40 x 30, and
- * anim.png an APNG of 4 frames of 12 x 6.
+ * profile, the TIFF a 64 x 64 second page that must be ignored), anim.gif and anim.webp 4 frames of 40 x 30,
+ * anim.png an APNG of 4 frames of 12 x 6, and variant-<name>.* a 40 x 30 still of each variant of
+ * ImageInfo::VARIANTS (a CMYK JPEG and BMPs that not every decoder reads).
  */
 abstract class BackendTestCase extends TestCase
 {
@@ -57,6 +58,7 @@ abstract class BackendTestCase extends TestCase
         'vips' => [
             'input_formats' => [ImageFormat::JPEG, ImageFormat::PNG, ImageFormat::GIF, ImageFormat::WEBP, ImageFormat::TIFF, ImageFormat::AVIF],
             'output_formats' => [ImageFormat::JPEG, ImageFormat::PNG, ImageFormat::WEBP, ImageFormat::AVIF],
+            'input_variants' => [ImageInfo::VARIANT_JPEG_CMYK],
             'animated_input_formats' => [ImageFormat::GIF, ImageFormat::WEBP],
             'animated_output_formats' => [ImageFormat::WEBP],
         ],
@@ -75,10 +77,18 @@ abstract class BackendTestCase extends TestCase
         'imagick' => [
             'input_formats' => [ImageFormat::JPEG, ImageFormat::PNG, ImageFormat::GIF, ImageFormat::BMP, ImageFormat::WEBP, ImageFormat::TIFF],
             'output_formats' => [ImageFormat::JPEG, ImageFormat::PNG, ImageFormat::WEBP],
+            'input_variants' => [
+                ImageInfo::VARIANT_JPEG_CMYK,
+                ImageInfo::VARIANT_BMP_BIT_FIELDS,
+                ImageInfo::VARIANT_BMP_64_BIT,
+                ImageInfo::VARIANT_BMP_V2_HEADER,
+                ImageInfo::VARIANT_BMP_V3_HEADER,
+            ],
         ],
         'gd' => [
             'input_formats' => [ImageFormat::JPEG, ImageFormat::PNG, ImageFormat::GIF],
             'output_formats' => [ImageFormat::JPEG, ImageFormat::PNG, ImageFormat::WEBP],
+            'input_variants' => [ImageInfo::VARIANT_JPEG_CMYK],
         ],
     ];
 

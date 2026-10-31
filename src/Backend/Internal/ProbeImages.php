@@ -19,6 +19,8 @@ use Mfonte\SecureImageConverter\Validation\ImageInspector;
  * | anim.gif   | 3 frames of 16 x 12                                                           |
  * | anim.webp  | 3 frames of 16 x 12                                                           |
  * | anim.png   | an APNG of 4 frames of 12 x 6                                                 |
+ * | variant-*  | a 16 x 12 still of each variant of ImageInfo::VARIANTS, such as                |
+ * |            | variant-jpeg_cmyk.jpg (CMYK) and variant-bmp_bit_fields.bmp (32-bit, V4)        |
  *
  * Each file is inspected with ImageInspector before use, so that a probe never relies on a damaged installation.
  *
@@ -63,6 +65,19 @@ final class ProbeImages
     public function still(string $format): ?array
     {
         return $this->image('still.' . ImageFormat::extension($format), $format, false);
+    }
+
+    /**
+     * Path and header of the still image of a variant (ImageInfo::VARIANT_*), or null when it is missing or invalid.
+     *
+     * @return array{0: string, 1: ImageInfo}|null
+     */
+    public function variant(string $variant): ?array
+    {
+        $format = ImageInfo::VARIANTS[$variant] ?? null;
+        $image = $format !== null ? $this->image('variant-' . $variant . '.' . ImageFormat::extension($format), $format, false) : null;
+
+        return $image !== null && in_array($variant, $image[1]->getVariants(), true) ? $image : null;
     }
 
     /**
