@@ -93,7 +93,7 @@ abstract class AbstractWorker
     /**
      * Converts a validated job; throws a \RuntimeException whose code is an EXIT_* value on failure.
      *
-     * @param array{input: string, input_format: string, input_width: int, input_height: int, output: string, output_format: string, width: int, height: int, fit: string, quality: int, effort: int, lossless: bool, strip: bool, keep_icc: bool, memory_bytes: int} $job
+     * @param array{input: string, input_format: string, input_width: int, input_height: int, output: string, output_format: string, width: int, height: int, fit: string, quality: int, effort: int, lossless: bool, strip: bool, keep_icc: bool, orientation: int, memory_bytes: int} $job
      */
     abstract protected function convert(array $job): void;
 
@@ -112,6 +112,20 @@ abstract class AbstractWorker
     }
 
     /**
+     * The quarter turns clockwise and the mirroring (after the turns, left to right) that make an image of the given
+     * EXIF orientation upright: 2 mirrors, 3 turns twice, 4 turns twice and mirrors, 5 turns once and mirrors, 6
+     * turns once, 7 turns three times and mirrors, 8 turns three times.
+     *
+     * @return array{0: int, 1: bool}
+     */
+    final protected static function uprightTransform(int $orientation): array
+    {
+        $transforms = [1 => [0, false], 2 => [0, true], 3 => [2, false], 4 => [2, true], 5 => [1, true], 6 => [1, false], 7 => [3, true], 8 => [3, false]];
+
+        return $transforms[$orientation] ?? [0, false];
+    }
+
+    /**
      * Fails unless the output file exists and is not empty.
      */
     final protected static function assertWritten(string $path): void
@@ -125,7 +139,7 @@ abstract class AbstractWorker
     /**
      * Reads and validates a job file.
      *
-     * @return array{input: string, input_format: string, input_width: int, input_height: int, output: string, output_format: string, width: int, height: int, fit: string, quality: int, effort: int, lossless: bool, strip: bool, keep_icc: bool, memory_bytes: int}
+     * @return array{input: string, input_format: string, input_width: int, input_height: int, output: string, output_format: string, width: int, height: int, fit: string, quality: int, effort: int, lossless: bool, strip: bool, keep_icc: bool, orientation: int, memory_bytes: int}
      */
     final public static function readJob(string $path): array
     {
@@ -155,6 +169,7 @@ abstract class AbstractWorker
             'height' => [1, 65535],
             'quality' => [1, 100],
             'effort' => [0, 9],
+            'orientation' => [1, 8],
             'memory_bytes' => [1, PHP_INT_MAX],
         ];
         foreach ($ranges as $key => $range) {
@@ -183,6 +198,7 @@ abstract class AbstractWorker
             'lossless' => $job['lossless'],
             'strip' => $job['strip'],
             'keep_icc' => $job['keep_icc'],
+            'orientation' => $job['orientation'],
             'memory_bytes' => $job['memory_bytes'],
         ];
     }

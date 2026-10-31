@@ -6,7 +6,8 @@ namespace Mfonte\SecureImageConverter\Backend\Worker;
 
 /**
  * The GD worker (see AbstractWorker): decodes with imagecreatefrom*(), scales with imagecopyresampled() and encodes
- * with image*(). GD keeps no metadata: every output is stripped, ICC profile included. It reads the first frame of a
+ * with image*(). GD keeps no metadata: every output is stripped, ICC profile included. A job's orientation is applied
+ * with imagerotate() and imageflip() before the resize. It reads the first frame of a
  * GIF and the default image of an APNG; it does not read animated WEBP. AVIF is left to vips and avifenc: few GD
  * builds have it (PHP 8.1 and later with a libgd built with libavif), and its decoder has no limits of its own.
  *
@@ -99,6 +100,19 @@ final class GdWorker extends AbstractWorker
         }
         if (!imageistruecolor($image)) {
             imagepalettetotruecolor($image);
+        }
+        // Turned upright (AbstractWorker::uprightTransform()); imagerotate() turns anticlockwise.
+        list($turns, $mirror) = self::uprightTransform($job['orientation']);
+        if ($turns > 0) {
+            imagealphablending($image, false);
+            $image = imagerotate($image, 360 - 90 * $turns, (int) imagecolorallocatealpha($image, 0, 0, 0, 127));
+            if ($image === false) {
+                throw new \RuntimeException('The image could not be rotated.', self::EXIT_RESOURCE_LIMIT);
+            }
+        }
+        if ($mirror) {
+            // It fails only for an unknown mode (always true since PHP 8.0).
+            imageflip($image, (int) constant('IMG_FLIP_HORIZONTAL'));
         }
         $width = imagesx($image);
         $height = imagesy($image);

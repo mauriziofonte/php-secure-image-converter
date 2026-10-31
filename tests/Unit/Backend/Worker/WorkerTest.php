@@ -73,6 +73,7 @@ final class WorkerTest extends TestCase
             'lossless' => false,
             'strip' => true,
             'keep_icc' => true,
+            'orientation' => 1,
             'memory_bytes' => 268435456,
         ];
     }
@@ -96,6 +97,7 @@ final class WorkerTest extends TestCase
             'unknown fit' => [['fit' => 'stretch'] + self::job()],
             'quality as a string' => [['quality' => '80'] + self::job()],
             'effort out of range' => [['effort' => 10] + self::job()],
+            'orientation out of range' => [['orientation' => 9] + self::job()],
             'missing flag' => [array_diff_key(self::job(), ['strip' => true])],
         ];
     }
@@ -226,6 +228,59 @@ final class WorkerTest extends TestCase
         self::assertSame(AbstractWorker::EXIT_OK, $code);
         $info = (new ImageInspector(null, ImageFormat::all()))->inspect((string) realpath('output.webp'));
         self::assertSame(['webp', 6, 6], [$info->getFormat(), $info->getWidth(), $info->getHeight()]);
+    }
+
+    /**
+     * Where the top-left pixel of a 4 x 2 image lands once each EXIF orientation is applied.
+     *
+     * @return array<string, array{int, int, int, int, int}>
+     */
+    public static function orientations(): array
+    {
+        return [
+            '1 as stored' => [1, 4, 2, 0, 0],
+            '2 mirrored' => [2, 4, 2, 3, 0],
+            '3 half turn' => [3, 4, 2, 3, 1],
+            '4 flipped' => [4, 4, 2, 0, 1],
+            '5 transposed' => [5, 2, 4, 0, 0],
+            '6 quarter turn clockwise' => [6, 2, 4, 1, 0],
+            '7 transversed' => [7, 2, 4, 1, 3],
+            '8 quarter turn anticlockwise' => [8, 2, 4, 0, 3],
+        ];
+    }
+
+    /**
+     * @dataProvider orientations
+     */
+    #[DataProvider('orientations')]
+    public function testGdTurnsTheImageUpright(int $orientation, int $width, int $height, int $x, int $y): void
+    {
+        if (!extension_loaded('gd')) {
+            self::markTestSkipped('ext-gd is not loaded.');
+        }
+        $image = imagecreatetruecolor(4, 2);
+        self::assertNotFalse($image);
+        imagefill($image, 0, 0, (int) imagecolorallocate($image, 0, 0, 255));
+        imagesetpixel($image, 0, 0, (int) imagecolorallocate($image, 255, 0, 0));
+        self::assertTrue(imagepng($image, 'input.png'));
+        $job = ['input_width' => 4, 'input_height' => 2, 'output' => 'output.png', 'output_format' => 'png', 'width' => $width, 'height' => $height, 'fit' => 'fill', 'orientation' => $orientation] + self::job();
+        file_put_contents(AbstractWorker::JOB_FILE, json_encode($job));
+
+        ob_start();
+        $code = GdWorker::main(['gd.php', 'convert']);
+        $answer = json_decode((string) ob_get_clean(), true);
+
+        self::assertSame(['ok' => true], $answer);
+        self::assertSame(AbstractWorker::EXIT_OK, $code);
+        $output = imagecreatefrompng('output.png');
+        self::assertNotFalse($output);
+        self::assertSame([$width, $height], [imagesx($output), imagesy($output)]);
+        for ($row = 0; $row < $height; ++$row) {
+            for ($column = 0; $column < $width; ++$column) {
+                $red = (imagecolorat($output, $column, $row) >> 16) & 0xFF;
+                self::assertSame($column === $x && $row === $y ? 255 : 0, $red, sprintf('pixel %d,%d', $column, $row));
+            }
+        }
     }
 
     public function testGdProbeListsWhatItsBuildSupports(): void

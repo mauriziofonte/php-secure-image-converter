@@ -96,6 +96,22 @@ final class CommandLineTest extends TestCase
         );
     }
 
+    public function testVipsTurnsAJpegUprightWithThumbnail(): void
+    {
+        $vips = new VipsBackend($this->runner());
+        $input = self::info(ImageFormat::JPEG)->withOrientation(6);
+
+        self::assertSame(
+            [$this->program('vips'), 'thumbnail', 'input.jpg[fail-on=error]', 'output.webp[Q=80,effort=3,keep=icc]', '12', '--height', '16', '--size', 'force'],
+            $vips->commandLine(self::job($input, ImageFormat::WEBP, 12, 16)->withOrientation(6), self::VIPS_FACTS)
+        );
+        self::assertSame(
+            [$this->program('vips'), 'jpegload', 'input.jpg', 'output.webp[Q=80,effort=3,keep=icc]', '--fail-on', 'error'],
+            $vips->commandLine(self::job($input, ImageFormat::WEBP), self::VIPS_FACTS),
+            'An orientation the job does not apply keeps the named loader.'
+        );
+    }
+
     public function testCwebpCropsForCoverAndSelectsTheLosslessPreset(): void
     {
         $cwebp = new CwebpBackend($this->runner());

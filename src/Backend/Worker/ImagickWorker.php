@@ -14,7 +14,8 @@ namespace Mfonte\SecureImageConverter\Backend\Worker;
  * at 1 TiB, the largest ceiling), the disk limit to 0 (the pixel cache never spills to disk), one thread; the job fails
  * when ImageMagick refuses one of these limits (Imagick::setResourceLimit() returns false). A resource
  * limit error is reported as EXIT_RESOURCE_LIMIT. Stripping removes every profile and comment; the ICC profile is put
- * back when it is kept.
+ * back when it is kept. A job's orientation is applied by rotating and mirroring the decoded pixels before the resize,
+ * and the image is then marked as upright.
  *
  * @internal
  */
@@ -82,6 +83,7 @@ final class ImagickWorker extends AbstractWorker
                     $image->profileImage('icc', $profile);
                 }
             }
+            self::orient($image, $job['orientation']);
             if ($image->getImageWidth() !== $job['width'] || $image->getImageHeight() !== $job['height']) {
                 self::resize($image, $job);
             }
@@ -113,6 +115,29 @@ final class ImagickWorker extends AbstractWorker
                 // Converting without the limit would let ImageMagick allocate past the memory ceiling.
                 throw new \RuntimeException('ImageMagick refused a resource limit.', self::EXIT_FAILED);
             }
+        }
+    }
+
+    /**
+     * Turns the image upright for its EXIF orientation (AbstractWorker::uprightTransform()), and records that it is,
+     * so that kept metadata does not make a viewer turn it again.
+     */
+    private static function orient(\Imagick $image, int $orientation): void
+    {
+        if ($orientation === 1) {
+            return;
+        }
+        list($turns, $mirror) = self::uprightTransform($orientation);
+        if ($turns > 0) {
+            $image->rotateImage(new \ImagickPixel('none'), 90 * $turns);
+        }
+        if ($mirror) {
+            $image->flopImage();
+        }
+        $image->setImagePage($image->getImageWidth(), $image->getImageHeight(), 0, 0);
+        $image->setImageOrientation(\Imagick::ORIENTATION_TOPLEFT);
+        if ($image->getImageProperties('exif:Orientation', true) !== []) {
+            $image->setImageProperty('exif:Orientation', '1');
         }
     }
 

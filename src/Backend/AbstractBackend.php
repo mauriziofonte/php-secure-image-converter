@@ -454,7 +454,7 @@ abstract class AbstractBackend implements BackendInterface
      *
      * @param array<string, string> $facts
      *
-     * @return array{inputs: list<string>, outputs: list<string>, first_frame: list<string>, animated_inputs: list<string>, animated_outputs: list<string>, fits: list<string>, animated_fits: list<string>, lossless: list<string>, icc_profile: bool, metadata: bool}
+     * @return array{inputs: list<string>, outputs: list<string>, first_frame: list<string>, animated_inputs: list<string>, animated_outputs: list<string>, fits: list<string>, animated_fits: list<string>, lossless: list<string>, oriented: list<string>, icc_profile: bool, metadata: bool}
      */
     abstract protected function candidates(array $facts): array;
 
@@ -538,7 +538,7 @@ abstract class AbstractBackend implements BackendInterface
     /**
      * Candidates of a backend that supports nothing, to be completed by subclasses.
      *
-     * @return array{inputs: list<string>, outputs: list<string>, first_frame: list<string>, animated_inputs: list<string>, animated_outputs: list<string>, fits: list<string>, animated_fits: list<string>, lossless: list<string>, icc_profile: bool, metadata: bool}
+     * @return array{inputs: list<string>, outputs: list<string>, first_frame: list<string>, animated_inputs: list<string>, animated_outputs: list<string>, fits: list<string>, animated_fits: list<string>, lossless: list<string>, oriented: list<string>, icc_profile: bool, metadata: bool}
      */
     final protected static function noCandidates(): array
     {
@@ -551,6 +551,7 @@ abstract class AbstractBackend implements BackendInterface
             'fits' => [],
             'animated_fits' => [],
             'lossless' => [],
+            'oriented' => [],
             'icc_profile' => false,
             'metadata' => false,
         ];

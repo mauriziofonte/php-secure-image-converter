@@ -33,7 +33,12 @@ use Mfonte\SecureImageConverter\Validation\ImageInfo;
  * - Metadata: with shouldStripMetadata() every metadata block is removed, except the ICC profile when
  *   shouldKeepIccProfile(); without it, every block the output format can carry is kept.
  * - Only the first image of a multi-image input is decoded: page 0 of a TIFF, the primary image of an AVIF.
- * - Orientation is not applied: the pixels are decoded as stored, whatever the EXIF or AVIF orientation.
+ * - Orientation: getOrientation() is the EXIF orientation (1 to 8) the backend applies to the decoded pixels before
+ *   it resizes them, so that the output is upright; 1, the default, keeps the pixels as stored. With 5 to 8 the
+ *   upright image has the input's width and height swapped (getOrientedWidth(), getOrientedHeight()), and the output
+ *   size is computed from the upright size. An output with metadata kept carries no orientation other than 1 once it
+ *   is applied. Only backends whose capabilities list the input format among their oriented formats apply it
+ *   (BackendCapabilities::getOrientedFormats()); fromRequest() asks for it whenever the input declares one.
  *
  * Paths are absolute and normalised (no ".", ".." or empty segment, no NUL byte). The input path is never passed to a
  * program as it is (a backend links it into its private working directory under a fixed name), so it may contain any
@@ -41,6 +46,11 @@ use Mfonte\SecureImageConverter\Validation\ImageInfo;
  */
 final class BackendJob
 {
+    /**
+     * The first EXIF orientation that transposes the image (5 to 8 swap width and height).
+     */
+    public const FIRST_TRANSPOSING_ORIENTATION = 5;
+
     /**
      * @var string
      */
@@ -107,6 +117,11 @@ final class BackendJob
     private $keepAnimation = true;
 
     /**
+     * @var int
+     */
+    private $orientation = ImageInfo::ORIENTATION_NORMAL;
+
+    /**
      * A job with the defaults of ConversionRequest: fit contain, default quality, effort 4, lossy, metadata stripped
      * but the ICC profile kept, animation kept.
      *
@@ -154,12 +169,15 @@ final class BackendJob
 
     /**
      * The job a ConversionRequest asks for: output format (ConversionRequest::resolveOutputFormat()), output size
-     * (resolveOutputSize()), fit (contain unless both width and height are set), quality, effort, lossless, metadata
-     * handling and animation policy.
+     * (resolveOutputSize() of the upright input when the orientation is applied, of the stored input otherwise), fit
+     * (contain unless both width and height are set), quality, effort, lossless, metadata handling, animation policy
+     * and orientation.
      *
-     * @param string    $inputPath  absolute, normalised path of the input file
-     * @param ImageInfo $input      what ImageInspector read from the header of that file
-     * @param string    $outputPath absolute, normalised path to write the output to
+     * @param string    $inputPath        absolute, normalised path of the input file
+     * @param ImageInfo $input            what ImageInspector read from the header of that file
+     * @param string    $outputPath       absolute, normalised path to write the output to
+     * @param bool      $applyOrientation whether the input's orientation (ImageInfo::getOrientation()) is applied;
+     *                                    false keeps the pixels as stored, for a host where no backend applies it
      *
      * @throws InvalidImageException    with error code animation_rejected when the input is animated and the policy is
      *                                  ANIMATION_REJECT
@@ -170,11 +188,15 @@ final class BackendJob
         string $inputPath,
         ImageInfo $input,
         string $outputPath,
-        ConversionRequest $request
+        ConversionRequest $request,
+        bool $applyOrientation = true
     ): self {
         // Refuses an animated input under ANIMATION_REJECT before anything else.
         $request->resolveOutputFrameCount($input->getFrameCount(), true);
-        list($width, $height) = $request->resolveOutputSize($input->getWidth(), $input->getHeight());
+        $orientation = $applyOrientation ? $input->getOrientation() : ImageInfo::ORIENTATION_NORMAL;
+        list($width, $height) = $orientation >= self::FIRST_TRANSPOSING_ORIENTATION
+            ? $request->resolveOutputSize($input->getHeight(), $input->getWidth())
+            : $request->resolveOutputSize($input->getWidth(), $input->getHeight());
         $boxed = $request->getWidth() !== null && $request->getHeight() !== null;
 
         return (new self(
@@ -191,7 +213,8 @@ final class BackendJob
             ->withLossless($request->isLossless())
             ->withStripMetadata($request->shouldStripMetadata())
             ->withKeepIccProfile($request->shouldKeepIccProfile())
-            ->withAnimation($request->getAnimationPolicy() === ConversionRequest::ANIMATION_PRESERVE);
+            ->withAnimation($request->getAnimationPolicy() === ConversionRequest::ANIMATION_PRESERVE)
+            ->withOrientation($orientation);
     }
 
     /**
@@ -264,11 +287,63 @@ final class BackendJob
     }
 
     /**
-     * Whether the output size differs from the input size.
+     * Whether the output size differs from the size of the input after its orientation is applied.
      */
     public function isResized(): bool
     {
-        return $this->width !== $this->input->getWidth() || $this->height !== $this->input->getHeight();
+        return $this->width !== $this->getOrientedWidth() || $this->height !== $this->getOrientedHeight();
+    }
+
+    /**
+     * EXIF orientation applied to the decoded pixels, from 1 (none) to 8 (see the class description).
+     */
+    public function getOrientation(): int
+    {
+        return $this->orientation;
+    }
+
+    /**
+     * Whether an orientation other than 1 is applied.
+     */
+    public function needsOrientation(): bool
+    {
+        return $this->orientation !== ImageInfo::ORIENTATION_NORMAL;
+    }
+
+    /**
+     * @param int $orientation EXIF orientation to apply, from 1 (none) to 8; the output size is not changed
+     *
+     * @throws InvalidArgumentException when the orientation is out of range
+     */
+    public function withOrientation(int $orientation): self
+    {
+        if ($orientation < ImageInfo::ORIENTATION_NORMAL || $orientation > ImageInfo::ORIENTATION_MAX) {
+            throw new InvalidArgumentException(sprintf(
+                'BackendJob: the orientation must be from %d to %d.',
+                ImageInfo::ORIENTATION_NORMAL,
+                ImageInfo::ORIENTATION_MAX
+            ));
+        }
+        $clone = clone $this;
+        $clone->orientation = $orientation;
+
+        return $clone;
+    }
+
+    /**
+     * Width of the input once the orientation is applied: its height for orientations 5 to 8.
+     */
+    public function getOrientedWidth(): int
+    {
+        return $this->orientation >= self::FIRST_TRANSPOSING_ORIENTATION ? $this->input->getHeight() : $this->input->getWidth();
+    }
+
+    /**
+     * Height of the input once the orientation is applied: its width for orientations 5 to 8.
+     */
+    public function getOrientedHeight(): int
+    {
+        return $this->orientation >= self::FIRST_TRANSPOSING_ORIENTATION ? $this->input->getWidth() : $this->input->getHeight();
     }
 
     /**

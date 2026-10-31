@@ -26,6 +26,7 @@ use Mfonte\SecureImageConverter\Validation\ImageInfo;
  * | lossless formats        | WEBP and AVIF, when it encodes them losslessly                                        |
  * | fits                    | fits (contain, cover, fill) with which it scales a still image to an exact size       |
  * | animated fits           | fits with which it scales every frame of an animation to an exact size                |
+ * | oriented formats        | input formats whose EXIF orientation it applies on request (BackendJob::getOrientation()) |
  * | ICC profile             | it keeps the ICC profile while it strips the other metadata                           |
  * | metadata                | it keeps every metadata block when stripping is not requested                         |
  *
@@ -41,7 +42,7 @@ final class BackendCapabilities
     /**
      * Version of the array shape of toArray() and fromArray().
      */
-    public const SCHEMA_VERSION = 2;
+    public const SCHEMA_VERSION = 3;
 
     /**
      * Maximum length of a note or of the reason a backend is unavailable, in characters.
@@ -65,6 +66,7 @@ final class BackendCapabilities
         'lossless_formats',
         'fits',
         'animated_fits',
+        'oriented_formats',
         'icc_profile',
         'metadata',
         'notes',
@@ -124,6 +126,11 @@ final class BackendCapabilities
      * @var list<string>
      */
     private $animatedFits = [];
+
+    /**
+     * @var list<string>
+     */
+    private $orientedFormats = [];
 
     /**
      * @var bool
@@ -225,6 +232,7 @@ final class BackendCapabilities
             ->withLosslessFormats(self::stringList('lossless formats', $data['lossless_formats']))
             ->withFits(self::stringList('fits', $data['fits']))
             ->withAnimatedFits(self::stringList('animated fits', $data['animated_fits']))
+            ->withOrientedFormats(self::stringList('oriented formats', $data['oriented_formats']))
             ->withIccProfile($data['icc_profile'])
             ->withMetadata($data['metadata'])
             ->withNotes(self::stringList('notes', $data['notes']));
@@ -467,6 +475,30 @@ final class BackendCapabilities
     }
 
     /**
+     * Input formats whose EXIF orientation the backend applies when a job asks for it (BackendJob::getOrientation()),
+     * in canonical order; empty when it keeps the pixels as stored.
+     *
+     * @return list<string>
+     */
+    public function getOrientedFormats(): array
+    {
+        return $this->orientedFormats;
+    }
+
+    /**
+     * @param list<string> $formats formats among the input formats
+     *
+     * @throws InvalidArgumentException when a format is not an input format
+     */
+    public function withOrientedFormats(array $formats): self
+    {
+        $clone = $this->availableClone();
+        $clone->orientedFormats = self::checkSubset('oriented formats', $formats, $this->inputFormats);
+
+        return $clone;
+    }
+
+    /**
      * Whether the backend keeps the ICC profile while it strips the other metadata.
      */
     public function keepsIccProfile(): bool
@@ -555,7 +587,8 @@ final class BackendCapabilities
 
     /**
      * Why the backend cannot perform a job, or null when it can. Only the hard requirements are checked: the input
-     * (explainUndecodable()), the output (still or animated), the fit when the size changes, and the lossless mode.
+     * (explainUndecodable()), the output (still or animated), the fit when the size changes, the lossless mode, and
+     * the orientation when the job applies one.
      * The metadata requirements are reported by getMetadataGaps().
      */
     public function explainUnsupported(BackendJob $job): ?string
@@ -587,6 +620,9 @@ final class BackendCapabilities
         if ($job->needsLosslessMode() && !in_array($output, $this->losslessFormats, true)) {
             return sprintf('it does not encode a lossless %s', $output);
         }
+        if ($job->needsOrientation() && !in_array($job->getInputFormat(), $this->orientedFormats, true)) {
+            return sprintf('it does not apply the orientation of %s', $job->getInputFormat());
+        }
 
         return null;
     }
@@ -613,7 +649,7 @@ final class BackendCapabilities
     /**
      * Array representation, for the capability cache and for diagnostics (/healthz, check-env).
      *
-     * @return array{schema: int, backend: string, available: bool, unavailable_reason: string|null, input_formats: list<string>, input_variants: list<string>, first_frame_formats: list<string>, animated_input_formats: list<string>, output_formats: list<string>, animated_output_formats: list<string>, lossless_formats: list<string>, fits: list<string>, animated_fits: list<string>, icc_profile: bool, metadata: bool, notes: list<string>}
+     * @return array{schema: int, backend: string, available: bool, unavailable_reason: string|null, input_formats: list<string>, input_variants: list<string>, first_frame_formats: list<string>, animated_input_formats: list<string>, output_formats: list<string>, animated_output_formats: list<string>, lossless_formats: list<string>, fits: list<string>, animated_fits: list<string>, oriented_formats: list<string>, icc_profile: bool, metadata: bool, notes: list<string>}
      */
     public function toArray(): array
     {
@@ -631,6 +667,7 @@ final class BackendCapabilities
             'lossless_formats' => $this->losslessFormats,
             'fits' => $this->fits,
             'animated_fits' => $this->animatedFits,
+            'oriented_formats' => $this->orientedFormats,
             'icc_profile' => $this->iccProfile,
             'metadata' => $this->metadata,
             'notes' => $this->notes,

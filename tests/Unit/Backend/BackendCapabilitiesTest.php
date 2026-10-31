@@ -32,6 +32,7 @@ final class BackendCapabilitiesTest extends TestCase
             ->withLosslessFormats([ImageFormat::WEBP])
             ->withFits([ConversionRequest::FIT_FILL, ConversionRequest::FIT_CONTAIN, ConversionRequest::FIT_COVER])
             ->withAnimatedFits([ConversionRequest::FIT_CONTAIN])
+            ->withOrientedFormats([ImageFormat::JPEG])
             ->withIccProfile(true)
             ->withMetadata(false)
             ->withNotes(['its resize with fit cover of an animation had the wrong size']);
@@ -97,6 +98,7 @@ final class BackendCapabilitiesTest extends TestCase
             'lossless jpeg' => ['lossless_formats' => [ImageFormat::JPEG]] + $valid,
             'unknown fit' => ['fits' => ['stretch']] + $valid,
             'animated fit not a fit' => ['fits' => [ConversionRequest::FIT_FILL], 'animated_fits' => [ConversionRequest::FIT_COVER]] + $valid,
+            'oriented format not an input' => ['oriented_formats' => [ImageFormat::BMP]] + $valid,
             'flag not a boolean' => ['icc_profile' => 1] + $valid,
             'note with a newline' => ['notes' => ["two\nlines"]] + $valid,
             'bad backend name' => ['backend' => 'Vips!'] + $valid,
@@ -172,6 +174,15 @@ final class BackendCapabilitiesTest extends TestCase
             }],
             'lossless avif' => ['it does not encode a lossless avif', static function () {
                 return self::job(self::info(ImageFormat::PNG), ImageFormat::AVIF)->withLossless(true);
+            }],
+            'orientation applied' => [null, static function () {
+                return self::job(self::info(ImageFormat::JPEG)->withOrientation(6), ImageFormat::WEBP, 12, 16)->withOrientation(6);
+            }],
+            'orientation not applied' => ['it does not apply the orientation of png', static function () {
+                return self::job(self::info(ImageFormat::PNG)->withOrientation(6), ImageFormat::WEBP, 12, 16)->withOrientation(6);
+            }],
+            'orientation ignored' => [null, static function () {
+                return self::job(self::info(ImageFormat::PNG)->withOrientation(6), ImageFormat::WEBP);
             }],
         ];
     }

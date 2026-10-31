@@ -29,7 +29,9 @@ use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
  * | lossless      | lossless=true (WEBP, AVIF)                                                           |
  * | metadata      | keep=none, keep=icc, or everything; strip=true where keep is unknown (vips < 8.15)   |
  * | pages         | TIFF page=0 n=1; GIF and WEBP n=1, or n=-1 for an animation; AVIF its primary image  |
- * | orientation   | --no-rotate: pixels as stored                                                        |
+ * | orientation   | --no-rotate: pixels as stored; a JPEG job that applies its orientation goes through  |
+ * |               | thumbnail without --no-rotate, which turns the image upright as the EXIF says and    |
+ * |               | drops the orientation tag (only with thumbnail, so only where it is allowed, above)  |
  * | damaged input | fail-on=error where supported                                                        |
  *
  * AVIF is written with compression=av1 and bitdepth=8. VIPS_CONCURRENCY=1 and MALLOC_ARENA_MAX=2 keep the address
@@ -168,6 +170,8 @@ final class VipsBackend extends AbstractBackend
         if (($facts['untrusted_blocked'] ?? '0') === '1') {
             $candidates['fits'] = ConversionRequest::fitModes();
             $candidates['animated_fits'] = ConversionRequest::fitModes();
+            // libvips reads the EXIF orientation itself; the probe proves that it agrees with ImageInspector on a JPEG.
+            $candidates['oriented'] = [ImageFormat::JPEG];
         }
         $candidates['lossless'] = [ImageFormat::WEBP, ImageFormat::AVIF];
         $candidates['icc_profile'] = ($facts['keep'] ?? '0') === '1';
@@ -183,7 +187,7 @@ final class VipsBackend extends AbstractBackend
         if ($save !== []) {
             $output .= '[' . implode(',', $save) . ']';
         }
-        if (!$job->isResized()) {
+        if (!$job->isResized() && !$job->needsOrientation()) {
             $command = [$programs['vips'], self::OPERATIONS[$job->getInputFormat()][0], $input, $output];
             foreach ($this->loadOptions($job) as $name => $value) {
                 array_push($command, '--' . $name, $value);
@@ -215,7 +219,9 @@ final class VipsBackend extends AbstractBackend
         } else {
             array_push($command, '--size', 'force');
         }
-        $command[] = '--no-rotate';
+        if (!$job->needsOrientation()) {
+            $command[] = '--no-rotate';
+        }
 
         return $command;
     }

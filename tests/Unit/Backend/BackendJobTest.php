@@ -85,6 +85,30 @@ final class BackendJobTest extends TestCase
         self::assertTrue($job->isResized());
     }
 
+    public function testFromRequestSizesTheUprightImageWhenItAppliesTheOrientation(): void
+    {
+        $input = self::info(ImageFormat::JPEG, 40, 30)->withOrientation(6);
+        $request = (new ConversionRequest(ImageFormat::WEBP))->withWidth(15);
+
+        $upright = BackendJob::fromRequest('/srv/in.jpg', $input, '/srv/out.webp', $request);
+        self::assertSame(6, $upright->getOrientation());
+        self::assertTrue($upright->needsOrientation());
+        self::assertSame([30, 40], [$upright->getOrientedWidth(), $upright->getOrientedHeight()]);
+        self::assertSame([15, 20], [$upright->getWidth(), $upright->getHeight()]);
+        self::assertTrue($upright->isResized());
+
+        $stored = BackendJob::fromRequest('/srv/in.jpg', $input, '/srv/out.webp', $request, false);
+        self::assertSame(1, $stored->getOrientation());
+        self::assertFalse($stored->needsOrientation());
+        self::assertSame([15, 11], [$stored->getWidth(), $stored->getHeight()]);
+
+        $turned = BackendJob::fromRequest('/srv/in.jpg', $input, '/srv/out.webp', new ConversionRequest());
+        self::assertSame([30, 40], [$turned->getWidth(), $turned->getHeight()]);
+        self::assertFalse($turned->isResized(), 'Turning the image upright is not a resize.');
+        $halfTurn = BackendJob::fromRequest('/srv/in.jpg', $input->withOrientation(3), '/srv/out.webp', new ConversionRequest());
+        self::assertSame([40, 30, 3], [$halfTurn->getWidth(), $halfTurn->getHeight(), $halfTurn->getOrientation()]);
+    }
+
     public function testFromRequestPreservesAnimationWhenAsked(): void
     {
         $job = BackendJob::fromRequest(
@@ -188,6 +212,12 @@ final class BackendJobTest extends TestCase
             }],
             'zero width' => [static function () use ($info) {
                 return new BackendJob('/a.png', $info, '/b.webp', ImageFormat::WEBP, 0, 1);
+            }],
+            'orientation 0' => [static function () use ($info) {
+                return (new BackendJob('/a.png', $info, '/b.webp', ImageFormat::WEBP, 1, 1))->withOrientation(0);
+            }],
+            'orientation 9' => [static function () use ($info) {
+                return (new BackendJob('/a.png', $info, '/b.webp', ImageFormat::WEBP, 1, 1))->withOrientation(9);
             }],
             'height above the maximum' => [static function () use ($info) {
                 return new BackendJob('/a.png', $info, '/b.webp', ImageFormat::WEBP, 1, Capabilities::OUTPUT_DIMENSION_MAX + 1);

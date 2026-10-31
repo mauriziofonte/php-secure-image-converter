@@ -31,6 +31,9 @@ use Mfonte\SecureImageConverter\Validation\ImageInfo;
  * | lossless         | a lossless conversion succeeds (a WEBP must use the lossless VP8L bitstream)           |
  * | ICC profile      | the JPEG source, stripped with the ICC profile kept: the profile is there, EXIF is not  |
  * | metadata         | the JPEG source, not stripped: EXIF is there                                           |
+ * | oriented formats | the oriented JPEG (16 x 12 stored, EXIF orientation 6) converted with its orientation |
+ * |                  | applied: the output is 12 x 16 and carries no orientation; then every candidate input  |
+ * |                  | format is declared, the backend applying the orientation the same way to all of them  |
  *
  * @internal
  */
@@ -139,7 +142,7 @@ final class CapabilityProber
     /**
      * Probes the candidates.
      *
-     * @param array{inputs: list<string>, outputs: list<string>, first_frame: list<string>, animated_inputs: list<string>, animated_outputs: list<string>, fits: list<string>, animated_fits: list<string>, lossless: list<string>, icc_profile: bool, metadata: bool} $candidates
+     * @param array{inputs: list<string>, outputs: list<string>, first_frame: list<string>, animated_inputs: list<string>, animated_outputs: list<string>, fits: list<string>, animated_fits: list<string>, lossless: list<string>, oriented: list<string>, icc_profile: bool, metadata: bool} $candidates
      */
     public function probe(array $candidates): BackendCapabilities
     {
@@ -202,6 +205,10 @@ final class CapabilityProber
             }
         }
         $capabilities = $capabilities->withLosslessFormats($lossless);
+        $oriented = array_values(array_intersect($candidates['oriented'], $inputs));
+        if ($oriented !== [] && in_array(ImageFormat::JPEG, $inputs, true) && $this->appliesOrientation($reference)) {
+            $capabilities = $capabilities->withOrientedFormats($oriented);
+        }
         $metadataOutput = in_array(ImageFormat::JPEG, $inputs, true) ? self::first(self::METADATA_ORDER, $outputs) : null;
         if ($metadataOutput !== null) {
             $capabilities = $capabilities
@@ -384,6 +391,24 @@ final class CapabilityProber
         return $this->check(
             substr($this->lastHeader, 12, 4) === 'VP8L',
             'its lossless webp output was lossy'
+        );
+    }
+
+    private function appliesOrientation(string $output): bool
+    {
+        $image = $this->images->oriented();
+        if ($image === null) {
+            return false;
+        }
+        $job = $this->job($image, $output, $image[1]->getHeight(), $image[1]->getWidth())
+            ->withOrientation($image[1]->getOrientation())
+            ->withStripMetadata(false);
+        $info = $this->run($job, 'an oriented image');
+
+        return $info !== null && $this->check(
+            self::matches($info, $output, $image[1]->getHeight(), $image[1]->getWidth(), 1)
+                && $info->getOrientation() === ImageInfo::ORIENTATION_NORMAL,
+            'its output of an oriented image was not upright'
         );
     }
 

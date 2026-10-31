@@ -95,6 +95,7 @@ final class WorkerExtensionTest extends BackendTestCase
             'lossless' => false,
             'strip' => true,
             'keep_icc' => false,
+            'orientation' => 1,
             'memory_bytes' => 268435456,
         ]));
 

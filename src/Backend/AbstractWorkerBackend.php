@@ -124,6 +124,8 @@ abstract class AbstractWorkerBackend extends AbstractBackend
         $candidates['lossless'] = self::formats($facts['lossless'] ?? '');
         $candidates['first_frame'] = [ImageFormat::PNG, ImageFormat::GIF, ImageFormat::WEBP];
         $candidates['fits'] = ConversionRequest::fitModes();
+        // The workers turn the decoded pixels themselves; AVIF decoders may already apply irot and imir.
+        $candidates['oriented'] = array_values(array_diff($candidates['inputs'], [ImageFormat::AVIF]));
 
         return $candidates;
     }
@@ -164,6 +166,7 @@ abstract class AbstractWorkerBackend extends AbstractBackend
             'lossless' => $job->needsLosslessMode(),
             'strip' => $job->shouldStripMetadata(),
             'keep_icc' => $job->shouldKeepIccProfile(),
+            'orientation' => $job->getOrientation(),
             'memory_bytes' => $this->getOptions()->getMemoryCeilingBytes(),
         ]);
         $path = $directory->pathOf(AbstractWorker::JOB_FILE);
