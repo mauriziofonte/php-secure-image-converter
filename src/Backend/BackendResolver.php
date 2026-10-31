@@ -28,7 +28,8 @@ use Mfonte\SecureImageConverter\Isolation\ResourceLimits;
  * The selection lists why every backend and variant tried before was not chosen. When nothing can perform the job,
  * the exception says why for every candidate: UnsupportedFormatException (unsupported_format) when no available
  * backend decodes the input, such as a CMYK JPEG with only cwebp and avifenc enabled (its format or one of its
- * variants, ImageInfo::getVariants()); ResourceLimitException when only the memory ceiling stood in the way;
+ * variants, ImageInfo::getVariants()), or when no available backend encodes any of the fallback formats, such as the
+ * format "original" of a JPEG with only cwebp enabled; ResourceLimitException when only the memory ceiling stood in the way;
  * ConversionFailedException otherwise, also when no backend is available at all.
  */
 final class BackendResolver
@@ -136,7 +137,9 @@ final class BackendResolver
         $capable = false;
         $available = false;
         $decodable = false;
-        foreach (self::fallbackFormats($job->getOutputFormat(), $job->getInputFormat()) as $format) {
+        $encodable = false;
+        $formats = self::fallbackFormats($job->getOutputFormat(), $job->getInputFormat());
+        foreach ($formats as $format) {
             $variants = [$job->withOutputFormat($format)];
             if ($job->isAnimated()) {
                 $variants[] = $variants[0]->withAnimation(false);
@@ -148,6 +151,7 @@ final class BackendResolver
                     $capabilities = $backend->getCapabilities();
                     $available = $available || $capabilities->isAvailable();
                     $decodable = $decodable || $capabilities->explainUndecodable($variant) === null;
+                    $encodable = $encodable || in_array($format, $capabilities->getOutputFormats(), true);
                     $unsupported = $capabilities->explainUnsupported($variant);
                     if ($unsupported !== null) {
                         $reasons[] = sprintf('%s: %s: %s', $label, $backend->getName(), $unsupported);
@@ -189,6 +193,13 @@ final class BackendResolver
         $message = self::message($reasons);
         if ($available && !$decodable) {
             throw new UnsupportedFormatException('No available backend decodes this image: ' . $message);
+        }
+        if ($available && !$encodable) {
+            throw new UnsupportedFormatException(sprintf(
+                'No available backend encodes %s: %s',
+                implode(' or ', $formats),
+                $message
+            ));
         }
         if ($capable && $limitedOnly) {
             throw new ResourceLimitException('Every capable backend needs more memory than the ceiling allows: ' . $message);

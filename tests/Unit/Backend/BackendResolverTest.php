@@ -200,6 +200,33 @@ final class BackendResolverTest extends TestCase
     }
 
     /**
+     * cwebp alone, or avifenc alone, decodes a JPEG but encodes neither JPEG nor, for avifenc, WEBP: a target no
+     * backend can produce is unsupported_format, not conversion_failed.
+     */
+    public function testATargetThatNoBackendEncodesIsUnsupported(): void
+    {
+        $cwebp = new FakeBackend(self::capabilities('cwebp', [ImageFormat::JPEG, ImageFormat::PNG], [ImageFormat::WEBP]));
+        $avifenc = new FakeBackend(new BackendCapabilities('avifenc', [ImageFormat::JPEG, ImageFormat::PNG], [ImageFormat::AVIF]));
+        $cases = [
+            [$cwebp, ImageFormat::JPEG, 'No available backend encodes jpeg: '],
+            [$avifenc, ImageFormat::JPEG, 'No available backend encodes jpeg: '],
+            [$avifenc, ImageFormat::WEBP, 'No available backend encodes webp or jpeg: '],
+        ];
+        foreach ($cases as list($backend, $target, $message)) {
+            try {
+                (new BackendResolver([$backend]))->resolve(self::job(self::info(ImageFormat::JPEG), $target));
+                self::fail('No backend encodes ' . $target);
+            } catch (UnsupportedFormatException $exception) {
+                self::assertSame(ErrorCode::UNSUPPORTED_FORMAT, $exception->getErrorCode());
+                self::assertStringStartsWith($message, $exception->getMessage());
+            }
+        }
+        // A backend that encodes the format but cannot perform the job is still a conversion failure.
+        $this->expectException(ConversionFailedException::class);
+        (new BackendResolver([$avifenc]))->resolve(self::job(self::info(ImageFormat::JPEG), ImageFormat::AVIF, 8, 6));
+    }
+
+    /**
      * cwebp and avifenc do not decode a CMYK JPEG, gd does not decode a bit-field BMP: the resolver picks a backend
      * that probed the variant, and refuses the image as unsupported_format when no available backend did.
      */

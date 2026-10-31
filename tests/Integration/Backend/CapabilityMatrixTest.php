@@ -320,7 +320,8 @@ final class CapabilityMatrixTest extends BackendTestCase
      * The resolver with every available enabled backend: for each still and animated fixture, asked for WEBP, AVIF
      * and its own format, it chooses a backend and a fallback format whose conversion works, or refuses the job only
      * when no backend covers any fallback format: with UnsupportedFormatException when none of them decodes the
-     * input (a BMP with vips alone), else with ConversionFailedException.
+     * input (a BMP with vips alone) or encodes any fallback format (a PNG to PNG with cwebp alone), else with
+     * ConversionFailedException.
      */
     public function testTheResolverChoosesConversionsThatWork(): void
     {
@@ -346,6 +347,11 @@ final class CapabilityMatrixTest extends BackendTestCase
                     $selection = $resolver->resolve($job);
                 } catch (ConversionFailedException | UnsupportedFormatException $exception) {
                     $decodable = false;
+                    $encodable = false;
+                    foreach ($backends as $backend) {
+                        $outputs = $backend->getCapabilities()->getOutputFormats();
+                        $encodable = $encodable || array_intersect(BackendResolver::fallbackFormats($requested, $job->getInputFormat()), $outputs) !== [];
+                    }
                     foreach (self::variants($job) as $variant) {
                         foreach ($backends as $backend) {
                             $decodable = $decodable || $backend->getCapabilities()->explainUndecodable($variant) === null;
@@ -354,8 +360,14 @@ final class CapabilityMatrixTest extends BackendTestCase
                             }
                         }
                     }
-                    if (($exception instanceof UnsupportedFormatException) === $decodable) {
-                        $failures[] = sprintf('%s: refused with %s, but %s', self::label($job), get_class($exception), $decodable ? 'a backend decodes it' : 'no backend decodes it');
+                    $unsupported = !$decodable || !$encodable;
+                    if (($exception instanceof UnsupportedFormatException) !== $unsupported) {
+                        $failures[] = sprintf(
+                            '%s: refused with %s, but %s',
+                            self::label($job),
+                            get_class($exception),
+                            !$decodable ? 'no backend decodes it' : (!$encodable ? 'no backend encodes a fallback format' : 'a backend decodes it and one encodes a fallback format')
+                        );
                     }
                     continue;
                 }

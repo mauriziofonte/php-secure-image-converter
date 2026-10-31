@@ -13,8 +13,9 @@ namespace Mfonte\SecureImageConverter\Contract\Exception;
  * derived images, AVIF items stored in another file, by reference or in several extents, AVIF tracks with several
  * sample descriptions, several images in one AVIF or BMP file, BMP files with embedded JPEG or PNG data, OS/2 2.x BMP
  * headers, BMP colour profiles linked by file name), or more scans, runs, items or tracks than the validation reads; or
- * an input that no available backend decodes, such as a CMYK JPEG when only cwebp and avifenc are enabled
- * (BackendResolver). Also thrown by ImageFormat::fromMimeType() for a MIME type that is not a known image type.
+ * an input that no available backend decodes, such as a CMYK JPEG when only cwebp and avifenc are enabled, or a request
+ * whose output no available backend encodes in any fallback format, such as the format "original" of a JPEG when only
+ * cwebp is enabled (BackendResolver). Also thrown by ImageFormat::fromMimeType() for a MIME type that is not a known image type.
  *
  * Error code ErrorCode::UNSUPPORTED_FORMAT; expected HTTP status in the API: 415 Unsupported Media Type.
  */
