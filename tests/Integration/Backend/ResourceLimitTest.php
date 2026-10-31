@@ -231,8 +231,10 @@ final class ResourceLimitTest extends BackendTestCase
     }
 
     /**
-     * A slow job (a noisy 6 megapixel image at the highest effort, to AVIF or lossless WEBP) under a CPU time limit
-     * of one second fails with ResourceLimitException.
+     * A slow job under a CPU time limit of one second fails with ResourceLimitException, from the kill and not from
+     * the memory estimate: a noisy image at the highest effort, of 6 megapixels to AVIF, or of 20 megapixels to
+     * lossless WEBP (GD's encoder ignores the effort: its worker took 2.3 seconds of CPU time for 6 megapixels in
+     * tests/docker and 8.1 for 20, and converted 6 megapixels within the limit on GitHub's runners).
      *
      * @dataProvider enabledBackends
      */
@@ -251,13 +253,16 @@ final class ResourceLimitTest extends BackendTestCase
             self::markTestSkipped(sprintf('The %s backend does not decode PNG.', $name));
         }
         $output = in_array(ImageFormat::AVIF, $capabilities->getOutputFormats(), true) ? ImageFormat::AVIF : ImageFormat::WEBP;
-        $job = $this->job($this->png(3000, 2000, true), $output)->withEffort(9)->withQuality(100);
+        $job = $this->job($output === ImageFormat::AVIF ? $this->png(3000, 2000, true) : $this->png(5000, 4000, true), $output)
+            ->withEffort(9)
+            ->withQuality(100);
         if ($output === ImageFormat::WEBP && in_array(ImageFormat::WEBP, $capabilities->getLosslessFormats(), true)) {
             $job = $job->withLossless(true);
         }
         if ($capabilities->explainUnsupported($job) !== null) {
             self::markTestSkipped(sprintf('The %s backend encodes neither AVIF nor WEBP from PNG.', $name));
         }
+        self::assertLessThanOrEqual(self::backendOptions()->getMemoryCeilingBytes(), $backend->estimateMemoryBytes($job), 'the job is admitted');
 
         $this->expectException(ResourceLimitException::class);
         $backend->convert($job);
