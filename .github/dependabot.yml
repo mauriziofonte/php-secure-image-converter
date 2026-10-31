@@ -45,3 +45,14 @@ updates:
     groups:
       github-actions:
         update-types: [minor, patch]
+
+  - package-ecosystem: docker
+    directory: /tests/docker
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      docker:
+        update-types: [minor, patch]
