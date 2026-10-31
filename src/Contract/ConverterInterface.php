@@ -59,8 +59,10 @@ interface ConverterInterface
      * @param string $outputPath local path to write the output to, in an existing writable directory; must differ
      *                           from $inputPath
      *
-     * @throws UnsupportedFormatException    the input content matches no identifiable format (e.g. HEIC) or its
-     *                                       format is not enabled for input [unsupported_format, 415]
+     * @throws UnsupportedFormatException    the input content matches no identifiable format (e.g. HEIC), its
+     *                                       format is not enabled for input or is SVG, or it is a variant of its
+     *                                       format that the library does not accept (see
+     *                                       UnsupportedFormatException) [unsupported_format, 415]
      * @throws InvalidImageException         the input is malformed, truncated or spoofed [invalid_image, 422], or
      *                                       animated while the animation policy is reject [animation_rejected, 422]
      * @throws LimitExceededException        the input exceeds max_bytes [file_too_large, 413], or the input or the
