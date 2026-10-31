@@ -162,9 +162,9 @@ jobs:
       - name: PHPStan (as PHP 7.2.5 and as PHP 8.5)
         run: composer analyse
 
-  # The tests job runs the isolation tests too (composer test runs the whole
-  # suite), but without bubblewrap, so there the sandbox tests skip; the
-  # static job runs no tests. This job installs bubblewrap and lifts Ubuntu
+  # The tests job runs the isolation tests too (composer test runs every
+  # group but backends), but without bubblewrap, so there the sandbox tests
+  # skip; the static job runs no tests. This job installs bubblewrap and lifts Ubuntu
   # 24.04's AppArmor restriction on unprivileged user namespaces, so that
   # every sandbox test really runs: with
   # SIC_EXPECTED_ISOLATION_LEVEL set, a test that needs a level the host
