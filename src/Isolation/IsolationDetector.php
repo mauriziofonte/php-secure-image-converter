@@ -36,11 +36,11 @@ use Psr\Log\NullLogger;
  * process rather than to the host: the next detect() probes again.
  *
  * The cache directory must be owned by the effective user and not writable by group or others; a cache file must be
- * a regular file with the same properties. Anything else is ignored (and the detector probes), so that another
- * local user cannot plant a cached "sandbox" result to defeat a strict policy. Without the posix extension the
- * owner cannot be checked and the file cache is not used.
+ * a regular file with the same properties (see PrivateCacheDirectory). Anything else is ignored (and the detector
+ * probes), so that another local user cannot plant a cached "sandbox" result to defeat a strict policy. Without the
+ * posix extension the owner cannot be checked and the file cache is not used.
  */
-final class IsolationDetector
+final class IsolationDetector implements IsolationDetectorInterface
 {
     public const DEFAULT_CACHE_TTL_SECONDS = 3600;
 
@@ -93,9 +93,9 @@ final class IsolationDetector
     private $options;
 
     /**
-     * @var string|null
+     * @var PrivateCacheDirectory
      */
-    private $cacheDirectory;
+    private $cacheStore;
 
     /**
      * @var int
@@ -148,7 +148,7 @@ final class IsolationDetector
             throw new InvalidArgumentException('The isolation cache directory must be an absolute, normalised path.');
         }
         $this->options = $options === null ? new ProcessOptions() : $options;
-        $this->cacheDirectory = $cacheDirectory;
+        $this->cacheStore = new PrivateCacheDirectory($cacheDirectory);
         $this->cacheTtlSeconds = $cacheTtlSeconds;
         $this->logger = $logger === null ? new NullLogger() : $logger;
     }
@@ -348,22 +348,14 @@ final class IsolationDetector
         if ($this->cacheTtlSeconds === 0 || !function_exists('posix_geteuid')) {
             return null;
         }
-        $euid = posix_geteuid();
-        $directory = $this->cacheDirectory;
+        $directory = $this->cacheStore->resolve();
         if ($directory === null) {
-            $directory = rtrim(sys_get_temp_dir(), '/') . '/secure-image-converter-' . $euid;
-        }
-        if (!file_exists($directory) && !is_link($directory)) {
-            @mkdir($directory, 0700, true);
-        }
-        clearstatcache(true, $directory);
-        if (!self::isOwnedAndProtected($directory, 0040000, $euid)) {
             $this->logger->debug('The isolation cache directory is not usable: it must be a directory owned by the '
                 . 'current user and not writable by group or others.');
 
             return null;
         }
-        $key = $this->cacheKey($euid);
+        $key = $this->cacheKey(posix_geteuid());
 
         return ['path' => $directory . '/isolation-' . substr($key, 0, 16) . '.json', 'key' => $key];
     }
@@ -418,12 +410,11 @@ final class IsolationDetector
 
     private function readCache(string $path, string $key): ?DetectionResult
     {
-        clearstatcache(true, $path);
-        if (!function_exists('posix_geteuid') || !self::isOwnedAndProtected($path, 0100000, posix_geteuid())) {
+        $contents = $this->cacheStore->read($path, self::CACHE_MAX_BYTES);
+        if ($contents === null) {
             return null;
         }
-        $contents = @file_get_contents($path, false, null, 0, self::CACHE_MAX_BYTES);
-        $data = is_string($contents) ? json_decode($contents, true) : null;
+        $data = json_decode($contents, true);
         if (!is_array($data) || ($data['schema'] ?? null) !== self::CACHE_SCHEMA || ($data['key'] ?? null) !== $key
             || !isset($data['result']) || !is_array($data['result'])) {
             $this->logger->debug('The isolation cache file is invalid or belongs to another configuration.');
@@ -451,37 +442,8 @@ final class IsolationDetector
     private function writeCache(string $path, string $key, DetectionResult $result): void
     {
         $json = json_encode(['schema' => self::CACHE_SCHEMA, 'key' => $key, 'result' => $result->toArray()]);
-        if (!is_string($json)) {
-            return;
-        }
-        $temporary = dirname($path) . '/.isolation-' . bin2hex(random_bytes(8)) . '.tmp';
-        $handle = @fopen($temporary, 'x');
-        if ($handle === false) {
-            $this->logger->debug('The isolation cache file could not be written.');
-
-            return;
-        }
-        $written = fwrite($handle, $json);
-        fclose($handle);
-        if ($written !== strlen($json) || !@chmod($temporary, 0600) || !@rename($temporary, $path)) {
-            @unlink($temporary);
+        if (!is_string($json) || !$this->cacheStore->write($path, $json)) {
             $this->logger->debug('The isolation cache file could not be written.');
         }
-    }
-
-    /**
-     * Whether a path (never followed if it is a symbolic link) has the given file type, belongs to $uid and is not
-     * writable by group or others.
-     *
-     * @param int $type S_IFDIR (0040000) or S_IFREG (0100000)
-     */
-    private static function isOwnedAndProtected(string $path, int $type, int $uid): bool
-    {
-        $stat = @lstat($path);
-
-        return is_array($stat)
-            && ($stat['mode'] & 0170000) === $type
-            && $stat['uid'] === $uid
-            && ($stat['mode'] & 0022) === 0;
     }
 }

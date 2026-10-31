@@ -87,7 +87,7 @@ use Mfonte\SecureImageConverter\Contract\IsolationLevel;
  *     stopsig: int
  * }
  */
-final class ProcessRunner
+final class ProcessRunner implements ProcessRunnerInterface
 {
     private const SIGKILL = 9;
 
@@ -189,6 +189,15 @@ final class ProcessRunner
     public function getOptions(): ProcessOptions
     {
         return $this->options;
+    }
+
+    /**
+     * A runner at the same level with other options; the tools are located again with the new search path and tool
+     * paths on first use.
+     */
+    public function withOptions(ProcessOptions $options): ProcessRunnerInterface
+    {
+        return new self($this->level, $options);
     }
 
     /**
