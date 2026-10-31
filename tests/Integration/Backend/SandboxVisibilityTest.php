@@ -6,6 +6,7 @@ namespace Mfonte\SecureImageConverter\Tests\Integration\Backend;
 
 use Mfonte\SecureImageConverter\Backend\AbstractBackend;
 use Mfonte\SecureImageConverter\Backend\AbstractWorkerBackend;
+use Mfonte\SecureImageConverter\Backend\BackendFactory;
 use Mfonte\SecureImageConverter\Backend\GdBackend;
 use Mfonte\SecureImageConverter\Backend\ImagickBackend;
 use Mfonte\SecureImageConverter\Backend\Internal\SandboxPaths;
@@ -191,6 +192,49 @@ final class SandboxVisibilityTest extends BackendTestCase
             }
         } finally {
             $copy->remove();
+        }
+    }
+
+    /**
+     * A PHP worker whose extension is not in the binary's built-in extension directory loads it from the directory
+     * configured in BackendOptions (here a copy below /tmp), which each run mounts; a directory without it leaves
+     * the backend unavailable.
+     */
+    public function testAPhpWorkerLoadsItsExtensionFromTheConfiguredDirectory(): void
+    {
+        self::requireLevel(IsolationLevel::SANDBOX);
+        $backend = null;
+        foreach ([GdBackend::NAME, ImagickBackend::NAME] as $name) {
+            if ($backend === null && in_array($name, self::enabledNames(), true) && self::backend($name)->getCapabilities()->isAvailable()) {
+                $backend = self::backend($name);
+            }
+        }
+        if ($backend === null) {
+            self::markTestSkipped('Neither PHP worker backend is enabled.');
+        }
+        $command = $backend->commandLine($this->job(self::still(ImageFormat::PNG), ImageFormat::PNG));
+        $extension = $backend->getName() . '.so';
+        if (($backend->getFacts()['load'] ?? '0') !== '1' || $command[0] !== PHP_BINARY || !is_file(PHP_EXTENSION_DIR . '/' . $extension)) {
+            self::markTestSkipped('The worker does not load its extension from the extension directory of this PHP.');
+        }
+        $moved = WorkingDirectory::create();
+        $empty = WorkingDirectory::create();
+
+        try {
+            self::assertTrue(copy(PHP_EXTENSION_DIR . '/' . $extension, $moved->pathOf($extension)));
+            $options = self::backendOptions();
+            $found = BackendFactory::create($backend->getName(), self::hostRunner(), $options->withPhpExtensionDirectory($moved->getPath()));
+            $missing = BackendFactory::create($backend->getName(), self::hostRunner(), $options->withPhpExtensionDirectory($empty->getPath()));
+
+            self::assertTrue($found->getCapabilities()->isAvailable(), (string) $found->getCapabilities()->getUnavailableReason());
+            self::assertSame($backend->getCapabilities()->getOutputFormats(), $found->getCapabilities()->getOutputFormats());
+            self::assertSame(
+                'the ' . $backend->getName() . ' extension is not available to the PHP CLI',
+                $missing->getCapabilities()->getUnavailableReason()
+            );
+        } finally {
+            $moved->remove();
+            $empty->remove();
         }
     }
 

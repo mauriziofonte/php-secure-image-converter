@@ -32,6 +32,7 @@ final class BackendOptionsTest extends TestCase
         self::assertSame(2147483648, $options->getMemoryCeilingBytes());
         self::assertNull($options->getWorkingDirectoryParent());
         self::assertNull($options->getPhpBinary());
+        self::assertNull($options->getPhpExtensionDirectory());
         self::assertTrue($options->isCapabilityCacheEnabled());
         self::assertNull($options->getCapabilityCacheDirectory());
         self::assertSame(86400, $options->getCapabilityCacheTtlSeconds());
@@ -44,6 +45,7 @@ final class BackendOptionsTest extends TestCase
         $changed = $options->withMemoryCeilingBytes(536870912)
             ->withWorkingDirectoryParent('/var/tmp')
             ->withPhpBinary('/usr/bin/php8.3')
+            ->withPhpExtensionDirectory('/opt/php/ext')
             ->withCapabilityCache(false, '/var/cache/sic')
             ->withCapabilityCacheTtlSeconds(60)
             ->withLogger($logger = new MemoryLogger());
@@ -52,6 +54,8 @@ final class BackendOptionsTest extends TestCase
         self::assertSame(536870912, $changed->getMemoryCeilingBytes());
         self::assertSame('/var/tmp', $changed->getWorkingDirectoryParent());
         self::assertSame('/usr/bin/php8.3', $changed->getPhpBinary());
+        self::assertSame('/opt/php/ext', $changed->getPhpExtensionDirectory());
+        self::assertNull($options->getPhpExtensionDirectory());
         self::assertFalse($changed->isCapabilityCacheEnabled());
         self::assertSame('/var/cache/sic', $changed->getCapabilityCacheDirectory());
         self::assertSame(60, $changed->getCapabilityCacheTtlSeconds());
@@ -73,6 +77,9 @@ final class BackendOptionsTest extends TestCase
             }],
             'php with dots' => [static function (BackendOptions $options) {
                 return $options->withPhpBinary('/usr/bin/../bin/php');
+            }],
+            'relative extension directory' => [static function (BackendOptions $options) {
+                return $options->withPhpExtensionDirectory('ext');
             }],
             'ttl zero' => [static function (BackendOptions $options) {
                 return $options->withCapabilityCacheTtlSeconds(0);

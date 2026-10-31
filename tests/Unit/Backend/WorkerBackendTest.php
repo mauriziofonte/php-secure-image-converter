@@ -104,6 +104,34 @@ final class WorkerBackendTest extends TestCase
         }
     }
 
+    public function testAWorkerLoadsItsExtensionFromTheConfiguredDirectory(): void
+    {
+        $php = $this->fakePrograms() . '/php';
+        $extensions = $this->fakePrograms();
+        $runner = new FakeProcessRunner(
+            static function (array $command) use ($extensions): ProcessResult {
+                $arguments = implode(' ', $command);
+                if (strpos($arguments, ' -n -d extension_dir=' . $extensions . ' ') === false) {
+                    return FakeProcessRunner::result(1);
+                }
+                if (substr($arguments, -2) === '-m') {
+                    return FakeProcessRunner::result(0, strpos($arguments, '-d extension=gd') !== false ? "[PHP Modules]\ngd\n" : "[PHP Modules]\nCore\n");
+                }
+
+                return FakeProcessRunner::result(0, '{"inputs":["png"],"outputs":["webp"],"lossless":[]}');
+            },
+            $this->programOptions()
+        );
+        $backend = new GdBackend($runner, (new BackendOptions())->withPhpBinary($php)->withPhpExtensionDirectory($extensions));
+
+        self::assertSame(['inputs' => 'png', 'load' => '1', 'lossless' => '', 'outputs' => 'webp'], $backend->discoverFacts());
+        self::assertSame(
+            [$php, '-n', '-d', 'extension_dir=' . $extensions, '-d', 'extension=gd', '-d', 'display_errors=stderr', '-d', 'log_errors=0', '-d', 'memory_limit=-1'],
+            array_slice($backend->commandLine(self::job(self::info(ImageFormat::PNG), ImageFormat::WEBP), ['load' => '1']), 0, 12)
+        );
+        self::assertContains($extensions, $backend->getSandboxResourcePaths(), 'each run mounts the extension directory');
+    }
+
     public function testAWorkerWithoutItsExtensionIsUnavailable(): void
     {
         $php = $this->fakePrograms() . '/php';

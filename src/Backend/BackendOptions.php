@@ -19,6 +19,7 @@ use Psr\Log\NullLogger;
  * | memory ceiling             | 2 GiB                       | largest per-job address space limit             |
  * | working directory parent   | sys_get_temp_dir()          | where each job's private directory is created   |
  * | PHP binary                 | the running CLI, else "php" | PHP CLI that runs the GD and Imagick workers     |
+ * | PHP extension directory    | the binary's built-in one   | where the workers load gd and imagick from      |
  * | capability cache directory | PrivateCacheDirectory       | where probed capabilities are kept              |
  * | capability cache TTL       | 1 day                       | age after which capabilities are probed again   |
  * | logger                     | NullLogger                  | receives the warnings of the backends           |
@@ -68,6 +69,11 @@ final class BackendOptions
      * @var string|null
      */
     private $phpBinary;
+
+    /**
+     * @var string|null
+     */
+    private $phpExtensionDirectory;
 
     /**
      * @var bool
@@ -157,6 +163,30 @@ final class BackendOptions
     {
         $clone = clone $this;
         $clone->phpBinary = self::checkPath('PHP binary', $path);
+
+        return $clone;
+    }
+
+    /**
+     * Directory the workers load their extension (gd.so, imagick.so) from when the PHP build does not include it, or
+     * null for the extension directory built into the binary. The workers run "php -n", which reads no php.ini: an
+     * extension_dir set there does not apply, so a host whose extensions live elsewhere (such as /opt/php/ext) sets
+     * it here. Each run mounts the directory in the sandbox (AbstractBackend::getSandboxResourcePaths()).
+     */
+    public function getPhpExtensionDirectory(): ?string
+    {
+        return $this->phpExtensionDirectory;
+    }
+
+    /**
+     * @param string|null $directory absolute, normalised path of a directory, or null for the built-in one
+     *
+     * @throws InvalidArgumentException when the path is not absolute and normalised
+     */
+    public function withPhpExtensionDirectory(?string $directory): self
+    {
+        $clone = clone $this;
+        $clone->phpExtensionDirectory = self::checkPath('PHP extension directory', $directory);
 
         return $clone;
     }

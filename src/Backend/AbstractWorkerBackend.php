@@ -15,15 +15,18 @@ use Mfonte\SecureImageConverter\Validation\ImageInfo;
 /**
  * A backend whose program is a PHP CLI worker (see AbstractWorker) using one PHP extension.
  *
- * The worker runs as "php -n [-d extension=<name>] -d display_errors=stderr -d memory_limit=-1 <script> convert":
- * -n loads no php.ini, so that neither the host configuration (auto_prepend_file, disable_functions, FPM pool
- * secrets in /usr/local/etc) nor its extensions reach the worker; the extension is loaded explicitly from the
- * extension directory when the PHP build does not include it statically (established by probing "php -n -m").
+ * The worker runs as "php -n [-d extension_dir=<directory>] [-d extension=<name>] -d display_errors=stderr
+ * -d memory_limit=-1 <script> convert": -n loads no php.ini, so that neither the host configuration
+ * (auto_prepend_file, disable_functions, FPM pool secrets in /usr/local/etc) nor its extensions reach the worker; the
+ * extension is loaded explicitly when the PHP build does not include it statically (established by probing
+ * "php -n -m"), from BackendOptions::getPhpExtensionDirectory() when it is set and from the binary's built-in
+ * extension directory otherwise.
  * PHP's own memory limit is off: the address space limit of the job bounds the process, including the memory the
  * image library allocates outside PHP. The job is passed in AbstractWorker::JOB_FILE, never on the command line.
  *
  * The sandbox allowlist adds the time zone database (Debian's PHP reads /usr/share/zoneinfo at startup and aborts
- * without it) and what the extension needs; each run mounts the worker scripts (getSandboxResourcePaths()).
+ * without it) and what the extension needs; each run mounts the worker scripts and the configured extension
+ * directory, with its symbolic links resolved (getSandboxResourcePaths()).
  *
  * The PHP binary is BackendOptions::getPhpBinary(), else the running PHP when it is the CLI, else "php" from the
  * runner's search path.
@@ -61,14 +64,14 @@ abstract class AbstractWorkerBackend extends AbstractBackend
     protected function discover(array $programs, WorkingDirectory $directory): array
     {
         $memory = $this->estimateMemoryBytes(self::probeJob());
-        $modules = $this->execute([$programs['php'], '-n', '-m'], $directory, $memory);
+        $modules = $this->execute(array_merge($this->php($programs['php']), ['-m']), $directory, $memory);
         if (!$modules->isSuccessful()) {
             return [self::FACT_UNAVAILABLE => 'the PHP CLI does not start'];
         }
         $load = '0';
         if (!self::listsModule($modules->getStdout(), $this->extension())) {
             $modules = $this->execute(
-                [$programs['php'], '-n', '-d', 'extension=' . $this->extension(), '-m'],
+                array_merge($this->php($programs['php']), ['-d', 'extension=' . $this->extension(), '-m']),
                 $directory,
                 $memory
             );
@@ -149,7 +152,10 @@ abstract class AbstractWorkerBackend extends AbstractBackend
 
     protected function sandboxResources(): array
     {
-        return [\dirname(__DIR__, 2) . '/resources/workers', __DIR__ . '/Worker'];
+        $resources = [\dirname(__DIR__, 2) . '/resources/workers', __DIR__ . '/Worker'];
+        $extensions = $this->extensionDirectory();
+
+        return $extensions !== null ? array_merge($resources, [$extensions]) : $resources;
     }
 
     protected function isWorker(): bool
@@ -174,7 +180,7 @@ abstract class AbstractWorkerBackend extends AbstractBackend
      */
     private function phpCommand(string $php, array $facts): array
     {
-        $command = [$php, '-n'];
+        $command = $this->php($php);
         if (($facts['load'] ?? '0') === '1') {
             array_push($command, '-d', 'extension=' . $this->extension());
         }
@@ -190,6 +196,29 @@ abstract class AbstractWorkerBackend extends AbstractBackend
         );
 
         return $command;
+    }
+
+    /**
+     * The PHP binary without php.ini, with the configured extension directory.
+     *
+     * @return list<string>
+     */
+    private function php(string $php): array
+    {
+        $extensions = $this->extensionDirectory();
+
+        return $extensions !== null ? [$php, '-n', '-d', 'extension_dir=' . $extensions] : [$php, '-n'];
+    }
+
+    /**
+     * The configured extension directory, with symbolic links resolved: each run mounts it at that path.
+     */
+    private function extensionDirectory(): ?string
+    {
+        $directory = $this->getOptions()->getPhpExtensionDirectory();
+        $real = $directory !== null ? realpath($directory) : false;
+
+        return is_string($real) ? $real : $directory;
     }
 
     private static function listsModule(string $output, string $module): bool
