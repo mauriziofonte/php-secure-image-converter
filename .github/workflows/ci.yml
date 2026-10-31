@@ -109,8 +109,13 @@ jobs:
       - name: Show installed packages
         run: composer show
 
+      # The backend integration tests run in the Backends jobs below, with
+      # the conversion programs installed and SIC_EXPECTED_BACKENDS set.
+      # Here they would run only for the extensions setup-php happens to
+      # enable, slow group included, at whatever isolation level the runner
+      # gives.
       - name: Run the test suite
-        run: composer test
+        run: composer test -- --exclude-group backends
 
       # Some ownership checks need a directory or a symbolic link owned by
       # another user, which only root can create: those tests skip themselves
