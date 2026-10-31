@@ -19,6 +19,7 @@ use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
 use Mfonte\SecureImageConverter\Tests\Unit\Backend\Fake\FakeProcessRunner;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\Attributes\Group;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
@@ -225,7 +226,10 @@ final class WorkerBackendTest extends TestCase
     /**
      * Owned by another user, the directory or the shared object is refused even with the safe mode; changing the
      * owner needs root.
+     *
+     * @group root
      */
+    #[Group('root')]
     public function testAnExtensionOwnedByAnotherUserIsNotLoaded(): void
     {
         if (!function_exists('posix_geteuid') || posix_geteuid() !== 0) {
