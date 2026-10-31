@@ -263,7 +263,7 @@ final class SandboxVisibilityTest extends BackendTestCase
             self::assertNotContains((string) realpath($moved->getPath()), $found->getSandboxResourcePaths(), 'only the shared object is mounted');
             self::assertNull(self::check($found, $this->job(self::still(ImageFormat::PNG), ImageFormat::PNG)));
             self::assertSame(
-                'the ' . $backend->getName() . ' extension is not available to the PHP CLI',
+                'the PHP extension directory does not contain ' . $extension,
                 $missing->getCapabilities()->getUnavailableReason()
             );
             self::assertTrue(chmod($moved->getPath(), 0777));

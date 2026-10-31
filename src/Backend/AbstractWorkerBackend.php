@@ -22,7 +22,10 @@ use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
  * extension directory, or, when BackendOptions::getPhpExtensionDirectory() is set, by the resolved path of its shared
  * object there, which is loaded only while no other user can have planted or changed it (Internal\ExtensionFile:
  * the directory, the file and the directories above them owned by root or the effective user and not writable by
- * others). Otherwise the backend is unavailable, and a job refused when the directory changed after probing.
+ * others). Otherwise the backend is unavailable, and a job refused when the directory changed after probing. The
+ * configured path is resolved once, on first use: the probes and every job name, and mount, the file it resolved to,
+ * checked again before each of them, so a symbolic link in the configured path that is retargeted later is not
+ * followed again (only after a check fails is the configured path resolved anew).
  * PHP's own memory limit is off: the address space limit of the process (the memory ceiling) bounds it, including the
  * memory the image library allocates outside PHP. The job is passed in AbstractWorker::JOB_FILE, never on the command
  * line.
@@ -40,6 +43,14 @@ abstract class AbstractWorkerBackend extends AbstractBackend
      * Time zone database read by distribution builds of PHP.
      */
     private const ZONEINFO = '/usr/share/zoneinfo';
+
+    /**
+     * The extension's shared object in the configured extension directory, resolved once (see the class
+     * description); null until first used.
+     *
+     * @var ExtensionFile|null
+     */
+    private $extensionFile;
 
     /**
      * Name of the PHP extension, as in extension=<name>.
@@ -168,8 +179,7 @@ abstract class AbstractWorkerBackend extends AbstractBackend
     protected function sandboxResources(): array
     {
         $resources = [\dirname(__DIR__, 2) . '/resources/workers', __DIR__ . '/Worker'];
-        $directory = $this->getOptions()->getPhpExtensionDirectory();
-        $file = $directory !== null ? ExtensionFile::path($directory, $this->extension()) : null;
+        $file = $this->extensionPath();
 
         return $file !== null ? array_merge($resources, [$file]) : $resources;
     }
@@ -182,9 +192,8 @@ abstract class AbstractWorkerBackend extends AbstractBackend
         if (($facts['load'] ?? '0') !== '1') {
             return [];
         }
-        $configured = $this->getOptions()->getPhpExtensionDirectory();
-        if ($configured !== null) {
-            $file = ExtensionFile::path($configured, $this->extension());
+        if ($this->getOptions()->getPhpExtensionDirectory() !== null) {
+            $file = $this->extensionPath();
 
             return $file !== null ? [$file] : [];
         }
@@ -249,27 +258,61 @@ abstract class AbstractWorkerBackend extends AbstractBackend
 
     /**
      * The value of extension= that loads the extension: its name, found in the binary's built-in extension
-     * directory, or the resolved path of its shared object in the configured directory.
+     * directory, or the resolved path of its shared object in the configured directory (never the configured path,
+     * which PHP would resolve again).
+     *
+     * @throws ConversionFailedException when the shared object of the configured directory must not be loaded
      */
     private function extensionToLoad(): string
     {
-        $directory = $this->getOptions()->getPhpExtensionDirectory();
-        if ($directory === null) {
+        if ($this->getOptions()->getPhpExtensionDirectory() === null) {
             return $this->extension();
         }
-        $file = ExtensionFile::path($directory, $this->extension());
+        $file = $this->extensionPath();
+        if ($file === null) {
+            throw new ConversionFailedException(sprintf(
+                'The %s backend does not load its extension: %s.',
+                $this->getName(),
+                $this->extensionFile !== null ? (string) $this->extensionFile->getProblem() : 'it is not resolved'
+            ));
+        }
 
-        return $file !== null ? $file : rtrim($directory, '/') . '/' . $this->extension() . '.so';
+        return $file;
     }
 
     /**
-     * Why the extension must not be loaded from the configured directory (ExtensionFile), or null.
+     * Why the extension must not be loaded from the configured directory (ExtensionFile), or null; called before it
+     * is loaded. The resolved file is checked again; the configured path is resolved only on first use or after a
+     * failed check.
      */
     private function extensionProblem(): ?string
     {
         $directory = $this->getOptions()->getPhpExtensionDirectory();
+        if ($directory === null) {
+            return null;
+        }
+        $this->extensionFile = $this->extensionFile !== null && $this->extensionFile->getPath() !== null
+            ? $this->extensionFile->checkAgain()
+            : ExtensionFile::resolve($directory, $this->extension());
 
-        return $directory !== null ? ExtensionFile::problem($directory, $this->extension()) : null;
+        return $this->extensionFile->getProblem();
+    }
+
+    /**
+     * The resolved and checked shared object of the configured directory, or null when none is configured or it
+     * must not be loaded; resolves the configured path on first use only.
+     */
+    private function extensionPath(): ?string
+    {
+        $directory = $this->getOptions()->getPhpExtensionDirectory();
+        if ($directory === null) {
+            return null;
+        }
+        if ($this->extensionFile === null) {
+            $this->extensionFile = ExtensionFile::resolve($directory, $this->extension());
+        }
+
+        return $this->extensionFile->getPath();
     }
 
     private static function listsModule(string $output, string $module): bool

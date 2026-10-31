@@ -564,8 +564,10 @@ abstract class AbstractBackend implements BackendInterface
                 $timeoutSeconds,
                 $facts
             );
+            // The command first: it checks the files that the run then mounts (AbstractWorkerBackend).
+            $command = $this->command($job, $input, $output, $programs, $facts);
             $result = $runner->execute(
-                $this->command($job, $input, $output, $programs, $facts),
+                $command,
                 $directory,
                 null,
                 array_merge([$job->getInputPath()], $this->getSandboxResourcePaths())

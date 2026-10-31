@@ -162,6 +162,7 @@ final class WorkerBackendTest extends TestCase
             'link to a shared object in a writable directory' => ['link ext/gd.so planted/gd.so', $target],
             'link to the directory in a writable directory' => ['link ext planted', $directory],
             'missing directory' => ['remove ext', 'the PHP extension directory does not exist'],
+            'missing shared object' => ['unlink ext/gd.so', 'the PHP extension directory does not contain gd.so'],
         ];
     }
 
@@ -182,6 +183,8 @@ final class WorkerBackendTest extends TestCase
             self::assertTrue(chmod($root . '/' . $argument, (int) octdec($path)));
         } elseif ($action === 'link') {
             self::assertTrue(rename($root . '/' . $path, $root . '/old') && symlink($root . '/' . $argument, $root . '/' . $path));
+        } elseif ($action === 'unlink') {
+            self::assertTrue(unlink($root . '/' . $path));
         } else {
             self::assertTrue(unlink($root . '/ext/gd.so') && rmdir($root . '/ext'));
         }
@@ -232,6 +235,38 @@ final class WorkerBackendTest extends TestCase
         $this->expectException(ConversionFailedException::class);
         $this->expectExceptionMessage('The gd backend does not load its extension: the extension file is not owned by root or the effective user, or others can write it.');
         $backend->commandLine($job, ['load' => '1']);
+    }
+
+    /**
+     * The configured path is resolved once: when another user retargets a symbolic link in it (here, to a directory
+     * that others can write to, with a planted gd.so), the backend keeps naming and mounting the shared object it
+     * checked, and only a new backend resolves the link again, and refuses it.
+     */
+    public function testARetargetedLinkToTheExtensionDirectoryIsNotFollowed(): void
+    {
+        $root = $this->fakePrograms(['php']);
+        self::assertTrue(mkdir($root . '/ext', 0700) && touch($root . '/ext/gd.so') && chmod($root . '/ext/gd.so', 0600));
+        self::assertTrue(mkdir($root . '/planted', 0777) && chmod($root . '/planted', 0777) && touch($root . '/planted/gd.so'));
+        self::assertTrue(symlink($root . '/ext', $root . '/link'));
+        $options = (new BackendOptions())->withPhpBinary($root . '/php')->withPhpExtensionDirectory($root . '/link');
+        $backend = new GdBackend($this->modulesOnlyRunner(), $options);
+        $job = self::job(self::info(ImageFormat::PNG), ImageFormat::WEBP);
+        $checked = (string) realpath($root . '/ext/gd.so');
+        $planted = (string) realpath($root . '/planted/gd.so');
+        self::assertContains('extension=' . $checked, $backend->commandLine($job, ['load' => '1']));
+
+        self::assertTrue(symlink($root . '/planted', $root . '/link.new') && rename($root . '/link.new', $root . '/link'));
+        self::assertSame($planted, realpath($root . '/link/gd.so'));
+
+        $command = $backend->commandLine($job, ['load' => '1']);
+        self::assertContains('extension=' . $checked, $command);
+        self::assertNotContains('extension=' . $planted, $command);
+        self::assertContains($checked, $backend->getSandboxResourcePaths());
+        self::assertNotContains($planted, $backend->getSandboxResourcePaths());
+
+        $this->expectException(ConversionFailedException::class);
+        $this->expectExceptionMessage('The gd backend does not load its extension: the PHP extension directory is not owned by root or the effective user, or others can write to it.');
+        (new GdBackend($this->modulesOnlyRunner(), $options))->commandLine($job, ['load' => '1']);
     }
 
     /**
