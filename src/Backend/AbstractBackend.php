@@ -195,6 +195,58 @@ abstract class AbstractBackend implements BackendInterface
     }
 
     /**
+     * An address space estimate from a backend's measured coefficients, saturated like addressSpace():
+     *
+     * - $fixed bytes;
+     * - $perInputPixel bytes per decoded pixel (every frame of an animated output);
+     * - $perOutputPixel bytes per encoded pixel of one frame;
+     * - $perDeepPixel bytes per pixel of the larger of input and output when the input holds more than 8 bits per
+     *   channel (ImageInfo::getBitDepth());
+     * - $perFramePixel bytes per encoded pixel of every frame of an animated output;
+     * - $perResizedPixel bytes per encoded pixel of one frame when the output size differs from the input size.
+     *
+     * The coefficients come from the peak address space (VmPeak) of the backend's own command line and environment
+     * on RGBA noise, the costliest content: at 1 and 4 megapixels for every effort, at 6 and 20 megapixels for some,
+     * with 8 and 16 bits per channel, from every input format, resized and not. The bytes per pixel are 15 % above
+     * the steepest slope between two sizes, and the fixed part puts the estimate at least 15 % plus 16 MiB above
+     * every peak; for vips and Imagick, whose encoder threads sometimes reserve a second malloc arena (64 MiB), also
+     * at least 80 MiB above the lowest peak of each job. The thread counts do not depend on the number of
+     * processors, so neither do the peaks.
+     */
+    final protected static function estimate(
+        BackendJob $job,
+        int $fixed,
+        int $perInputPixel,
+        int $perOutputPixel,
+        int $perDeepPixel = 0,
+        int $perFramePixel = 0,
+        int $perResizedPixel = 0
+    ): int {
+        $input = (float) $job->getInputPixels();
+        $frame = (float) $job->getWidth() * $job->getHeight();
+        $bytes = $fixed + $perInputPixel * $input + $perOutputPixel * $frame;
+        if ($job->getInput()->getBitDepth() > 8) {
+            $bytes += $perDeepPixel * max($input, (float) $job->getOutputPixels());
+        }
+        if ($job->isAnimated()) {
+            $bytes += $perFramePixel * (float) $job->getOutputPixels();
+        }
+        if ($job->isResized()) {
+            $bytes += $perResizedPixel * $frame;
+        }
+
+        return (int) min(PHP_INT_MAX / 4, $bytes);
+    }
+
+    /**
+     * The libwebp method (0 to 6) of a job: its effort, from 0 to 9, scaled.
+     */
+    final protected static function webpMethod(BackendJob $job): int
+    {
+        return (int) round($job->getEffort() * 6 / 9);
+    }
+
+    /**
      * Facts learned while probing that the command lines depend on.
      *
      * @return array<string, string>

@@ -16,20 +16,26 @@ final class GdBackend extends AbstractWorkerBackend
     public const NAME = 'gd';
 
     /**
-     * Fixed address space of PHP with GD, and bytes per decoded pixel (a truecolor image takes 4) and per encoded
-     * pixel by output format. Measured in the sandbox on RGBA noise (the costliest content), about 15 % added:
-     * 79 and 103 MiB at 1 and 4 megapixels for JPEG, PNG and GIF, 79 and 111 MiB for BMP, 119 and 231 MiB for WEBP,
-     * 119 and 239 MiB for lossless WEBP.
+     * Address space by output (AbstractBackend::estimate()): fixed bytes and bytes per encoded pixel, on top of 8
+     * bytes per decoded pixel (a truecolor image takes 4). The peak address space (VmPeak, MiB) of PHP with GD on RGBA
+     * noise at 1, 4 and 20 megapixels, a 16-bit input in parentheses (GD reads it as 8 bits); the effort changes
+     * neither (GD has no WEBP method, and the PNG level does not change the peak):
+     *
+     * | Output                | Fixed   | Per pixel | 1 MP      | 4 MP      | 20 MP |
+     * | --------------------- | ------- | --------- | --------- | --------- | ----- |
+     * | JPEG, PNG, GIF, BMP   | 96 MiB  | 2         | 72 (72)   | 95 (95)   | 217   |
+     * | WEBP                  | 112 MiB | 40        | 111 (111) | 224 (224) | 853   |
+     * | WEBP lossless         | 128 MiB | 36        | 123 (123) | 232 (232) |       |
      */
-    private const BASE_BYTES = 100663296;
+    private const OUTPUT_BYTES = [
+        'still' => [96 * self::MIB, 2],
+        'webp' => [112 * self::MIB, 40],
+        'webp_lossless' => [128 * self::MIB, 36],
+    ];
 
     private const BYTES_PER_INPUT_PIXEL = 8;
 
-    private const BYTES_PER_OUTPUT_PIXEL = [ImageFormat::WEBP => 36];
-
-    private const LOSSLESS_WEBP_BYTES_PER_PIXEL = 44;
-
-    private const BYTES_PER_OTHER_OUTPUT_PIXEL = 8;
+    private const MIB = 1048576;
 
     public function getName(): string
     {
@@ -38,15 +44,14 @@ final class GdBackend extends AbstractWorkerBackend
 
     public function estimateMemoryBytes(BackendJob $job): int
     {
-        return self::addressSpace(
-            self::BASE_BYTES,
-            self::BYTES_PER_INPUT_PIXEL,
-            $job->getInputPixels(),
-            $job->needsLosslessMode()
-                ? self::LOSSLESS_WEBP_BYTES_PER_PIXEL
-                : self::BYTES_PER_OUTPUT_PIXEL[$job->getOutputFormat()] ?? self::BYTES_PER_OTHER_OUTPUT_PIXEL,
-            $job->getOutputPixels()
-        );
+        if ($job->getOutputFormat() !== ImageFormat::WEBP) {
+            $profile = 'still';
+        } else {
+            $profile = $job->needsLosslessMode() ? 'webp_lossless' : 'webp';
+        }
+        list($fixed, $perPixel) = self::OUTPUT_BYTES[$profile];
+
+        return self::estimate($job, $fixed, self::BYTES_PER_INPUT_PIXEL, $perPixel);
     }
 
     protected function extension(): string

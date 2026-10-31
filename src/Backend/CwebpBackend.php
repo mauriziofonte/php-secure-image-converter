@@ -25,15 +25,32 @@ final class CwebpBackend extends AbstractBackend
     public const NAME = 'cwebp';
 
     /**
-     * Fixed address space and bytes per decoded and encoded pixel. Measured in the sandbox on RGBA noise (the
-     * costliest content): 47 MiB at 1 megapixel and 143 MiB at 4, about 15 MiB plus 34 bytes per pixel (lossless: 63
-     * and 151 MiB); with about 15 % added.
+     * Address space by profile (AbstractBackend::estimate()): fixed bytes and bytes per encoded pixel, on top of 8
+     * bytes per decoded pixel. The peak address space (VmPeak, MiB) of the profile's costliest effort on RGBA noise at
+     * 1, 4, 6 and 20 megapixels, a 16-bit input in parentheses:
+     *
+     * | Profile                       | Fixed   | Per pixel | 1 MP    | 4 MP      | 6 MP | 20 MP |
+     * | ----------------------------- | ------- | --------- | ------- | --------- | ---- | ----- |
+     * | lossy, effort 0 to 8 (-m 0-5) | 32 MiB  | 31        | 42 (42) | 139 (139) |      | 646   |
+     * | lossy, effort 9 (-m 6)        | 32 MiB  | 51        | 62 (62) | 208 (208) | 305  |       |
+     * | lossless, effort 0 to 7 (-z)  | 48 MiB  | 33        | 60 (60) | 147 (147) | 215  |       |
+     * | lossless, effort 8 and 9      | 48 MiB  | 57        | 73 (74) | 234 (234) |      |       |
+     *
+     * cwebp reads a 16-bit PNG as 8 bits. A resize keeps a rescaled copy: RESIZE_BYTES more per encoded pixel (164
+     * MiB from 1 to 4 megapixels, against 139 MiB without resize). Measured with libwebp 1.3.
      */
-    private const BASE_BYTES = 33554432;
+    private const PROFILES = [
+        'lossy' => [32 * self::MIB, 31],
+        'lossy_slow' => [32 * self::MIB, 51],
+        'lossless' => [48 * self::MIB, 33],
+        'lossless_slow' => [48 * self::MIB, 57],
+    ];
 
     private const BYTES_PER_INPUT_PIXEL = 8;
 
-    private const BYTES_PER_OUTPUT_PIXEL = 32;
+    private const RESIZE_BYTES = 16;
+
+    private const MIB = 1048576;
 
     public function getName(): string
     {
@@ -42,7 +59,14 @@ final class CwebpBackend extends AbstractBackend
 
     public function estimateMemoryBytes(BackendJob $job): int
     {
-        return self::addressSpace(self::BASE_BYTES, self::BYTES_PER_INPUT_PIXEL, $job->getInputPixels(), self::BYTES_PER_OUTPUT_PIXEL, $job->getOutputPixels());
+        if ($job->needsLosslessMode()) {
+            $profile = $job->getEffort() >= 8 ? 'lossless_slow' : 'lossless';
+        } else {
+            $profile = self::webpMethod($job) === 6 ? 'lossy_slow' : 'lossy';
+        }
+        list($fixed, $perPixel) = self::PROFILES[$profile];
+
+        return self::estimate($job, $fixed, self::BYTES_PER_INPUT_PIXEL, $perPixel, 0, 0, self::RESIZE_BYTES);
     }
 
     protected function programs(ExecutableFinder $finder): array
@@ -74,7 +98,7 @@ final class CwebpBackend extends AbstractBackend
         if ($job->needsLosslessMode()) {
             array_push($command, '-z', (string) $job->getEffort());
         } else {
-            array_push($command, '-q', (string) $job->getQuality(), '-m', (string) (int) round($job->getEffort() * 6 / 9));
+            array_push($command, '-q', (string) $job->getQuality(), '-m', (string) self::webpMethod($job));
         }
         if (!$job->shouldStripMetadata()) {
             $metadata = 'all';

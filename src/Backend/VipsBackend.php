@@ -57,36 +57,46 @@ final class VipsBackend extends AbstractBackend
     private const BASE_BYTES = 201326592;
 
     /**
-     * Address space per output format: fixed bytes and bytes per encoded pixel of one frame. Measured in the sandbox
-     * on RGBA noise (the costliest content) at 1 and 4 megapixels, with 8 bytes per decoded pixel on top, and about
-     * 15 % added; the minimum that converted twice in a row is in parentheses.
+     * Address space by profile (AbstractBackend::estimate()): fixed bytes, bytes per encoded pixel of one frame, and
+     * bytes per pixel more for an input of more than 8 bits per channel. The peak address space (VmPeak, MiB) of the
+     * profile's costliest effort on RGBA noise at 1, 4, 6 and 20 megapixels, a 16-bit input in parentheses:
      *
-     * | Output          | Fixed   | Per pixel | Measured at 1 and 4 megapixels                     |
-     * | --------------- | ------- | --------- | -------------------------------------------------- |
-     * | JPEG, PNG, TIFF | 192 MiB | 4         | 167 to 191 MiB                                     |
-     * | WEBP            | 192 MiB | 40        | 199 and 326 MiB                                    |
-     * | WEBP lossless   | 192 MiB | 64        | 215 and 390 MiB                                    |
-     * | GIF             | 320 MiB | 24        | 294 and 366 MiB (libimagequant)                    |
-     * | AVIF            | 288 MiB | 32        | 278 and 382 MiB (lossless: 302 and 390 MiB); below |
-     * |                 |         |           | 256 MiB, 1 run in 12 of a 40 x 30 image wrote an   |
-     * |                 |         |           | empty AVIF with exit code 0                        |
+     * | Profile                     | Fixed   | Per pixel | 16-bit | 1 MP      | 4 MP      | 6 MP | 20 MP      |
+     * | --------------------------- | ------- | --------- | ------ | --------- | --------- | ---- | ---------- |
+     * | JPEG, PNG, TIFF             | 352 MiB | 3         | 0      | 268 (268) | 277 (277) |      | 364        |
+     * | WEBP, effort 0 to 8         | 304 MiB | 45        | 0      | 269 (269) | 391 (395) | 461  | 1010 (952) |
+     * | WEBP, effort 9 (method 6)   | 288 MiB | 69        | 12     | 277 (283) | 447 (516) | 564  |            |
+     * | WEBP lossless               | 320 MiB | 44        | 0      | 272 (277) | 390 (411) |      |            |
+     * | AVIF, effort 0 to 2         | 320 MiB | 39        | 2      | 278 (282) | 378 (393) |      | 870        |
+     * | AVIF, effort 3 to 9         | 352 MiB | 54        | 0      | 297 (304) | 482 (460) | 526  |            |
+     * | GIF                         | 320 MiB | 58        | 0      | 287 (293) | 445 (456) | 410  |            |
      *
-     * An animation is decoded whole and encoded frame by frame, keeping 4 bytes per encoded pixel of every frame.
+     * Lossless AVIF counts as effort 3 to 9. On top come INPUT_BYTES per decoded pixel and, for an animation, which
+     * is decoded whole and encoded frame by frame, 4 bytes per encoded pixel of every frame. Measured with libvips
+     * 8.15, libwebp 1.3, libheif 1.17 and libaom 3.8; with less than the estimate, vips fails with SIGSEGV or "mux
+     * error", hangs, or writes an empty AVIF with exit code 0.
      */
-    private const OUTPUT_BYTES = [
-        ImageFormat::JPEG => [201326592, 4],
-        ImageFormat::PNG => [201326592, 4],
-        ImageFormat::TIFF => [201326592, 4],
-        ImageFormat::WEBP => [201326592, 40],
-        ImageFormat::GIF => [335544320, 24],
-        ImageFormat::AVIF => [301989888, 32],
+    private const PROFILES = [
+        'still' => [352 * self::MIB, 3, 0],
+        'webp' => [304 * self::MIB, 45, 0],
+        'webp_slow' => [288 * self::MIB, 69, 12],
+        'webp_lossless' => [320 * self::MIB, 44, 0],
+        'avif_fast' => [320 * self::MIB, 39, 2],
+        'avif' => [352 * self::MIB, 54, 0],
+        'gif' => [320 * self::MIB, 58, 0],
     ];
 
-    private const LOSSLESS_WEBP_BYTES_PER_PIXEL = 64;
+    /**
+     * Bytes per decoded pixel: 4, and 12 for the WEBP and AVIF decoders, which hold the whole image (WEBP at
+     * 4 megapixels peaks at 425 MiB from a WEBP input and 391 from PNG).
+     */
+    private const INPUT_BYTES = [ImageFormat::WEBP => 12, ImageFormat::AVIF => 12];
 
-    private const BYTES_PER_INPUT_PIXEL = 8;
+    private const OTHER_INPUT_BYTES = 4;
 
     private const BYTES_PER_ANIMATION_PIXEL = 4;
+
+    private const MIB = 1048576;
 
     /**
      * A one-pixel PPM, which only ppmload, an untrusted loader, reads: the probe of VIPS_BLOCK_UNTRUSTED.
@@ -100,15 +110,16 @@ final class VipsBackend extends AbstractBackend
 
     public function estimateMemoryBytes(BackendJob $job): int
     {
-        list($base, $perPixel) = self::OUTPUT_BYTES[$job->getOutputFormat()] ?? [self::BASE_BYTES, 40];
-        if ($job->needsLosslessMode() && $job->getOutputFormat() === ImageFormat::WEBP) {
-            $perPixel = self::LOSSLESS_WEBP_BYTES_PER_PIXEL;
-        }
-        $estimate = self::addressSpace($base, self::BYTES_PER_INPUT_PIXEL, $job->getInputPixels(), $perPixel, $job->getWidth() * $job->getHeight());
+        list($fixed, $perPixel, $perDeepPixel) = self::PROFILES[self::profile($job)];
 
-        return $job->isAnimated()
-            ? self::addressSpace($estimate, 0, 0, self::BYTES_PER_ANIMATION_PIXEL, $job->getOutputPixels())
-            : $estimate;
+        return self::estimate(
+            $job,
+            $fixed,
+            self::INPUT_BYTES[$job->getInputFormat()] ?? self::OTHER_INPUT_BYTES,
+            $perPixel,
+            $perDeepPixel,
+            self::BYTES_PER_ANIMATION_PIXEL
+        );
     }
 
     protected function programs(ExecutableFinder $finder): array
@@ -258,6 +269,27 @@ final class VipsBackend extends AbstractBackend
     }
 
     /**
+     * The row of PROFILES for a job.
+     */
+    private static function profile(BackendJob $job): string
+    {
+        switch ($job->getOutputFormat()) {
+            case ImageFormat::WEBP:
+                if ($job->needsLosslessMode()) {
+                    return 'webp_lossless';
+                }
+
+                return self::webpMethod($job) === 6 ? 'webp_slow' : 'webp';
+            case ImageFormat::AVIF:
+                return $job->getEffort() <= 2 && !$job->needsLosslessMode() ? 'avif_fast' : 'avif';
+            case ImageFormat::GIF:
+                return 'gif';
+            default:
+                return 'still';
+        }
+    }
+
+    /**
      * @param array<string, string> $facts
      *
      * @return list<string>
@@ -267,7 +299,7 @@ final class VipsBackend extends AbstractBackend
         $quality = (string) $job->getQuality();
         switch ($job->getOutputFormat()) {
             case ImageFormat::WEBP:
-                $options = ['Q=' . $quality, 'effort=' . (int) round($job->getEffort() * 6 / 9)];
+                $options = ['Q=' . $quality, 'effort=' . self::webpMethod($job)];
                 break;
             case ImageFormat::AVIF:
                 // AV1 effort 9 (speed 0) takes over six times as long as 8 for a negligible gain.

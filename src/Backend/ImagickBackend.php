@@ -15,7 +15,8 @@ use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
  * but the raster formats of the library, every delegate, filter and indirect read, and caps the resources), found
  * through MAGICK_CONFIGURE_PATH and, in the sandbox, the only policy ImageMagick sees. It also lowers the memory and
  * map limits to the job's budget and disables the disk cache for each job. MAGICK_TEMPORARY_PATH points to the job's
- * working directory, MAGICK_THREAD_LIMIT is 1 and OpenCL is off.
+ * working directory, MAGICK_THREAD_LIMIT is 1 and OpenCL is off. MALLOC_ARENA_MAX=2 bounds the address space that the
+ * threads of the AVIF encoder (libheif and libaom run four, whatever the number of processors) reserve for malloc.
  *
  * Animations are not written: an animated input is converted to its first frame only.
  */
@@ -24,22 +25,40 @@ final class ImagickBackend extends AbstractWorkerBackend
     public const NAME = 'imagick';
 
     /**
-     * Fixed address space of PHP with ImageMagick, bytes per decoded pixel (16 bits per channel in the pixel cache),
-     * and fixed bytes and bytes per encoded pixel by output format. Measured in the sandbox on RGBA noise (the
-     * costliest content), about 15 % added: 87 and 119 MiB at 1 and 4 megapixels for JPEG, PNG, BMP and TIFF, 119 and
-     * 247 MiB for WEBP (lossless: 127 and 239 MiB), 223 and 271 MiB for GIF, 159 and 438 MiB for AVIF.
+     * Address space by profile (AbstractBackend::estimate()): fixed bytes, bytes per encoded pixel, and bytes per
+     * pixel more for an input of more than 8 bits per channel. The peak address space (VmPeak, MiB) of PHP with
+     * ImageMagick for the profile's costliest effort on RGBA noise at 1, 4, 6 and 20 megapixels, a 16-bit input in
+     * parentheses:
+     *
+     * | Profile                        | Fixed   | Per pixel | 16-bit | 1 MP      | 4 MP      | 6 MP | 20 MP |
+     * | ------------------------------ | ------- | --------- | ------ | --------- | --------- | ---- | ----- |
+     * | JPEG, PNG, TIFF, BMP           | 160 MiB | 7         | 0      | 85 (85)   | 131 (131) |      | 299   |
+     * | GIF                            | 288 MiB | 19        | 0      | 231 (231) | 306 (306) | 355  |       |
+     * | WEBP, effort 0 to 8            | 144 MiB | 42        | 0      | 114 (114) | 247 (247) | 334  | 935   |
+     * | WEBP, effort 9 (method 6)      | 160 MiB | 60        | 0      | 134 (134) | 311 (311) |      |       |
+     * | WEBP lossless                  | 160 MiB | 38        | 0      | 123 (123) | 247 (247) |      |       |
+     * | AVIF, effort 0 to 2            | 320 MiB | 27        | 11     | 264 (281) | 362 (428) |      | 877   |
+     * | AVIF, effort 3 to 9            | 320 MiB | 42        | 12     | 282 (299) | 415 (482) | 498  |       |
+     *
+     * On top come 12 bytes per decoded pixel (the pixel cache holds 16 bits per channel, whatever the input format)
+     * and, for a resize, RESIZE_BYTES per encoded pixel (the resized copy: 254 MiB from 1 to 4 megapixels, against
+     * 247 MiB without resize). Measured with ImageMagick 6.9.12 (Q16), libwebp 1.3, libheif 1.17 and libaom 3.8.
      */
-    private const BASE_BYTES = 134217728;
+    private const PROFILES = [
+        'still' => [160 * self::MIB, 7, 0],
+        'gif' => [288 * self::MIB, 19, 0],
+        'webp' => [144 * self::MIB, 42, 0],
+        'webp_slow' => [160 * self::MIB, 60, 0],
+        'webp_lossless' => [160 * self::MIB, 38, 0],
+        'avif_fast' => [320 * self::MIB, 27, 11],
+        'avif' => [320 * self::MIB, 42, 12],
+    ];
 
     private const BYTES_PER_INPUT_PIXEL = 12;
 
-    private const OUTPUT_BYTES = [
-        ImageFormat::WEBP => [0, 40],
-        ImageFormat::GIF => [134217728, 12],
-        ImageFormat::AVIF => [0, 96],
-    ];
+    private const RESIZE_BYTES = 12;
 
-    private const BYTES_PER_OTHER_OUTPUT_PIXEL = 8;
+    private const MIB = 1048576;
 
     public function getName(): string
     {
@@ -48,9 +67,9 @@ final class ImagickBackend extends AbstractWorkerBackend
 
     public function estimateMemoryBytes(BackendJob $job): int
     {
-        list($extra, $perPixel) = self::OUTPUT_BYTES[$job->getOutputFormat()] ?? [0, self::BYTES_PER_OTHER_OUTPUT_PIXEL];
+        list($fixed, $perPixel, $perDeepPixel) = self::PROFILES[self::profile($job)];
 
-        return self::addressSpace(self::BASE_BYTES + $extra, self::BYTES_PER_INPUT_PIXEL, $job->getInputPixels(), $perPixel, $job->getOutputPixels());
+        return self::estimate($job, $fixed, self::BYTES_PER_INPUT_PIXEL, $perPixel, $perDeepPixel, 0, self::RESIZE_BYTES);
     }
 
     /**
@@ -79,6 +98,7 @@ final class ImagickBackend extends AbstractWorkerBackend
             'MAGICK_TEMPORARY_PATH' => $directory->getPath(),
             'MAGICK_THREAD_LIMIT' => '1',
             'MAGICK_OCL_DEVICE' => 'OFF',
+            'MALLOC_ARENA_MAX' => '2',
         ];
     }
 
@@ -95,5 +115,26 @@ final class ImagickBackend extends AbstractWorkerBackend
     protected function workerName(): string
     {
         return 'imagick';
+    }
+
+    /**
+     * The row of PROFILES for a job.
+     */
+    private static function profile(BackendJob $job): string
+    {
+        switch ($job->getOutputFormat()) {
+            case ImageFormat::WEBP:
+                if ($job->needsLosslessMode()) {
+                    return 'webp_lossless';
+                }
+
+                return self::webpMethod($job) === 6 ? 'webp_slow' : 'webp';
+            case ImageFormat::AVIF:
+                return $job->getEffort() <= 2 ? 'avif_fast' : 'avif';
+            case ImageFormat::GIF:
+                return 'gif';
+            default:
+                return 'still';
+        }
     }
 }

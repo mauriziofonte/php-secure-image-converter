@@ -25,14 +25,32 @@ final class AvifencBackend extends AbstractBackend
     public const NAME = 'avifenc';
 
     /**
-     * Fixed address space and bytes per decoded pixel, lossy and lossless. Measured in the sandbox on RGBA noise
-     * (the costliest content): 71 and 127 MiB at 1 and 4 megapixels, 95 and 215 MiB lossless; rounded up.
+     * Address space by profile (AbstractBackend::estimate()): fixed bytes and bytes per pixel (avifenc does not
+     * resize). The peak address space (VmPeak, MiB) of the profile's costliest effort on RGBA noise at 1, 4, 6 and 20
+     * megapixels, a 16-bit input in parentheses (it is encoded with 8 bits):
+     *
+     * | Profile                          | Fixed  | Per pixel | 1 MP    | 4 MP      | 6 MP | 20 MP |
+     * | -------------------------------- | ------ | --------- | ------- | --------- | ---- | ----- |
+     * | lossy, effort 0 to 4 (-s 6-10)   | 80 MiB | 27        | 65 (65) | 120 (118) |      | 456   |
+     * | lossy, effort 5 to 9 (-s 1-4)    | 64 MiB | 46        | 69 (69) | 181 (181) |      |       |
+     * | lossless, effort 0 to 4          | 80 MiB | 52        | 92 (90) | 221 (214) | 289  |       |
+     * | lossless, effort 5 to 9          | 64 MiB | 72        | 94      | 273 (265) |      |       |
+     *
+     * Measured with libavif 1.0 and libaom 3.8 on one thread.
+     */
+    private const PROFILES = [
+        'fast' => [80 * self::MIB, 27],
+        'slow' => [64 * self::MIB, 46],
+        'lossless' => [80 * self::MIB, 52],
+        'lossless_slow' => [64 * self::MIB, 72],
+    ];
+
+    /**
+     * Address space of avifenc --help.
      */
     private const BASE_BYTES = 83886080;
 
-    private const BYTES_PER_INPUT_PIXEL = 32;
-
-    private const LOSSLESS_BYTES_PER_INPUT_PIXEL = 48;
+    private const MIB = 1048576;
 
     public function getName(): string
     {
@@ -41,13 +59,15 @@ final class AvifencBackend extends AbstractBackend
 
     public function estimateMemoryBytes(BackendJob $job): int
     {
-        return self::addressSpace(
-            self::BASE_BYTES,
-            $job->needsLosslessMode() ? self::LOSSLESS_BYTES_PER_INPUT_PIXEL : self::BYTES_PER_INPUT_PIXEL,
-            $job->getInputPixels(),
-            0,
-            0
-        );
+        $fast = self::speed($job) >= 6;
+        if ($job->needsLosslessMode()) {
+            $profile = $fast ? 'lossless' : 'lossless_slow';
+        } else {
+            $profile = $fast ? 'fast' : 'slow';
+        }
+        list($fixed, $perPixel) = self::PROFILES[$profile];
+
+        return self::estimate($job, $fixed, 0, $perPixel);
     }
 
     protected function programs(ExecutableFinder $finder): array
@@ -82,8 +102,7 @@ final class AvifencBackend extends AbstractBackend
 
     protected function command(BackendJob $job, string $input, string $output, array $programs, array $facts): array
     {
-        $speed = max(1, 10 - (int) round($job->getEffort() * 10 / 9));
-        $command = [$programs['avifenc'], '-j', '1', '-s', (string) $speed, '-d', '8'];
+        $command = [$programs['avifenc'], '-j', '1', '-s', (string) self::speed($job), '-d', '8'];
         if ($job->needsLosslessMode()) {
             $command[] = '-l';
         } elseif (($facts['qcolor'] ?? '0') === '1') {
@@ -101,5 +120,13 @@ final class AvifencBackend extends AbstractBackend
         array_push($command, $input, $output);
 
         return $command;
+    }
+
+    /**
+     * The libavif speed of a job: 10 at effort 0 down to 1 at efforts 8 and 9.
+     */
+    private static function speed(BackendJob $job): int
+    {
+        return max(1, 10 - (int) round($job->getEffort() * 10 / 9));
     }
 }

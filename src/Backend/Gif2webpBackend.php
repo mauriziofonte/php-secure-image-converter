@@ -85,7 +85,7 @@ final class Gif2webpBackend extends AbstractBackend
         } else {
             array_push($command, '-mixed', '-q', (string) $job->getQuality());
         }
-        array_push($command, '-m', (string) (int) round($job->getEffort() * 6 / 9));
+        array_push($command, '-m', (string) self::webpMethod($job));
         if (!$job->shouldStripMetadata()) {
             $metadata = 'all';
         } else {

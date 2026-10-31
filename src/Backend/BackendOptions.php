@@ -32,16 +32,31 @@ use Psr\Log\NullLogger;
  * the PHP user can reach, such as one in the application's own cache directory: withCapabilityCache(true,
  * '/srv/app/var/cache/image-converter'); it is created with mode 0700 when missing.
  *
- * Memory: every backend estimates the address space a job needs from its pixels (every frame of an animation), the
- * output pixels and the program's own overhead (BackendInterface::estimateMemoryBytes()), and runs the process with
- * exactly that limit instead of the fixed address space limit of the runner's ResourceLimits. A job whose estimate is
- * above the ceiling is not run by that backend: BackendResolver picks another, or reports resource_limit. The
- * estimates were measured on noise, the costliest content, so that any real image fits. With the default Limits (40
- * megapixels per frame, 400 megapixels in all frames), every still image fits below the default ceiling in cwebp
- * and avifenc, and every lossy one in vips and GD; above it are lossless WEBP beyond about 26 megapixels in vips,
- * and WEBP beyond about 38 and AVIF beyond about 18 in Imagick. The largest animations fit only in gif2webp, which
- * keeps one frame in memory (vips decodes every frame). The CPU time, file size and open file limits of the runner
- * apply unchanged.
+ * Memory: every backend estimates the address space a job needs (BackendInterface::estimateMemoryBytes()) from the
+ * pixels it decodes (every frame of a kept animation) and encodes, the output format, the effort, the lossless mode,
+ * the bits per channel and the input format, and runs the process with exactly that limit instead of the fixed
+ * address space limit of the runner's ResourceLimits. The estimates are peaks measured on noise, the costliest
+ * content, plus a margin (AbstractBackend::estimate()), so that any real image fits. A job whose estimate is above
+ * the ceiling is not run by that backend: BackendResolver picks another, or reports resource_limit. The largest still
+ * image, in megapixels, that each backend takes below the default ceiling, with 8 bits per channel (16 bits in
+ * parentheses where fewer); the default Limits allow 40 megapixels per frame, and the default effort is 4:
+ *
+ * | Output               | Effort | vips    | cwebp | GD  | Imagick | avifenc |
+ * | -------------------- | ------ | ------- | ----- | --- | ------- | ------- |
+ * | JPEG, PNG, TIFF, BMP | any    | 254     |       | 204 | 104     |         |
+ * | GIF                  | any    | 29      |       | 204 | 59      |         |
+ * | WEBP                 | 0 to 8 | 37      | 54    | 42  | 36      |         |
+ * | WEBP                 | 9      | 25 (21) | 35    | 42  | 27      |         |
+ * | WEBP lossless        | 0 to 7 | 37      | 51    | 45  | 39      |         |
+ * | WEBP lossless        | 8, 9   | 37      | 32    | 45  | 39      |         |
+ * | AVIF                 | 0 to 2 | 42 (40) |       |     | 46 (36) | 76      |
+ * | AVIF                 | 3, 4   | 30      |       |     | 33 (27) | 76      |
+ * | AVIF                 | 5 to 9 | 30      |       |     | 33 (27) | 45      |
+ * | AVIF lossless        | 0 to 4 | 30      |       |     |         | 39      |
+ * | AVIF lossless        | 5 to 9 | 30      |       |     |         | 28      |
+ *
+ * The largest animations fit only in gif2webp, which keeps one frame in memory (vips decodes every frame). The CPU
+ * time, file size and open file limits of the runner apply unchanged.
  */
 final class BackendOptions
 {

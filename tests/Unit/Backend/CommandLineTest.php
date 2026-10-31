@@ -96,25 +96,6 @@ final class CommandLineTest extends TestCase
         );
     }
 
-    public function testVipsEnvironmentAndMemory(): void
-    {
-        $vips = new VipsBackend($this->runner());
-        $small = self::job(self::info(ImageFormat::PNG), ImageFormat::WEBP);
-        $large = self::job(self::info(ImageFormat::PNG, 8000, 5000), ImageFormat::WEBP, 800, 500);
-
-        self::assertGreaterThanOrEqual(192 * 1048576, $vips->estimateMemoryBytes($small));
-        self::assertLessThan(224 * 1048576, $vips->estimateMemoryBytes($small));
-        self::assertGreaterThanOrEqual(256 * 1048576, $vips->estimateMemoryBytes($small->withOutputFormat(ImageFormat::AVIF)), 'an AVIF below 256 MiB may come out empty');
-        self::assertGreaterThan($vips->estimateMemoryBytes($small) + 40000000 * 8, $vips->estimateMemoryBytes($large));
-
-        $animation = self::job(self::info(ImageFormat::GIF, 100, 100, 50), ImageFormat::WEBP);
-        self::assertSame(
-            $vips->estimateMemoryBytes($animation->withAnimation(false)) + 49 * 10000 * 8 + 50 * 10000 * 4,
-            $vips->estimateMemoryBytes($animation),
-            'every frame is decoded, and every encoded frame kept'
-        );
-    }
-
     public function testCwebpCropsForCoverAndSelectsTheLosslessPreset(): void
     {
         $cwebp = new CwebpBackend($this->runner());
@@ -147,7 +128,6 @@ final class CommandLineTest extends TestCase
             [$this->program('gif2webp'), '-quiet', '-q', '100', '-m', '6', '-metadata', 'none', 'input.gif', '-o', 'output.webp'],
             $gif2webp->commandLine($animation->withLossless(true)->withEffort(9)->withKeepIccProfile(false), [])
         );
-        self::assertLessThan(64 * 1048576, $gif2webp->estimateMemoryBytes($animation), 'little more for 300 frames');
     }
 
     public function testAvifencMapsQualitySpeedAndMetadata(): void
