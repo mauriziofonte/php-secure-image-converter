@@ -78,7 +78,7 @@ abstract class AbstractBackend implements BackendInterface
     /**
      * Version of the probing logic, part of the cache fingerprint.
      */
-    private const PROBE_VERSION = 3;
+    private const PROBE_VERSION = 4;
 
     /**
      * Prefix of the facts that hold the directories of the libraries the programs load (library_0 to library_7).
@@ -125,6 +125,11 @@ abstract class AbstractBackend implements BackendInterface
      * @var array<string, string|null>|null
      */
     private $programs;
+
+    /**
+     * @var ProcessResult|null
+     */
+    private $lastDiscoveryResult;
 
     public function __construct(ProcessRunnerInterface $runner, ?BackendOptions $options = null)
     {
@@ -407,12 +412,22 @@ abstract class AbstractBackend implements BackendInterface
      */
     final protected function execute(array $command, WorkingDirectory $directory, ?array $environment = null): ProcessResult
     {
-        return $this->runnerFor(
+        return $this->lastDiscoveryResult = $this->runnerFor(
             null,
             $environment !== null ? $environment : $this->environment($directory, []),
             self::PROBE_TIMEOUT_SECONDS,
             []
         )->execute($command, $directory, null, $this->getSandboxResourcePaths());
+    }
+
+    /**
+     * The result of the last discovery command this backend ran (the failing one when discovery stopped at a failure),
+     * or null when it ran none; for diagnostics and tests. Its output can hold paths and messages of the host, which
+     * the unavailable reason of the capabilities leaves out.
+     */
+    final public function getLastDiscoveryResult(): ?ProcessResult
+    {
+        return $this->lastDiscoveryResult;
     }
 
     /**

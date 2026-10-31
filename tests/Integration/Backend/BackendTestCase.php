@@ -251,15 +251,16 @@ abstract class BackendTestCase extends TestCase
             self::$backends[$name] = $backend;
         }
         $backend = self::$backends[$name];
-        self::requireAvailable($backend->getCapabilities());
+        self::requireAvailable($backend->getCapabilities(), $backend);
 
         return $backend;
     }
 
     /**
-     * Skips the test, or fails it for an expected backend, when the capabilities say unavailable.
+     * Skips the test, or fails it for an expected backend, when the capabilities say unavailable; the failure of an
+     * expected backend shows how its discovery failed (see diagnosis()).
      */
-    protected static function requireAvailable(BackendCapabilities $capabilities): void
+    protected static function requireAvailable(BackendCapabilities $capabilities, ?AbstractBackend $backend = null): void
     {
         if ($capabilities->isAvailable()) {
             return;
@@ -270,9 +271,37 @@ abstract class BackendTestCase extends TestCase
             (string) $capabilities->getUnavailableReason()
         );
         if (self::isExpected($capabilities->getBackend())) {
-            self::fail($message . ' ' . self::EXPECTED_BACKENDS_VARIABLE . ' requires it.');
+            self::fail($message . ' ' . self::EXPECTED_BACKENDS_VARIABLE . ' requires it.' . ($backend !== null ? self::diagnosis($backend) : ''));
         }
         self::markTestSkipped($message);
+    }
+
+    /**
+     * How the discovery of a backend fails, run again: the exit code or signal of its last command, and the end of its
+     * standard error and output (the capabilities keep only a reason without host details).
+     */
+    protected static function diagnosis(AbstractBackend $backend): string
+    {
+        try {
+            $facts = $backend->discoverFacts();
+        } catch (\Exception $exception) {
+            return sprintf(' Discovery threw %s: %s', get_class($exception), $exception->getMessage());
+        }
+        $result = $backend->getLastDiscoveryResult();
+        if ($result === null) {
+            return ' Discovery ran no command.';
+        }
+
+        return sprintf(
+            "\nDiscovery again: %s\nLast command: exit code %s, signal %s, %s level%s\nstderr:\n%s\nstdout:\n%s",
+            (string) ($facts[AbstractBackend::FACT_UNAVAILABLE] ?? 'available'),
+            var_export($result->getExitCode(), true),
+            var_export($result->getSignal(), true),
+            $result->getIsolationLevel(),
+            $result->isTimedOut() ? ', timed out' : '',
+            substr($result->getStderr(), -4000),
+            substr($result->getStdout(), -2000)
+        );
     }
 
     /**
@@ -293,7 +322,7 @@ abstract class BackendTestCase extends TestCase
             if ($capabilities->isAvailable()) {
                 $backends[] = self::$backends[$name];
             } elseif (self::isExpected($name)) {
-                self::fail(sprintf('The %s backend is unavailable: %s.', $name, (string) $capabilities->getUnavailableReason()));
+                self::fail(sprintf('The %s backend is unavailable: %s.', $name, (string) $capabilities->getUnavailableReason()) . self::diagnosis(self::$backends[$name]));
             }
         }
         if ($backends === []) {

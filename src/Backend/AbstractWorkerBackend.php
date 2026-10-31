@@ -10,6 +10,7 @@ use Mfonte\SecureImageConverter\Contract\ConversionRequest;
 use Mfonte\SecureImageConverter\Contract\Exception\ConversionFailedException;
 use Mfonte\SecureImageConverter\Contract\ImageFormat;
 use Mfonte\SecureImageConverter\Isolation\ExecutableFinder;
+use Mfonte\SecureImageConverter\Isolation\ProcessResult;
 use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
 
 /**
@@ -104,7 +105,7 @@ abstract class AbstractWorkerBackend extends AbstractBackend
         );
         $answer = $probe->isSuccessful() ? json_decode(trim($probe->getStdout()), true) : null;
         if (!is_array($answer)) {
-            return [self::FACT_UNAVAILABLE => 'the ' . $this->workerName() . ' worker does not run'];
+            return [self::FACT_UNAVAILABLE => sprintf('the %s worker does not run (%s)', $this->workerName(), self::outcome($probe))];
         }
         foreach (['inputs', 'outputs', 'lossless'] as $key) {
             $list = is_array($answer[$key] ?? null) ? array_filter($answer[$key], 'is_string') : [];
@@ -313,6 +314,25 @@ abstract class AbstractWorkerBackend extends AbstractBackend
         }
 
         return $this->extensionFile->getPath();
+    }
+
+    /**
+     * How a failed probe ended, without its output: a timeout, the signal, the exit code, or an answer that is not
+     * JSON.
+     */
+    private static function outcome(ProcessResult $result): string
+    {
+        if ($result->isTimedOut()) {
+            return 'timed out';
+        }
+        if ($result->getSignal() !== null) {
+            return 'signal ' . $result->getSignal();
+        }
+        if (!$result->isSuccessful()) {
+            return 'exit code ' . var_export($result->getExitCode(), true);
+        }
+
+        return 'its answer is not JSON';
     }
 
     private static function listsModule(string $output, string $module): bool

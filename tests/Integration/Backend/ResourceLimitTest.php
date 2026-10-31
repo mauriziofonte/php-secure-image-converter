@@ -409,7 +409,7 @@ final class ResourceLimitTest extends BackendTestCase
                 ->withResourceLimits($options->getResourceLimits()->withCpuSeconds(self::CONTENT_SECONDS));
             $backend = BackendFactory::create($name, self::hostRunner($options), self::backendOptions());
             self::assertInstanceOf(AbstractBackend::class, $backend);
-            self::requireAvailable($backend->getCapabilities());
+            self::requireAvailable($backend->getCapabilities(), $backend);
             self::$contentBackends[$name] = $backend;
         }
 

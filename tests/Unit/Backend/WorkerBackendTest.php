@@ -355,6 +355,27 @@ final class WorkerBackendTest extends TestCase
         self::assertSame([$loader, '--list', $extensions . '/gd.so'], $traces[0]['command']);
     }
 
+    /**
+     * A probe that fails names how it ended in the unavailable reason, and the run stays readable for diagnostics.
+     */
+    public function testAFailingProbeNamesHowItEnded(): void
+    {
+        $php = $this->fakePrograms() . '/php';
+        $runner = new FakeProcessRunner(
+            static function (array $command): ProcessResult {
+                return end($command) === 'probe' ? FakeProcessRunner::result(255, '', 'PHP Fatal error: boom') : FakeProcessRunner::result(0, "[PHP Modules]\ngd\n");
+            },
+            $this->programOptions()
+        );
+        self::assertNull((new GdBackend($runner, (new BackendOptions())->withPhpBinary($php)))->getLastDiscoveryResult());
+        $backend = new GdBackend($runner, (new BackendOptions())->withPhpBinary($php));
+
+        self::assertSame([AbstractBackend::FACT_UNAVAILABLE => 'the gd worker does not run (exit code 255)'], $backend->discoverFacts());
+        $result = $backend->getLastDiscoveryResult();
+        self::assertNotNull($result);
+        self::assertSame('PHP Fatal error: boom', $result->getStderr());
+    }
+
     public function testAWorkerWithoutItsExtensionIsUnavailable(): void
     {
         $php = $this->fakePrograms() . '/php';
