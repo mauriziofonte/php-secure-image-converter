@@ -1,0 +1,52 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Mfonte\SecureImageConverter\Backend;
+
+use Mfonte\SecureImageConverter\Contract\Exception\ConversionFailedException;
+use Mfonte\SecureImageConverter\Contract\Exception\ConversionTimeoutException;
+use Mfonte\SecureImageConverter\Contract\Exception\IsolationUnavailableException;
+use Mfonte\SecureImageConverter\Contract\Exception\ResourceLimitException;
+
+/**
+ * An encoder: one program that converts a BackendJob, always in a separate process started through a
+ * ProcessRunnerInterface, never in the calling process.
+ *
+ * A backend declares what it can do on this host in getCapabilities(), established by probing (it converts small
+ * images shipped with the library and checks the outputs), and estimates the memory one job needs. It does not choose
+ * formats, sizes or animation: BackendResolver checks a job against the capabilities before convert() is called, and
+ * convert() does exactly what the job says. The output is checked only for being a regular file the process created;
+ * verifying its content is the caller's task.
+ */
+interface BackendInterface
+{
+    /**
+     * Backend name (Capabilities::isValidBackendName()), such as "vips".
+     */
+    public function getName(): string;
+
+    /**
+     * What the backend can do on this host. Probes on first use and caches the result; a backend whose program is
+     * missing or fails its probes is reported as unavailable, never as an exception.
+     */
+    public function getCapabilities(): BackendCapabilities;
+
+    /**
+     * Address space, in bytes, that converting this job needs: the per-job memory limit of the process. It grows
+     * with the decoded pixels (every frame for an animation) and the encoded pixels, plus the fixed overhead of the
+     * program.
+     */
+    public function estimateMemoryBytes(BackendJob $job): int;
+
+    /**
+     * Converts the job and writes the output to its output path, replacing any file there.
+     *
+     * @throws ResourceLimitException        when the job needs more memory than the ceiling, or the process ran out of
+     *                                       its memory, CPU time or file size budget
+     * @throws ConversionTimeoutException    when the process exceeded its wall-clock timeout
+     * @throws IsolationUnavailableException when the isolation level of the runner is not available on the host
+     * @throws ConversionFailedException     when the program is missing, fails, or leaves no regular output file
+     */
+    public function convert(BackendJob $job): BackendResult;
+}
