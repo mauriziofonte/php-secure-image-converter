@@ -23,12 +23,23 @@ namespace Mfonte\SecureImageConverter\Tests\Fixtures\Security;
  * | duplicate  | repeats a block of up to 1 KiB in place: a second header, chunk or frame                 |
  * | delete     | removes a block of up to 1 KiB                                                           |
  * | splice     | joins the start of the file with the end of another corpus file                          |
+ *
+ * mutateData() applies only flip, byte and integer, without changing the size of the file, past its first 64 bytes
+ * (or its first quarter, if larger) and before its last 16: in the compressed pixel data, mostly, so that the headers
+ * stay consistent and the file passes the inspector to reach a decoder.
  */
 final class Mutator
 {
     private const HEADER_BYTES = 64;
 
     private const OPERATORS = ['flip', 'byte', 'integer', 'truncate', 'insert', 'duplicate', 'delete', 'splice'];
+
+    private const DATA_OPERATORS = ['flip', 'byte', 'integer'];
+
+    /**
+     * Bytes at the end of a file that mutateData() leaves alone: the trailers (IEND, EOI, the GIF trailer).
+     */
+    private const TRAILER_BYTES = 16;
 
     private const BYTES = ["\x00", "\x01", "\x7F", "\x80", "\xFF"];
 
@@ -139,16 +150,41 @@ final class Mutator
     }
 
     /**
-     * @return array{0: string, 1: string}
+     * Mutates the data of $bytes in place with one to four of flip, byte and integer (see the class comment).
+     *
+     * @return array{0: string, 1: string} the mutated bytes and a description of the operators applied
      */
-    private function apply(string $operator, string $bytes, string $other): array
+    public function mutateData(string $bytes): array
     {
         $length = strlen($bytes);
-        $offset = $this->offset($length);
+        $from = max(self::HEADER_BYTES, intdiv($length, 4));
+        $to = $length - self::TRAILER_BYTES;
+        if ($to - $from < 1) {
+            $from = 0;
+            $to = $length;
+        }
+        $applied = [];
+        for ($count = 1 + $this->below(4); $count > 0; --$count) {
+            list($bytes, $description) = $this->apply($this->pick(self::DATA_OPERATORS), $bytes, '', $from, $to);
+            $applied[] = $description;
+        }
+
+        return [substr($bytes, 0, $length), 'in the data: ' . implode(', ', $applied)];
+    }
+
+    /**
+     * Applies one operator; $from and $to, when given, bound every offset it writes at.
+     *
+     * @return array{0: string, 1: string}
+     */
+    private function apply(string $operator, string $bytes, string $other, ?int $from = null, ?int $to = null): array
+    {
+        $length = strlen($bytes);
+        $offset = $this->offset($length, $from, $to);
         switch ($operator) {
             case 'flip':
                 for ($flips = 1 + $this->below(8), $done = 0; $done < $flips && $length > 0; ++$done) {
-                    $at = $this->offset($length);
+                    $at = $this->offset($length, $from, $to);
                     $bytes[$at] = $bytes[$at] ^ "\x01\x02\x04\x08\x10\x20\x40\x80"[$this->below(8)];
                 }
 
@@ -193,12 +229,15 @@ final class Mutator
     }
 
     /**
-     * An offset within the file, in its first HEADER_BYTES bytes half of the time.
+     * An offset within the file, in its first HEADER_BYTES bytes half of the time; from $from to $to - 1 when given.
      */
-    private function offset(int $length): int
+    private function offset(int $length, ?int $from = null, ?int $to = null): int
     {
         if ($length === 0) {
             return 0;
+        }
+        if ($from !== null && $to !== null) {
+            return $from + $this->below($to - $from);
         }
 
         return $this->below(2) === 0 ? $this->below(min($length, self::HEADER_BYTES)) : $this->below($length);

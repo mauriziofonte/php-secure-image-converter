@@ -177,12 +177,4 @@ final class CorpusConversionTest extends SecurityTestCase
             $parent->remove();
         }
     }
-
-    private static function report(string $path, string $request, string $outcome, float $seconds): void
-    {
-        $file = getenv('SIC_SECURITY_REPORT');
-        if (is_string($file) && $file !== '') {
-            file_put_contents($file, sprintf("%s\t%s\t%s\t%d\n", $path, $request, $outcome, (int) round($seconds * 1000)), FILE_APPEND);
-        }
-    }
 }

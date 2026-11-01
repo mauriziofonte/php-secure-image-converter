@@ -7,6 +7,7 @@ namespace Mfonte\SecureImageConverter\Tests\Unit\Validation;
 use Mfonte\SecureImageConverter\Contract\Exception\ErrorCode;
 use Mfonte\SecureImageConverter\Contract\Exception\ExceptionInterface;
 use Mfonte\SecureImageConverter\Contract\ImageFormat;
+use Mfonte\SecureImageConverter\Tests\Fixtures\CpuClock;
 use Mfonte\SecureImageConverter\Tests\Fixtures\ImageCorpus;
 use Mfonte\SecureImageConverter\Tests\Fixtures\Security\Mutator;
 use Mfonte\SecureImageConverter\Validation\ImageInfo;
@@ -18,7 +19,8 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
  * Fuzzes the inspector with mutations of the corpus (see Mutator), every format enabled: each mutated file is
- * accepted or refused with an error code of the inspector, within 50 ms, and nothing else escapes (tests/bootstrap.php
+ * accepted or refused with an error code of the inspector, within the time bounds of ImageCorpusTest (50 ms of CPU
+ * time, 500 ms of wall-clock time, the best of three runs), and nothing else escapes (tests/bootstrap.php
  * turns a PHP notice or warning into an exception, so that fails the run too). An accepted file is within the
  * default limits and reports its byte size.
  *
@@ -38,11 +40,6 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 #[Group('fuzz')]
 final class InspectorFuzzTest extends TestCase
 {
-    /**
-     * Largest time one inspection may take, as in ImageCorpusTest.
-     */
-    private const MAX_SECONDS = 0.05;
-
     /**
      * Largest corpus file mutated: the larger ones (EXIF of 1 MiB) add nothing a smaller one does not.
      */
@@ -78,11 +75,8 @@ final class InspectorFuzzTest extends TestCase
         for ($iteration = 0; $iteration < $iterations; ++$iteration) {
             $base = $mutator->pick($bases);
             list($bytes, $mutation) = $mutator->mutate($base[1], $mutator->pick($bases)[1]);
-            list($outcome, $seconds, $problem) = self::inspect($inspector, $limits, $bytes);
+            list($outcome, $problem) = self::inspect($inspector, $limits, $bytes);
             $outcomes[$outcome] = ($outcomes[$outcome] ?? 0) + 1;
-            if ($problem === null && $seconds >= self::MAX_SECONDS) {
-                $problem = sprintf('took %.1f ms', $seconds * 1000);
-            }
             if ($problem !== null) {
                 ++$failed;
                 if (count($failures) < self::MAX_REPORTED) {
@@ -117,19 +111,16 @@ final class InspectorFuzzTest extends TestCase
     }
 
     /**
-     * Inspects one file, the best of three runs when the first is slow (a busy machine).
+     * Inspects one file, timed with CpuClock.
      *
-     * @return array{0: string, 1: float, 2: string|null} the outcome (format or error code), the seconds taken and
-     *                                                    the problem, if any
+     * @return array{0: string, 1: string|null} the outcome (format or error code) and the problem, if any
      */
     private static function inspect(ImageInspector $inspector, Limits $limits, string $bytes): array
     {
-        $seconds = INF;
         $outcome = '';
         $problem = null;
-        for ($run = 0; $run < 3 && $seconds >= self::MAX_SECONDS; ++$run) {
+        list($cpu, $wall) = CpuClock::measure(static function () use ($inspector, $limits, $bytes, &$outcome, &$problem): void {
             $stream = CountingStreamWrapper::open($bytes);
-            $start = microtime(true);
             try {
                 $info = $inspector->inspectStream($stream);
                 $outcome = $info->getFormat();
@@ -140,12 +131,18 @@ final class InspectorFuzzTest extends TestCase
             } catch (\Throwable $throwable) {
                 $outcome = get_class($throwable);
                 $problem = sprintf('threw %s: %s at %s:%d', get_class($throwable), $throwable->getMessage(), $throwable->getFile(), $throwable->getLine());
+            } finally {
+                fclose($stream);
             }
-            $seconds = min($seconds, microtime(true) - $start);
-            fclose($stream);
+        }, ImageCorpusTest::MAX_CPU_SECONDS, ImageCorpusTest::MAX_WALL_SECONDS);
+        if ($problem === null && $cpu >= ImageCorpusTest::MAX_CPU_SECONDS) {
+            $problem = sprintf('took %.1f ms of CPU time', $cpu * 1000);
+        }
+        if ($problem === null && $wall >= ImageCorpusTest::MAX_WALL_SECONDS) {
+            $problem = sprintf('took %.1f ms', $wall * 1000);
         }
 
-        return [$outcome, $seconds, $problem];
+        return [$outcome, $problem];
     }
 
     /**

@@ -253,6 +253,17 @@ abstract class SecurityTestCase extends BackendTestCase
     }
 
     /**
+     * Appends a line "path, request, outcome, milliseconds" to the file SIC_SECURITY_REPORT names, if any.
+     */
+    protected static function report(string $path, string $request, string $outcome, float $seconds): void
+    {
+        $file = getenv('SIC_SECURITY_REPORT');
+        if (is_string($file) && $file !== '') {
+            file_put_contents($file, sprintf("%s\t%s\t%s\t%d\n", $path, $request, $outcome, (int) round($seconds * 1000)), FILE_APPEND);
+        }
+    }
+
+    /**
      * What is wrong with a converted output, or null.
      */
     private static function checkOutput(ConversionResult $result, string $output): ?string

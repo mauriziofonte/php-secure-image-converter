@@ -7,9 +7,11 @@ namespace Mfonte\SecureImageConverter\Tests\Unit\Validation;
 use Mfonte\SecureImageConverter\Contract\Exception\ErrorCode;
 use Mfonte\SecureImageConverter\Contract\Exception\ExceptionInterface;
 use Mfonte\SecureImageConverter\Contract\ImageFormat;
+use Mfonte\SecureImageConverter\Tests\Fixtures\CpuClock;
 use Mfonte\SecureImageConverter\Tests\Fixtures\ImageBuilder;
 use Mfonte\SecureImageConverter\Tests\Fixtures\ImageCorpus;
 use Mfonte\SecureImageConverter\Validation\FormatSniffer;
+use Mfonte\SecureImageConverter\Validation\ImageInfo;
 use Mfonte\SecureImageConverter\Validation\ImageInspector;
 use Mfonte\SecureImageConverter\Validation\Limits;
 use Mfonte\SecureImageConverter\Validation\Parser\AvifParser;
@@ -27,7 +29,7 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 /**
  * Runs the input validation corpus (see ImageCorpus): every valid sample is accepted with its dimensions, frame count
  * and metadata flags, and every bomb, spoofed, truncated or unsupported file is refused with its error code, in under
- * 50 ms. The files are read through CountingStreamWrapper, which proves how few bytes the inspector reads: a bomb is
+ * 50 ms of CPU time (and 500 ms of wall-clock time; the best of three runs, see CpuClock). The files are read through CountingStreamWrapper, which proves how few bytes the inspector reads: a bomb is
  * refused from its header, whatever the size its pixels would take once decoded.
  *
  * @covers \Mfonte\SecureImageConverter\Validation\ImageInspector
@@ -52,9 +54,15 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 final class ImageCorpusTest extends TestCase
 {
     /**
-     * Largest time one inspection may take.
+     * Largest CPU time one inspection may take: the time the inspector itself spends, which other processes on a
+     * busy machine do not add to.
      */
-    private const MAX_SECONDS = 0.05;
+    public const MAX_CPU_SECONDS = 0.05;
+
+    /**
+     * Largest wall-clock time one inspection may take: a loose bound, which a wait (a read that blocks) fails.
+     */
+    public const MAX_WALL_SECONDS = 0.5;
 
     /**
      * Largest size of a committed corpus file.
@@ -193,22 +201,20 @@ final class ImageCorpusTest extends TestCase
      */
     private function assertOutcome(ImageInspector $inspector, string $path, string $bytes, array $expect): void
     {
-        $seconds = INF;
         $outcome = null;
-        // The best of three runs, so that a scheduling hiccup on a busy machine does not fail the time bound.
-        for ($run = 0; $run < 3 && $seconds >= self::MAX_SECONDS; ++$run) {
+        list($cpu, $wall) = CpuClock::measure(static function () use ($inspector, $bytes, &$outcome): void {
             $stream = CountingStreamWrapper::open($bytes);
-            $start = microtime(true);
             try {
                 $outcome = $inspector->inspectStream($stream);
             } catch (ExceptionInterface $exception) {
                 $outcome = $exception;
+            } finally {
+                fclose($stream);
             }
-            $seconds = min($seconds, microtime(true) - $start);
-            fclose($stream);
-        }
+        }, self::MAX_CPU_SECONDS, self::MAX_WALL_SECONDS);
 
-        self::assertLessThan(self::MAX_SECONDS, $seconds, $path . ' took too long');
+        self::assertLessThan(self::MAX_CPU_SECONDS, $cpu, sprintf('%s took %.1f ms of CPU time', $path, $cpu * 1000));
+        self::assertLessThan(self::MAX_WALL_SECONDS, $wall, sprintf('%s took %.1f ms', $path, $wall * 1000));
         if (isset($expect['max_bytes_read'])) {
             self::assertLessThanOrEqual($expect['max_bytes_read'], CountingStreamWrapper::$bytesRead, $path . ' read too much');
             unset($expect['max_bytes_read']);
@@ -225,6 +231,7 @@ final class ImageCorpusTest extends TestCase
         if ($outcome instanceof ExceptionInterface) {
             self::fail($path . ' must be accepted, refused with ' . $outcome->getErrorCode() . ': ' . $outcome->getMessage());
         }
+        self::assertInstanceOf(ImageInfo::class, $outcome);
         self::assertSame(strlen($bytes), $outcome->getByteSize());
         $actual = array_intersect_key($outcome->toArray(), $expect);
         ksort($expect);
