@@ -23,7 +23,8 @@ use Mfonte\SecureImageConverter\Validation\ImageInfo;
  * | output format    | the probe source converted with metadata stripped: the format and size are right, and  |
  * |                  | neither the ICC profile nor EXIF of the JPEG source survives                            |
  * | input format     | its still image converted: the size is right (page 0 of the TIFF, not its larger page) |
- * | input variant    | the variant's still image (such as a CMYK JPEG) converted: the size is right           |
+ * | input variant    | the variant's still image (such as a CMYK JPEG) converted to every output format: the  |
+ * |                  | size is right (ImageMagick 6 decodes a grey and alpha TIFF, and crashes encoding AVIF) |
  * | fit              | the source scaled to an exact size with that fit                                       |
  * | first frame      | an animation converted to a still image of the right size                              |
  * | animated in/out  | an animation converted with every frame kept                                           |
@@ -165,7 +166,7 @@ final class CapabilityProber
         }
         $variants = [];
         foreach (ImageInfo::VARIANTS as $variant => $format) {
-            if (in_array($format, $inputs, true) && $this->convertsVariant($variant, $reference)) {
+            if (in_array($format, $inputs, true) && $this->convertsVariant($variant, $outputs)) {
                 $variants[] = $variant;
             }
         }
@@ -286,18 +287,28 @@ final class CapabilityProber
         );
     }
 
-    private function convertsVariant(string $variant, string $output): bool
+    /**
+     * Whether the variant's still image converts to each output format, as a declared variant must.
+     *
+     * @param list<string> $outputs
+     */
+    private function convertsVariant(string $variant, array $outputs): bool
     {
         $image = $this->images->variant($variant);
         if ($image === null) {
             return false;
         }
-        $info = $this->run($this->job($image, $output, $image[1]->getWidth(), $image[1]->getHeight()), 'the ' . $variant . ' variant');
+        foreach ($outputs as $output) {
+            $info = $this->run($this->job($image, $output, $image[1]->getWidth(), $image[1]->getHeight()), 'the ' . $variant . ' variant to ' . $output);
+            if ($info === null || !$this->check(
+                self::matches($info, $output, $image[1]->getWidth(), $image[1]->getHeight(), 1),
+                sprintf('its %s output from the %s variant had the wrong size', $output, $variant)
+            )) {
+                return false;
+            }
+        }
 
-        return $info !== null && $this->check(
-            self::matches($info, $output, $image[1]->getWidth(), $image[1]->getHeight(), 1),
-            sprintf('its output from the %s variant had the wrong size', $variant)
-        );
+        return true;
     }
 
     private function convertsFirstFrame(string $format, string $output): bool

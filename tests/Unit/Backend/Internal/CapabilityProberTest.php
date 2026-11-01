@@ -137,7 +137,38 @@ final class CapabilityProberTest extends TestCase
         self::assertSame([ImageFormat::BMP], $capabilities->getInputFormats());
         self::assertNotContains(ImageInfo::VARIANT_BMP_64_BIT, $capabilities->getInputVariants());
         self::assertContains(ImageInfo::VARIANT_BMP_BIT_FIELDS, $capabilities->getInputVariants());
-        self::assertContains('it failed to convert the bmp_64_bit variant', $capabilities->getNotes());
+        self::assertContains('it failed to convert the bmp_64_bit variant to png', $capabilities->getNotes());
+    }
+
+    /**
+     * A declared variant converts to every output format (CapabilityMatrixTest holds a backend to that): ImageMagick 6
+     * decodes a grey and alpha TIFF, and crashes encoding it as AVIF.
+     */
+    public function testABackendThatCrashesOnAVariantForOneOutputDoesNotDecodeIt(): void
+    {
+        self::assertNotNull($this->directory);
+        $prober = new CapabilityProber(
+            'fake',
+            static function (BackendJob $job): void {
+                $gif = $job->getOutputFormat() === ImageFormat::GIF;
+                if ($gif && in_array(ImageInfo::VARIANT_BMP_BIT_FIELDS, $job->getInput()->getVariants(), true)) {
+                    throw new ConversionFailedException('The fake conversion crashed (signal 11).');
+                }
+                file_put_contents($job->getOutputPath(), $gif ? ImageBuilder::gif($job->getWidth(), $job->getHeight()) : ImageBuilder::png($job->getWidth(), $job->getHeight()));
+            },
+            new ProbeImages(),
+            $this->directory
+        );
+        $candidates = self::candidates();
+        $candidates['inputs'] = [ImageFormat::BMP];
+        $candidates['outputs'] = [ImageFormat::PNG, ImageFormat::GIF];
+
+        $capabilities = $prober->probe($candidates);
+
+        self::assertSame([ImageFormat::PNG, ImageFormat::GIF], $capabilities->getOutputFormats());
+        self::assertNotContains(ImageInfo::VARIANT_BMP_BIT_FIELDS, $capabilities->getInputVariants());
+        self::assertContains(ImageInfo::VARIANT_BMP_V3_HEADER, $capabilities->getInputVariants());
+        self::assertContains('it failed to convert the bmp_bit_fields variant to gif', $capabilities->getNotes());
     }
 
     /**

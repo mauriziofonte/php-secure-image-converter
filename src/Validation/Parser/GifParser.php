@@ -26,7 +26,8 @@ use Mfonte\SecureImageConverter\Validation\Limits;
  * plain text extensions (which decoders do not render) and extensions of unknown label are other metadata.
  * NETSCAPE2.0 and ANIMEXTS1.0 loop extensions and graphic control extensions are not metadata, unless they hold more
  * than their fields (one sub-block of 3 and 4 bytes), which decoders skip. Bytes after the trailer (the archive of a
- * GIFAR) are trailing data.
+ * GIFAR) are trailing data. A graphic control extension whose fields sub-block is longer than 4 bytes is reported as
+ * a variant (ImageInfo::VARIANT_GIF_LONG_GRAPHIC_CONTROL): giflib, and so gif2webp, refuses it.
  *
  * @internal
  */
@@ -100,6 +101,7 @@ final class GifParser implements ParserInterface
         $blocks = 0;
         $iccProfile = false;
         $otherMetadata = false;
+        $longGraphicControl = false;
 
         while (true) {
             $blocks += self::BLOCK_COST;
@@ -144,6 +146,7 @@ final class GifParser implements ParserInterface
                     }
                     $reader->skip($length);
                     $otherMetadata = $otherMetadata || $length > $fieldsLength;
+                    $longGraphicControl = $longGraphicControl || ($label === self::LABEL_GRAPHIC_CONTROL && $length > $fieldsLength);
                 }
             } elseif ($introducer === self::INTRODUCER_IMAGE) {
                 self::readImageDescriptor($reader, $width, $height);
@@ -171,6 +174,7 @@ final class GifParser implements ParserInterface
 
         return (new ImageInfo(ImageFormat::GIF, $width, $height, $frames, $reader->getSize()))
             ->withMetadata($iccProfile, false, $otherMetadata)
+            ->withVariants($longGraphicControl ? [ImageInfo::VARIANT_GIF_LONG_GRAPHIC_CONTROL] : [])
             ->withTrailingData($reader->getRemaining() > 0);
     }
 

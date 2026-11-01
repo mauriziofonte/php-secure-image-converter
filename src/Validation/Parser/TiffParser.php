@@ -29,6 +29,9 @@ use Mfonte\SecureImageConverter\Validation\Limits;
  *   planar). So a decoder never allocates a strip or a tile much larger than the image. At most MAX_DATA_BLOCKS
  *   strips or tiles, each of which must lie inside the file.
  *
+ * A tiled image, and one of 2 samples per pixel (grey with alpha) or more than 4, are reported as variants
+ * (ImageInfo::VARIANT_TIFF_*), which some decoders do not read.
+ *
  * Metadata: tag 34675 is the colour profile; the EXIF and GPS directory pointers are EXIF; XMP, IPTC, Photoshop
  * resources and the descriptive text tags (description, make, model, software, date, artist, copyright) are other
  * metadata. The orientation comes from tag 274. The bit depth is the largest bits-per-sample value, at least 8. A
@@ -187,7 +190,8 @@ final class TiffParser implements ParserInterface
         }
 
         $planes = $planar === 2 ? $samples : 1;
-        if (isset($tags[self::TAG_TILE_OFFSETS]) || isset($tags[self::TAG_TILE_WIDTH]) || isset($tags[self::TAG_TILE_LENGTH])) {
+        $tiled = isset($tags[self::TAG_TILE_OFFSETS]) || isset($tags[self::TAG_TILE_WIDTH]) || isset($tags[self::TAG_TILE_LENGTH]);
+        if ($tiled) {
             if (isset($tags[self::TAG_STRIP_OFFSETS])) {
                 throw self::invalid('the first directory declares both strips and tiles');
             }
@@ -215,8 +219,27 @@ final class TiffParser implements ParserInterface
             ->withBitDepth($bitDepth)
             ->withMetadata(isset($tags[self::TAG_ICC_PROFILE]), $exif, $otherMetadata)
             ->withOrientation($orientation)
+            ->withVariants(self::variants($tiled, $samples))
             // One pad byte may follow the last structure, as values start on word boundaries.
             ->withTrailingData($nextDirectory !== 0 || $reader->getSize() > $this->end + 1);
+    }
+
+    /**
+     * The variants (ImageInfo::VARIANT_TIFF_*) of a layout and a number of samples per pixel.
+     *
+     * @return list<string>
+     */
+    private static function variants(bool $tiled, int $samples): array
+    {
+        $variants = [];
+        if ($tiled) {
+            $variants[] = ImageInfo::VARIANT_TIFF_TILED;
+        }
+        if ($samples === 2 || $samples > 4) {
+            $variants[] = ImageInfo::VARIANT_TIFF_UNCOMMON_SAMPLES;
+        }
+
+        return $variants;
     }
 
     /**

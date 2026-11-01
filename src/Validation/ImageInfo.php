@@ -38,8 +38,10 @@ use Mfonte\SecureImageConverter\Contract\ValidatedSerializationTrait;
  *   (which hasIccProfile(), hasExif() and hasMetadata() report). A consumer that must never return bytes it has not
  *   decoded re-encodes every image, and strips or rebuilds the colour profile, whatever the flag.
  * - getVariants() names the variants of the format that some decoders do not read (see VARIANTS): a CMYK JPEG, a BMP
- *   with bit-field masks, 2 or 64 bits per pixel, a V2 or V3 header, or a colour profile before its pixels. Backends probe which of them they decode, so
- *   that an image is never given to a decoder that cannot read it.
+ *   with bit-field masks, 2 or 64 bits per pixel, a V2 or V3 header, or a colour profile before its pixels, a GIF
+ *   with a long graphic control extension, a WEBP in the animation layout, a tiled TIFF or one of 2 or more than 4
+ *   samples per pixel. Backends probe which of them they decode, so that an image is never given to a decoder that
+ *   cannot read it.
  *
  * Only the first image is described, and backends must decode it alone (page, scene or item 0): for TIFF, the first
  * page (IFD0) is read and checked against the limits, later pages are neither counted nor checked. A BMP file from
@@ -108,6 +110,27 @@ final class ImageInfo
     public const VARIANT_BMP_PROFILE_BEFORE_PIXELS = 'bmp_profile_before_pixels';
 
     /**
+     * A GIF with a graphic control extension whose fields sub-block is longer than 4 bytes, which giflib refuses.
+     */
+    public const VARIANT_GIF_LONG_GRAPHIC_CONTROL = 'gif_long_graphic_control';
+
+    /**
+     * A WEBP in the animation layout (ANIM and ANMF chunks), even of a single frame, which still-image decoders
+     * (WebPDecode) refuse.
+     */
+    public const VARIANT_WEBP_ANIMATION = 'webp_animation';
+
+    /**
+     * A TIFF stored in tiles rather than strips.
+     */
+    public const VARIANT_TIFF_TILED = 'tiff_tiled';
+
+    /**
+     * A TIFF of 2 samples per pixel (grey with alpha) or more than 4.
+     */
+    public const VARIANT_TIFF_UNCOMMON_SAMPLES = 'tiff_uncommon_samples';
+
+    /**
      * Every variant, in canonical order, with the format it belongs to.
      */
     public const VARIANTS = [
@@ -119,6 +142,10 @@ final class ImageInfo
         self::VARIANT_BMP_V2_HEADER => ImageFormat::BMP,
         self::VARIANT_BMP_V3_HEADER => ImageFormat::BMP,
         self::VARIANT_BMP_PROFILE_BEFORE_PIXELS => ImageFormat::BMP,
+        self::VARIANT_GIF_LONG_GRAPHIC_CONTROL => ImageFormat::GIF,
+        self::VARIANT_WEBP_ANIMATION => ImageFormat::WEBP,
+        self::VARIANT_TIFF_TILED => ImageFormat::TIFF,
+        self::VARIANT_TIFF_UNCOMMON_SAMPLES => ImageFormat::TIFF,
     ];
 
     /**

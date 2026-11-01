@@ -97,7 +97,7 @@ abstract class AbstractBackend implements BackendInterface
     /**
      * Version of the probing logic, part of the cache fingerprint.
      */
-    private const PROBE_VERSION = 9;
+    private const PROBE_VERSION = 10;
 
     /**
      * Prefix of the facts that hold the directories of the libraries the programs load (library_0 to library_7).

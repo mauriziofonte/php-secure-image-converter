@@ -13,6 +13,7 @@ use Mfonte\SecureImageConverter\Contract\Exception\LimitExceededException;
 use Mfonte\SecureImageConverter\Contract\Exception\UnsupportedFormatException;
 use Mfonte\SecureImageConverter\Contract\ImageFormat;
 use Mfonte\SecureImageConverter\Tests\Fixtures\ImageBuilder;
+use Mfonte\SecureImageConverter\Tests\Fixtures\ImageCorpus;
 use Mfonte\SecureImageConverter\Validation\ImageInfo;
 use Mfonte\SecureImageConverter\Validation\ImageInspector;
 use Mfonte\SecureImageConverter\Validation\Limits;
@@ -328,6 +329,33 @@ final class ImageInspectorTest extends TestCase
                 (string) file_get_contents(\dirname(__DIR__, 2) . '/Fixtures/corpus/bmp/valid-v5-icc-before-rgb-pixels.bmp'),
                 [ImageInfo::VARIANT_BMP_PROFILE_BEFORE_PIXELS],
             ],
+            'GIF' => [ImageBuilder::gif(4, 4), []],
+            'GIF with a graphic control extension of 4 bytes' => [ImageBuilder::gif(4, 4, 1, "\x21\xF9" . ImageBuilder::gifSubBlocks("\0\0\0\0")), []],
+            'GIF with a graphic control extension of 4 bytes and another sub-block' => [
+                ImageBuilder::gif(4, 4, 1, "\x21\xF9\x04\0\0\0\0\x02ab\0"),
+                [],
+            ],
+            'GIF with a graphic control extension of 8 bytes' => [
+                ImageBuilder::gif(4, 4, 1, "\x21\xF9" . ImageBuilder::gifSubBlocks("\0\0\0\0\0\0\0\0")),
+                [ImageInfo::VARIANT_GIF_LONG_GRAPHIC_CONTROL],
+            ],
+            'animated GIF' => [ImageBuilder::gif(4, 4, 3), []],
+            'simple lossless WEBP' => [ImageBuilder::webpLossless(4, 4), []],
+            'WEBP animation of one frame' => [ImageBuilder::webpAnimation(4, 4, 1), [ImageInfo::VARIANT_WEBP_ANIMATION]],
+            'WEBP animation of three frames' => [ImageBuilder::webpAnimation(4, 4, 3), [ImageInfo::VARIANT_WEBP_ANIMATION]],
+            'grey TIFF' => [ImageBuilder::tiff(4, 4), []],
+            'RGB TIFF' => [ImageBuilder::tiff(4, 4, false, 3), []],
+            'RGBA TIFF' => [ImageBuilder::tiff(4, 4, false, 4, 1, [338 => [3, pack('v', 2)]]), []],
+            'grey and alpha TIFF' => [ImageBuilder::tiff(4, 4, false, 2, 1, [338 => [3, pack('v', 2)]]), [ImageInfo::VARIANT_TIFF_UNCOMMON_SAMPLES]],
+            'TIFF of 5 samples' => [ImageBuilder::tiff(4, 4, false, 5), [ImageInfo::VARIANT_TIFF_UNCOMMON_SAMPLES]],
+            'tiled TIFF' => [
+                (string) file_get_contents(\dirname(__DIR__, 2) . '/Fixtures/corpus/tiff/valid-tiled.tif'),
+                [ImageInfo::VARIANT_TIFF_TILED],
+            ],
+            'TIFF of 16 separate sample planes' => [
+                ImageCorpus::cases()['tiff/valid-most-entries-and-strips.tif']['bytes'],
+                [ImageInfo::VARIANT_TIFF_UNCOMMON_SAMPLES],
+            ],
         ];
     }
 
@@ -341,7 +369,7 @@ final class ImageInspectorTest extends TestCase
     #[DataProvider('variants')]
     public function testVariantsThatSomeDecodersDoNotReadAreReported(string $data, array $expected): void
     {
-        self::assertSame($expected, (new ImageInspector())->inspectStream(self::stream($data))->getVariants());
+        self::assertSame($expected, (new ImageInspector(null, ImageFormat::all()))->inspectStream(self::stream($data))->getVariants());
     }
 
     public function testInspectStreamReadsFromTheStartWhateverThePosition(): void

@@ -30,7 +30,8 @@ use Mfonte\SecureImageConverter\Validation\Limits;
  *   ANMF frame: decoders disagree on alpha data anywhere else.
  *
  * Metadata: ICCP is the colour profile, EXIF is EXIF (and gives the orientation); XMP and unknown chunks are other
- * metadata.
+ * metadata. A file in the animation layout (ANIM and ANMF), even of a single frame, is reported as a variant
+ * (ImageInfo::VARIANT_WEBP_ANIMATION): the still-image decoders of cwebp and GD refuse it.
  *
  * @internal
  */
@@ -214,6 +215,7 @@ final class WebpParser implements ParserInterface
         return (new ImageInfo(ImageFormat::WEBP, $width, $height, $frameCount, $reader->getSize()))
             ->withMetadata($iccProfile, $exif, $otherMetadata)
             ->withOrientation($orientation)
+            ->withVariants($animated ? [ImageInfo::VARIANT_WEBP_ANIMATION] : [])
             ->withTrailingData($unreadBytes);
     }
 
