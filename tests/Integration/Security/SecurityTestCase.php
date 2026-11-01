@@ -238,6 +238,14 @@ abstract class SecurityTestCase extends BackendTestCase
     }
 
     /**
+     * Whether every backend of BackendFactory::NAMES is enabled and available (converter() sets it).
+     */
+    protected static function hasEveryBackend(): bool
+    {
+        return self::$complete;
+    }
+
+    /**
      * Why the outcome of a corpus file is wrong, or null: a valid file (valid-*) must be converted, or refused as
      * KNOWN_REFUSALS says, when every backend is there; other files may be refused.
      */

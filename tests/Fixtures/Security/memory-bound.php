@@ -10,7 +10,8 @@ declare(strict_types=1);
  *
  * Arguments: <working directory parent> <memory ceiling in bytes> <backends, comma-separated, or "">
  *
- * Prints a JSON object: "outcomes" (corpus path => "converted" or the error code), "children_max_rss_bytes" (the
+ * Prints a JSON object: "outcomes" (corpus path => "converted" or the error code), "backends" (corpus path => the
+ * backend that converted it), "children_max_rss_bytes" (the
  * largest resident set of a conversion process) and "php_peak_bytes" (the peak memory of this PHP process).
  * tests/bootstrap.php is loaded first, so a notice or warning raised by the library is an exception.
  */
@@ -51,6 +52,7 @@ $converter = new SecureConverter(
 );
 
 $outcomes = [];
+$converters = [];
 foreach (ImageCorpus::cases() as $path => $case) {
     if (isset($case['expect']['error'])) {
         continue;
@@ -60,7 +62,7 @@ foreach (ImageCorpus::cases() as $path => $case) {
     file_put_contents($input, $case['bytes']);
 
     try {
-        $converter->convert($input, $output, new ConversionRequest());
+        $converters[$path] = $converter->convert($input, $output, new ConversionRequest())->getBackend();
         $outcomes[$path] = 'converted';
     } catch (ExceptionInterface $exception) {
         $outcomes[$path] = $exception->getErrorCode();
@@ -72,6 +74,7 @@ foreach (ImageCorpus::cases() as $path => $case) {
 $usage = getrusage(1);
 echo json_encode([
     'outcomes' => $outcomes,
+    'backends' => $converters,
     'children_max_rss_bytes' => is_array($usage) && is_int($usage['ru_maxrss'] ?? null) ? $usage['ru_maxrss'] * 1024 : -1,
     'php_peak_bytes' => memory_get_peak_usage(true),
 ]), "\n";

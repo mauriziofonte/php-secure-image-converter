@@ -30,7 +30,8 @@ use PHPUnit\Framework\Attributes\Group;
  * - Memory: the same accepted files, converted to WEBP at the rlimit level with a memory ceiling of
  *   MEMORY_CEILING_BYTES in a separate PHP process: the decompression bombs of 40 megapixels, which need more, are
  *   refused with resource_limit, the valid files still convert, and no conversion process ever held more than the
- *   ceiling.
+ *   ceiling. At LOW_CEILING_BYTES, which leaves vips out, no valid file is blamed as invalid_image: it converts with
+ *   another backend or is refused as unsupported_format or resource_limit.
  *
  * SIC_SECURITY_REPORT names a file to which every conversion is appended as a line "path, request, outcome,
  * milliseconds" (CI prints it).
@@ -53,9 +54,14 @@ final class CorpusConversionTest extends SecurityTestCase
     /**
      * Memory ceiling of the memory test: 384 MiB, below what each decompression bomb of 40 megapixels needs and above
      * what every backend needs for the valid files (below about 336 MiB, vips is left out and the valid files go to
-     * backends that decode less).
+     * backends that decode less: see testALowCeilingNeverBlamesAValidFile()).
      */
     private const MEMORY_CEILING_BYTES = 402653184;
+
+    /**
+     * Memory ceiling of the low-ceiling test: 320 MiB, below what vips is estimated to need for a WEBP output.
+     */
+    private const LOW_CEILING_BYTES = 335544320;
 
     /**
      * Files the memory test expects refused with resource_limit.
@@ -130,30 +136,12 @@ final class CorpusConversionTest extends SecurityTestCase
      */
     public function testAMemoryCeilingBoundsEveryDecoder(): void
     {
-        self::requireLevel(IsolationLevel::RLIMIT);
-        self::converter();
         $parent = WorkingDirectory::create();
 
         try {
-            $command = implode(' ', array_map('escapeshellarg', [
-                PHP_BINARY,
-                \dirname(__DIR__, 2) . '/Fixtures/Security/memory-bound.php',
-                $parent->getPath(),
-                (string) self::MEMORY_CEILING_BYTES,
-                implode(',', self::enabledNames()),
-            ]));
-            $output = [];
-            exec($command . ' 2>&1', $output, $status);
-            $text = implode("\n", $output);
-            self::assertSame(0, $status, $text);
-            $report = json_decode((string) end($output), true);
-            self::assertIsArray($report, $text);
-            self::assertIsArray($report['outcomes']);
-            self::assertNotEmpty($report['outcomes']);
+            $report = self::convertUnderCeiling($parent, self::MEMORY_CEILING_BYTES);
             $failures = [];
             foreach ($report['outcomes'] as $path => $outcome) {
-                $path = (string) $path;
-                $outcome = is_string($outcome) ? $outcome : '?';
                 $problem = self::validProblem($path, $outcome);
                 if (in_array($path, self::MEMORY_BOMBS, true) && $outcome !== ErrorCode::RESOURCE_LIMIT) {
                     $problem = 'a bomb above the ceiling ended as ' . $outcome;
@@ -166,15 +154,82 @@ final class CorpusConversionTest extends SecurityTestCase
             }
             self::assertSame([], $failures, 'every file is converted or refused under the memory ceiling');
             self::assertSame(self::MEMORY_BOMBS, array_values(array_intersect(self::MEMORY_BOMBS, array_keys($report['outcomes']))));
-            self::assertIsInt($report['children_max_rss_bytes']);
             self::assertGreaterThan(0, $report['children_max_rss_bytes']);
             self::assertLessThanOrEqual(self::MEMORY_CEILING_BYTES, $report['children_max_rss_bytes'], 'no conversion process exceeded the ceiling');
-            self::assertIsInt($report['php_peak_bytes']);
             self::assertLessThanOrEqual(self::MAX_PHP_PEAK_BYTES, $report['php_peak_bytes'], 'the converter holds no image in memory');
             self::assertSame(['.', '..'], scandir($parent->getPath()), 'no file is left behind');
             self::report('memory test', 'max rss of a conversion', (string) $report['children_max_rss_bytes'], 0.0);
         } finally {
             $parent->remove();
         }
+    }
+
+    /**
+     * The valid files at a ceiling of LOW_CEILING_BYTES, which leaves vips out: a valid file that only the backends
+     * left out decode is refused as unsupported_format or resource_limit (the remaining backends declare the
+     * variants they decode, see ImageInfo::VARIANTS), never blamed as invalid_image.
+     */
+    public function testALowCeilingNeverBlamesAValidFile(): void
+    {
+        $parent = WorkingDirectory::create();
+
+        try {
+            $report = self::convertUnderCeiling($parent, self::LOW_CEILING_BYTES);
+            $failures = [];
+            foreach ($report['outcomes'] as $path => $outcome) {
+                if (strpos(basename($path), 'valid-') === 0 && !in_array($outcome, [self::CONVERTED, ErrorCode::UNSUPPORTED_FORMAT, ErrorCode::RESOURCE_LIMIT], true)) {
+                    $failures[] = $path . ': ' . $outcome;
+                }
+            }
+            self::assertSame([], $failures, 'a valid file is converted, or refused as unsupported_format or resource_limit');
+            self::assertNotContains('vips', $report['backends'], 'the low ceiling leaves vips out');
+            if (self::hasEveryBackend()) {
+                self::assertContains('imagick', $report['backends'], 'the files vips would take go to the other backends');
+            }
+            self::assertLessThanOrEqual(self::LOW_CEILING_BYTES, $report['children_max_rss_bytes'], 'no conversion process exceeded the ceiling');
+            self::assertSame(['.', '..'], scandir($parent->getPath()), 'no file is left behind');
+        } finally {
+            $parent->remove();
+        }
+    }
+
+    /**
+     * Runs tests/Fixtures/Security/memory-bound.php with a ceiling: every corpus file the inspector accepts,
+     * converted to WEBP at the rlimit level in a separate PHP process.
+     *
+     * @return array{outcomes: array<string, string>, backends: array<string, string>, children_max_rss_bytes: int, php_peak_bytes: int}
+     */
+    private static function convertUnderCeiling(WorkingDirectory $parent, int $ceiling): array
+    {
+        self::requireLevel(IsolationLevel::RLIMIT);
+        self::converter();
+        $command = implode(' ', array_map('escapeshellarg', [
+            PHP_BINARY,
+            \dirname(__DIR__, 2) . '/Fixtures/Security/memory-bound.php',
+            $parent->getPath(),
+            (string) $ceiling,
+            implode(',', self::enabledNames()),
+        ]));
+        $output = [];
+        exec($command . ' 2>&1', $output, $status);
+        $text = implode("\n", $output);
+        self::assertSame(0, $status, $text);
+        $report = json_decode((string) end($output), true);
+        self::assertIsArray($report, $text);
+        self::assertIsArray($report['outcomes'] ?? null, $text);
+        self::assertNotEmpty($report['outcomes']);
+        self::assertIsInt($report['children_max_rss_bytes'] ?? null, $text);
+        self::assertIsInt($report['php_peak_bytes'] ?? null, $text);
+        self::assertIsArray($report['backends'] ?? null, $text);
+        $outcomes = [];
+        foreach ($report['outcomes'] as $path => $outcome) {
+            $outcomes[(string) $path] = is_string($outcome) ? $outcome : '?';
+        }
+        $backends = [];
+        foreach ($report['backends'] as $path => $backend) {
+            $backends[(string) $path] = is_string($backend) ? $backend : '?';
+        }
+
+        return ['outcomes' => $outcomes, 'backends' => $backends, 'children_max_rss_bytes' => $report['children_max_rss_bytes'], 'php_peak_bytes' => $report['php_peak_bytes']];
     }
 }
