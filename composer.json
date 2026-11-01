@@ -21,6 +21,7 @@
     "php": "^7.2.5 || ^8.0",
     "php-64bit": "*",
     "ext-hash": "*",
+    "ext-json": "*",
     "psr/log": "^1.1 || ^2.0 || ^3.0"
   },
   "require-dev": {
