@@ -97,6 +97,9 @@ final class ImagickWorker extends AbstractWorker
             );
         }
         self::assertWritten($job['output']);
+        if ($job['strip']) {
+            self::dropEncoderMetadata($job['output'], $job['output_format'], $job['keep_icc']);
+        }
     }
 
     /**

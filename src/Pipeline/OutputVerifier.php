@@ -27,6 +27,9 @@ use Mfonte\SecureImageConverter\Validation\ImageInspector;
  *   for AVIF) apply the orientation whatever they are asked.
  * - Its frame count must be 1 for a still job, and from 1 to the job's frame count for an animation (an encoder may
  *   merge identical frames).
+ * - It must hold nothing that decoders skip (ImageInfo::hasTrailingData(): an appended archive, script or page), and,
+ *   when the job strips metadata, carry none (ImageInfo::hasMetadata(): EXIF, XMP, comments, text, unknown
+ *   ancillary data), nor an ICC profile unless the job keeps it: such a file would be served as it is.
  * - It must fit the dimension, pixel and frame limits of the converter (Capabilities::assertOutputWithinLimits()).
  *
  * Any mismatch is an OutputVerificationException (output_verification_failed): the output is discarded.
@@ -80,8 +83,17 @@ final class OutputVerifier
                 $job->getFrameCount()
             ));
         }
+        if ($info->hasTrailingData()) {
+            throw new OutputVerificationException('The output holds data that decoders skip.');
+        }
         if ($job->needsOrientation() && $info->getOrientation() !== ImageInfo::ORIENTATION_NORMAL) {
             throw new OutputVerificationException('The output was turned upright but still declares an orientation.');
+        }
+        if ($job->shouldStripMetadata() && $info->hasMetadata()) {
+            throw new OutputVerificationException('The output carries metadata that was to be stripped.');
+        }
+        if ($job->shouldStripMetadata() && !$job->shouldKeepIccProfile() && $info->hasIccProfile()) {
+            throw new OutputVerificationException('The output carries an ICC profile that was to be stripped.');
         }
 
         try {

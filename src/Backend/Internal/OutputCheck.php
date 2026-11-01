@@ -16,7 +16,8 @@ use Mfonte\SecureImageConverter\Validation\ImageInspector;
  *
  * The output must parse, with the header parser of its format (ImageInspector::forOutput(): every limit at its
  * maximum but the size, which is the runner's file size limit, and walks bounded by that size), as the job's format, size and frame count (at most the job's for an
- * animation: an encoder may merge identical frames). The parsers refuse a file cut anywhere, and one without image
+ * animation: an encoder may merge identical frames), without data that decoders skip and, when the job strips
+ * metadata, without metadata (nor an ICC profile unless the job keeps it). The parsers refuse a file cut anywhere, and one without image
  * data: the AVIF boxes must tile the file and the image item hold an AV1 sequence header; a PNG needs IDAT chunks and
  * IEND, a JPEG a scan and EOI, a GIF an image and its trailer, a WebP its bitstream within the RIFF size, a BMP its
  * pixel array within the file. The TIFF parser reads the strips or tiles of the first page only, so a TIFF output is
@@ -55,8 +56,18 @@ final class OutputCheck
         if ($job->isAnimated() ? $frames > $job->getFrameCount() : $frames !== 1) {
             return sprintf('it has %d frames instead of %d', $frames, $job->getFrameCount());
         }
+        $problem = $info->getFormat() === ImageFormat::TIFF ? self::tiffProblem($path) : null;
+        if ($problem === null && $info->hasTrailingData()) {
+            $problem = 'it holds data that decoders skip';
+        }
+        if ($problem === null && $job->shouldStripMetadata() && $info->hasMetadata()) {
+            $problem = 'it carries metadata that was to be stripped';
+        }
+        if ($problem === null && $job->shouldStripMetadata() && !$job->shouldKeepIccProfile() && $info->hasIccProfile()) {
+            $problem = 'it carries an ICC profile that was to be stripped';
+        }
 
-        return $info->getFormat() === ImageFormat::TIFF ? self::tiffProblem($path) : null;
+        return $problem;
     }
 
     /**

@@ -158,5 +158,7 @@ final class GdWorker extends AbstractWorker
             throw new \RuntimeException('The output could not be encoded.', self::EXIT_FAILED);
         }
         self::assertWritten($output);
+        // GD keeps no metadata of the input, but its JPEG encoder adds a comment of its own.
+        self::dropEncoderMetadata($output, $job['output_format'], false);
     }
 }

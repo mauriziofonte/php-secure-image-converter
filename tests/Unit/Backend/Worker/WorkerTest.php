@@ -9,6 +9,7 @@ use Mfonte\SecureImageConverter\Backend\Worker\GdWorker;
 use Mfonte\SecureImageConverter\Backend\Worker\ImagickWorker;
 use Mfonte\SecureImageConverter\Contract\ImageFormat;
 use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
+use Mfonte\SecureImageConverter\Tests\Fixtures\ImageBuilder;
 use Mfonte\SecureImageConverter\Validation\ImageInspector;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -228,6 +229,79 @@ final class WorkerTest extends TestCase
         self::assertSame(AbstractWorker::EXIT_OK, $code);
         $info = (new ImageInspector(null, ImageFormat::all()))->inspect((string) realpath('output.webp'));
         self::assertSame(['webp', 6, 6], [$info->getFormat(), $info->getWidth(), $info->getHeight()]);
+    }
+
+    public function testAGdJpegCarriesNoMetadata(): void
+    {
+        if (!extension_loaded('gd')) {
+            self::markTestSkipped('ext-gd is not loaded.');
+        }
+        copy(__DIR__ . '/../../../../resources/probe/still.png', 'input.png');
+        file_put_contents(AbstractWorker::JOB_FILE, json_encode(['output' => 'output.jpg', 'output_format' => 'jpeg', 'strip' => false] + self::job()));
+
+        ob_start();
+        $code = GdWorker::main(['gd.php', 'convert']);
+        ob_end_clean();
+
+        self::assertSame(AbstractWorker::EXIT_OK, $code);
+        $info = (new ImageInspector(null, ImageFormat::all()))->inspect((string) realpath('output.jpg'));
+        self::assertSame([ImageFormat::JPEG, false, false], [$info->getFormat(), $info->hasMetadata(), $info->hasTrailingData()]);
+    }
+
+    /**
+     * Encoder outputs with metadata of their own, and whether an ICC profile remains once it is dropped with and
+     * without keeping the profile.
+     *
+     * @return array<string, array{string, string}>
+     */
+    public static function encoderMetadata(): array
+    {
+        $jpeg = ImageBuilder::jpeg(8, 6, 1, ImageBuilder::jpegSegment(0xFE, 'CREATOR: gd-jpeg v1.0') . ImageBuilder::jpegExif()
+            . ImageBuilder::jpegSegment(0xED, 'Photoshop 3.0') . ImageBuilder::jpegIcc() . ImageBuilder::jpegSegment(0xEE, "Adobe\0\x64\0\0\0\0\1")
+            . ImageBuilder::jpegSegment(0xE0, "JFXX\0\x10"));
+        $application = static function (string $identifier, string $data): string {
+            return "\x21\xFF\x0B" . $identifier . ImageBuilder::gifSubBlocks($data);
+        };
+        $gif = ImageBuilder::gif(8, 6, 1, $application('ImageMagick', 'gamma=0.45455') . ImageBuilder::gifComment('made here')
+            . $application('NETSCAPE2.0', "\x01\0\0") . $application('ICCRGBG1012', ImageBuilder::iccProfile()) . "\x21\x01" . ImageBuilder::gifSubBlocks(str_repeat("\0", 12) . 'text'));
+
+        return [
+            'jpeg' => ['jpeg', $jpeg],
+            'gif' => ['gif', $gif],
+        ];
+    }
+
+    /**
+     * @dataProvider encoderMetadata
+     */
+    #[DataProvider('encoderMetadata')]
+    public function testEncoderMetadataIsDropped(string $format, string $bytes): void
+    {
+        $inspector = new ImageInspector(null, ImageFormat::all());
+        file_put_contents('output', $bytes);
+        $before = $inspector->inspect((string) realpath('output'));
+        self::assertSame([true, true], [$before->hasMetadata(), $before->hasIccProfile()], 'the fixture carries both');
+
+        foreach ([true, false] as $keepIcc) {
+            file_put_contents('output', $bytes);
+            StrippingWorker::drop('output', $format, $keepIcc);
+            clearstatcache();
+            $after = $inspector->inspect((string) realpath('output'));
+
+            self::assertSame([$format, 8, 6], [$after->getFormat(), $after->getWidth(), $after->getHeight()]);
+            self::assertSame([false, $keepIcc, false], [$after->hasMetadata(), $after->hasIccProfile(), $after->hasTrailingData()]);
+        }
+    }
+
+    public function testAnOutputThatDoesNotParseIsLeftAsItIs(): void
+    {
+        foreach (['jpeg' => substr(ImageBuilder::jpeg(8, 6, 1, ImageBuilder::jpegExif()), 0, 30), 'gif' => 'GIF89a' . "\0\0", 'png' => ImageBuilder::png(8, 6, 8, 2, ImageBuilder::pngChunk('tEXt', "k\0v"))] as $format => $bytes) {
+            file_put_contents('output', $bytes);
+            StrippingWorker::drop('output', $format, false);
+            clearstatcache();
+
+            self::assertSame($bytes, file_get_contents('output'), $format);
+        }
     }
 
     /**

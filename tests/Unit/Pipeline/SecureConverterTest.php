@@ -276,6 +276,14 @@ final class SecureConverterTest extends TestCase
             'an animation for a still job' => [static function (BackendJob $job): void {
                 file_put_contents($job->getOutputPath(), ImageBuilder::webpAnimation($job->getWidth(), $job->getHeight(), 2));
             }, 'The output has 2 frames instead of 1.'],
+            'a page after the image' => [static function (BackendJob $job): void {
+                file_put_contents($job->getOutputPath(), ImageBuilder::webpLossless($job->getWidth(), $job->getHeight()) . '<html><script>alert(1)</script></html>');
+            }, 'The output holds data that decoders skip.'],
+            'EXIF that was to be stripped' => [static function (BackendJob $job): void {
+                $chunks = ImageBuilder::vp8x(0x08, $job->getWidth(), $job->getHeight()) . ImageBuilder::webpChunk('VP8L', ImageBuilder::vp8l($job->getWidth(), $job->getHeight()))
+                    . ImageBuilder::webpChunk('EXIF', "MM\x00\x2a\x00\x00\x00\x08\x00\x00GPS-secret");
+                file_put_contents($job->getOutputPath(), ImageBuilder::riff($chunks));
+            }, 'The output carries metadata that was to be stripped.'],
         ];
     }
 
@@ -562,16 +570,18 @@ final class SecureConverterTest extends TestCase
     }
 
     /**
-     * A writer of a lossless WEBP of the job's size, padded to at least $size bytes with an unknown chunk.
+     * A writer of a lossless WEBP of the job's size, padded to at least $size bytes.
      *
      * @return callable(BackendJob): void
      */
     private static function webpWriter(int $size = 0): callable
     {
         return static function (BackendJob $job) use ($size): void {
-            $chunks = ImageBuilder::webpChunk('VP8L', ImageBuilder::vp8l($job->getWidth(), $job->getHeight()));
-            $padding = max(0, $size - strlen(ImageBuilder::riff($chunks)) - 8);
-            file_put_contents($job->getOutputPath(), ImageBuilder::riff($chunks . ($size > 0 ? ImageBuilder::webpChunk('ABCD', str_repeat('x', $padding)) : '')));
+            // The padding lengthens the bitstream, which the header parser does not decode: neither metadata nor
+            // data that decoders skip.
+            $bitstream = ImageBuilder::vp8l($job->getWidth(), $job->getHeight());
+            $padding = max(0, $size - strlen(ImageBuilder::riff(ImageBuilder::webpChunk('VP8L', $bitstream))));
+            file_put_contents($job->getOutputPath(), ImageBuilder::riff(ImageBuilder::webpChunk('VP8L', $bitstream . str_repeat("\0", $padding))));
         };
     }
 

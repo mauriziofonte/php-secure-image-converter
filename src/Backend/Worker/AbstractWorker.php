@@ -126,6 +126,30 @@ abstract class AbstractWorker
     }
 
     /**
+     * Removes the metadata that an encoder adds on its own from a JPEG or GIF output, for a job that strips metadata:
+     * libgd writes a "CREATOR: gd-jpeg" comment in every JPEG, ImageMagick an "ImageMagick" application extension
+     * (the gamma) in every GIF. Removed from a JPEG: comments and every APPn segment but JFIF (APP0), Adobe (APP14,
+     * which tells the colour transform) and, when $keepIcc, the ICC profile (APP2), up to the first scan. Removed from
+     * a GIF: comments, plain text and application extensions but the loop ones and, when $keepIcc, the ICC profile.
+     * Other formats, and a file that does not parse as expected, are left as they are (the library's output check
+     * refuses the latter).
+     */
+    final protected static function dropEncoderMetadata(string $path, string $format, bool $keepIcc): void
+    {
+        if ($format !== 'jpeg' && $format !== 'gif') {
+            return;
+        }
+        $bytes = @file_get_contents($path);
+        if (!is_string($bytes)) {
+            throw new \RuntimeException('The output could not be read back.', self::EXIT_FAILED);
+        }
+        $kept = $format === 'jpeg' ? self::jpegWithoutMetadata($bytes, $keepIcc) : self::gifWithoutMetadata($bytes, $keepIcc);
+        if ($kept !== null && $kept !== $bytes && @file_put_contents($path, $kept) !== strlen($kept)) {
+            throw new \RuntimeException('The output could not be written.', self::EXIT_FAILED);
+        }
+    }
+
+    /**
      * Fails unless the output file exists and is not empty.
      */
     final protected static function assertWritten(string $path): void
@@ -280,6 +304,118 @@ abstract class AbstractWorker
         }
 
         return is_int($value) ? (string) $value : 'null';
+    }
+
+    /**
+     * The JPEG without its metadata segments before the first scan, or null when its segments do not parse.
+     */
+    private static function jpegWithoutMetadata(string $bytes, bool $keepIcc): ?string
+    {
+        $length = strlen($bytes);
+        if ($length < 4 || substr($bytes, 0, 2) !== "\xFF\xD8") {
+            return null;
+        }
+        $kept = "\xFF\xD8";
+        $offset = 2;
+        while ($offset + 4 <= $length) {
+            if ($bytes[$offset] !== "\xFF") {
+                return null;
+            }
+            $marker = ord($bytes[$offset + 1]);
+            if ($marker === 0xFF) {
+                // A fill byte before a marker.
+                ++$offset;
+                continue;
+            }
+            if ($marker === 0xDA) {
+                // Start of scan: the entropy-coded data and the rest of the file are kept as written.
+                return $kept . substr($bytes, $offset);
+            }
+            $size = (ord($bytes[$offset + 2]) << 8) | ord($bytes[$offset + 3]);
+            if ($size < 2 || $offset + 2 + $size > $length) {
+                return null;
+            }
+            $segment = substr($bytes, $offset, 2 + $size);
+            $payload = substr($segment, 4, 14);
+            $drop = $marker === 0xFE
+                || ($marker === 0xE0 && strncmp($payload, "JFIF\0", 5) !== 0)
+                || ($marker === 0xE2 && !($keepIcc && strncmp($payload, "ICC_PROFILE\0", 12) === 0))
+                || ($marker === 0xEE && strncmp($payload, 'Adobe', 5) !== 0)
+                || ($marker >= 0xE1 && $marker <= 0xEF && $marker !== 0xE2 && $marker !== 0xEE);
+            if (!$drop) {
+                $kept .= $segment;
+            }
+            $offset += 2 + $size;
+        }
+
+        return null;
+    }
+
+    /**
+     * The GIF without its metadata extensions, or null when its blocks do not parse.
+     */
+    private static function gifWithoutMetadata(string $bytes, bool $keepIcc): ?string
+    {
+        $length = strlen($bytes);
+        if ($length < 13 || (substr($bytes, 0, 6) !== 'GIF89a' && substr($bytes, 0, 6) !== 'GIF87a')) {
+            return null;
+        }
+        $flags = ord($bytes[10]);
+        $offset = 13 + (($flags & 0x80) !== 0 ? 3 << (($flags & 0x07) + 1) : 0);
+        $kept = substr($bytes, 0, $offset);
+        while ($offset < $length) {
+            $introducer = $bytes[$offset];
+            if ($introducer === "\x3B") {
+                return $kept . "\x3B";
+            }
+            $start = $offset;
+            if ($introducer === "\x21") {
+                if ($offset + 2 > $length) {
+                    return null;
+                }
+                $label = ord($bytes[$offset + 1]);
+                $identifier = $offset + 3 <= $length ? substr($bytes, $offset + 3, min(11, ord($bytes[$offset + 2]))) : '';
+                $offset = self::skipGifSubBlocks($bytes, $offset + 2);
+                $drop = $label === 0xFE || $label === 0x01
+                    || ($label === 0xFF && !in_array($identifier, ['NETSCAPE2.0', 'ANIMEXTS1.0'], true) && !($keepIcc && $identifier === 'ICCRGBG1012'));
+            } elseif ($introducer === "\x2C") {
+                if ($offset + 10 > $length) {
+                    return null;
+                }
+                $local = ord($bytes[$offset + 9]);
+                $offset += 10 + (($local & 0x80) !== 0 ? 3 << (($local & 0x07) + 1) : 0) + 1;
+                $offset = $offset <= $length ? self::skipGifSubBlocks($bytes, $offset) : null;
+                $drop = false;
+            } else {
+                return null;
+            }
+            if ($offset === null) {
+                return null;
+            }
+            if (!$drop) {
+                $kept .= substr($bytes, $start, $offset - $start);
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * The offset after the sub-blocks that start at $offset (their terminator included), or null when they run past
+     * the end.
+     */
+    private static function skipGifSubBlocks(string $bytes, int $offset): ?int
+    {
+        $length = strlen($bytes);
+        while ($offset < $length) {
+            $size = ord($bytes[$offset]);
+            $offset += 1 + $size;
+            if ($size === 0) {
+                return $offset <= $length ? $offset : null;
+            }
+        }
+
+        return null;
     }
 
     /**

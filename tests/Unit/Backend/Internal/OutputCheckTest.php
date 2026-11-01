@@ -8,6 +8,7 @@ use Mfonte\SecureImageConverter\Backend\BackendJob;
 use Mfonte\SecureImageConverter\Backend\Internal\OutputCheck;
 use Mfonte\SecureImageConverter\Contract\ImageFormat;
 use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
+use Mfonte\SecureImageConverter\Tests\Fixtures\ImageBuilder;
 use Mfonte\SecureImageConverter\Validation\ImageInspector;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -124,6 +125,36 @@ final class OutputCheckTest extends TestCase
         self::assertNull(OutputCheck::problem($animated, $probe . '/still.webp', 1048576), 'an encoder may merge identical frames');
     }
 
+    /**
+     * @dataProvider images
+     */
+    #[DataProvider('images')]
+    public function testAnOutputFollowedByDataThatDecodersSkipIsRefused(string $path): void
+    {
+        $source = $this->image($path);
+        $padded = $this->path('padded-' . basename($source));
+        file_put_contents($padded, file_get_contents($source) . '<html><script>alert(1)</script></html>');
+
+        // AVIF boxes must tile the file: bytes that are no box make it invalid instead.
+        $expected = substr($source, -5) === '.avif' ? 'it is not a valid avif image' : 'it holds data that decoders skip';
+
+        self::assertSame($expected, OutputCheck::problem(self::jobFor($source), $padded, 1048576));
+    }
+
+    public function testMetadataIsRefusedWhenTheJobStripsIt(): void
+    {
+        $jpeg = \dirname(__DIR__, 4) . '/resources/probe/still.jpg';
+        $job = self::jobFor($jpeg);
+
+        self::assertNull(OutputCheck::problem($job, $jpeg, 1048576));
+        self::assertSame('it carries metadata that was to be stripped', OutputCheck::problem($job->withStripMetadata(true), $jpeg, 1048576));
+        $icc = $this->path('icc.jpg');
+        file_put_contents($icc, ImageBuilder::jpeg(8, 8, 1, ImageBuilder::jpegIcc()));
+        $job = self::jobFor($icc)->withStripMetadata(true);
+        self::assertNull(OutputCheck::problem($job, $icc, 1048576), 'the ICC profile is kept by default');
+        self::assertSame('it carries an ICC profile that was to be stripped', OutputCheck::problem($job->withKeepIccProfile(false), $icc, 1048576));
+    }
+
     public function testATiffOutputHoldsOnePage(): void
     {
         $tiff = \dirname(__DIR__, 4) . '/resources/probe/still.tiff';
@@ -156,19 +187,19 @@ final class OutputCheckTest extends TestCase
     }
 
     /**
-     * A job converting an image to its own format and size, keeping its frames.
+     * A job converting an image to its own format and size, keeping its frames and metadata.
      */
     private static function jobFor(string $path, ?int $width = null, ?int $height = null): BackendJob
     {
         $info = (new ImageInspector(null, array_values(array_diff(ImageFormat::all(), [ImageFormat::SVG]))))->inspect($path);
 
-        return new BackendJob(
+        return (new BackendJob(
             $path,
             $info,
             '/nonexistent/output.' . ImageFormat::extension($info->getFormat()),
             $info->getFormat(),
             $width !== null ? $width : $info->getWidth(),
             $height !== null ? $height : $info->getHeight()
-        );
+        ))->withStripMetadata(false);
     }
 }
