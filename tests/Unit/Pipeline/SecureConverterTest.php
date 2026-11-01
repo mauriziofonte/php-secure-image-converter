@@ -171,6 +171,24 @@ final class SecureConverterTest extends TestCase
         $this->assertCleanedUp();
     }
 
+    public function testAPrivateCopyRewrittenByTheBackendIsNeverPassedThrough(): void
+    {
+        $input = ImageBuilder::png(40, 30);
+        $write = self::webpWriter(strlen($input));
+        $backend = self::backend('cwebp', [ImageFormat::PNG], [ImageFormat::WEBP], static function (BackendJob $job) use ($write, $input): void {
+            $write($job);
+            // A backend running as the converter's user rewrites the copy it decodes, to have it served.
+            file_put_contents($job->getInputPath(), substr_replace($input, '<?php echo 1; ?>', -12, 0));
+        });
+
+        $exception = $this->failure([$backend], $input, new ConversionRequest());
+
+        self::assertInstanceOf(OutputVerificationException::class, $exception);
+        self::assertSame('The private copy of the input changed during the conversion.', $exception->getMessage());
+        self::assertFileDoesNotExist($this->path('out.webp'));
+        $this->assertCleanedUp();
+    }
+
     /**
      * Inputs larger than their converted output, but that do not satisfy the request: never passed through.
      *

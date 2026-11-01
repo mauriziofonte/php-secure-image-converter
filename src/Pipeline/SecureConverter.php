@@ -19,6 +19,7 @@ use Mfonte\SecureImageConverter\Contract\Exception\ConversionTimeoutException;
 use Mfonte\SecureImageConverter\Contract\Exception\ExceptionInterface;
 use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
 use Mfonte\SecureImageConverter\Contract\Exception\LimitExceededException;
+use Mfonte\SecureImageConverter\Contract\Exception\OutputVerificationException;
 use Mfonte\SecureImageConverter\Contract\ImageFormat;
 use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
 use Mfonte\SecureImageConverter\Validation\ImageInfo;
@@ -45,8 +46,10 @@ use Mfonte\SecureImageConverter\Validation\ImageInspectorInterface;
  *    with conversion_timeout before it runs) and runs the backend.
  * 6. Verifies the output (OutputVerifier: sniffed format, size, frames, limits).
  * 7. Keeps the smaller file (P-12): when the output is not smaller than the input and the input already satisfies the
- *    request (PassthroughPolicy), the input copy is returned instead, byte for byte, and the result says so.
- * 8. Publishes the chosen file to the output path atomically (a new file in the output's directory renamed over it)
+ *    request (PassthroughPolicy), the input copy is returned instead, byte for byte, and the result says so. Its
+ *    SHA-256, taken before it was inspected, must still match: a backend running as this user could rewrite it.
+ * 8. Publishes the chosen file to the output path atomically (a new file in the output's directory, checked again,
+ *    renamed over it)
  *    and removes the working directory, whatever the outcome. On failure nothing is left at the output path.
  *
  * Every failure is an exception of Contract\Exception with its error code (see ConverterInterface::convert()).
@@ -133,6 +136,9 @@ final class SecureConverter implements ConverterInterface
         try {
             $source = $directory->pathOf(self::SOURCE_NAME);
             $this->copyInput($input, $source);
+            // A backend runs as this user at the rlimit level and below, and can reach the copy: what was inspected
+            // is recorded, so that a passthrough never publishes a copy changed since.
+            $digest = self::digest($source);
             $info = $this->inspector->inspect($source);
             $capabilities = $this->getCapabilities();
             $converted = $directory->pathOf(self::CONVERTED_NAME);
@@ -165,7 +171,23 @@ final class SecureConverter implements ConverterInterface
                 );
                 $output = $info;
             }
-            $this->publish($passthrough ? $source : $converted, $destination);
+            if ($passthrough) {
+                $this->publish($source, $destination, static function (string $copy) use ($digest): void {
+                    if (self::digest($copy) !== $digest) {
+                        throw new OutputVerificationException('The private copy of the input changed during the conversion.');
+                    }
+                });
+            } else {
+                $verifier = $this->verifier;
+                $maxBytes = $this->options->getMaxOutputBytes();
+                $verified = $output;
+                // The copy that is published is verified again: the backend's file could change after its check.
+                $this->publish($converted, $destination, static function (string $copy) use ($verifier, $job, $capabilities, $maxBytes, $verified): void {
+                    if ($verifier->verify($job, $copy, $capabilities, $maxBytes)->getByteSize() !== $verified->getByteSize()) {
+                        throw new OutputVerificationException('The output changed after it was verified.');
+                    }
+                });
+            }
 
             return new ConversionResult(
                 $outputPath,
@@ -408,16 +430,36 @@ final class SecureConverter implements ConverterInterface
     }
 
     /**
-     * Copies the chosen file next to the destination and renames it over the destination.
+     * Copies the chosen file next to the destination, checks the copy and renames it over the destination.
      *
-     * @throws ConversionFailedException when it cannot be written
+     * @param callable(string): void $verify called with the path of the copy; throws to refuse it
+     *
+     * @throws ConversionFailedException   when it cannot be written
+     * @throws OutputVerificationException when the copy is refused
      */
-    private function publish(string $file, string $destination): void
+    private function publish(string $file, string $destination, callable $verify): void
     {
         if (is_dir($destination)) {
             throw new InvalidArgumentException('The output path is a directory.');
         }
-        OutputFile::copy($file, $destination, PHP_INT_MAX);
+        OutputFile::copy($file, $destination, PHP_INT_MAX, $verify);
+    }
+
+    /**
+     * SHA-256 of a file.
+     *
+     * @throws ConversionFailedException when it cannot be read
+     */
+    private static function digest(string $path): string
+    {
+        $digest = self::attempt(static function () use ($path) {
+            return @hash_file('sha256', $path);
+        });
+        if (!is_string($digest)) {
+            throw new ConversionFailedException('The private copy of the input could not be read.');
+        }
+
+        return $digest;
     }
 
     /**
