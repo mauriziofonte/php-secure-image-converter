@@ -6,9 +6,8 @@ namespace Mfonte\SecureImageConverter\Contract\Exception;
 
 /**
  * The input's format was identified but its content cannot be processed: it is malformed or truncated, or it is
- * spoofed (its content does not match the format its header announces), or its header is valid but a backend failed,
- * crashed or wrote an unusable output on it while it converts a valid image of the same format. Error code
- * ErrorCode::INVALID_IMAGE.
+ * spoofed (its content does not match the format its header announces), or its header is valid but the decoder failed
+ * or crashed on its data while it converts a valid image of the same format. Error code ErrorCode::INVALID_IMAGE.
  *
  * animationRejected() reports a valid animated input refused because the request's animation policy is
  * ConversionRequest::ANIMATION_REJECT. Error code ErrorCode::ANIMATION_REJECTED.

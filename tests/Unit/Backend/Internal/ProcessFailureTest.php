@@ -68,4 +68,13 @@ final class ProcessFailureTest extends TestCase
         self::assertTrue(ProcessFailure::reportsMemoryExhaustion('(vips:1): GLib-ERROR **: Error creating thread: Resource temporarily unavailable'));
         self::assertFalse(ProcessFailure::reportsMemoryExhaustion('Not a JPEG file: starts with 0x89 0x50'));
     }
+
+    public function testHostErrorsAreRecognised(): void
+    {
+        self::assertTrue(ProcessFailure::reportsHostError('Error! Cannot save file: No space left on device'));
+        self::assertTrue(ProcessFailure::reportsHostError('TIFFWriteDirectory: Read-only file system'));
+        self::assertTrue(ProcessFailure::reportsHostError('unable to open image: Too many open files'));
+        self::assertTrue(ProcessFailure::reportsHostError('write failed: Input/output error'));
+        self::assertFalse(ProcessFailure::reportsHostError('libpng error: IDAT: invalid distance too far back'));
+    }
 }

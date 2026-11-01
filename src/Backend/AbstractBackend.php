@@ -27,6 +27,7 @@ use Mfonte\SecureImageConverter\Isolation\ProcessResult;
 use Mfonte\SecureImageConverter\Isolation\ProcessRunnerInterface;
 use Mfonte\SecureImageConverter\Isolation\ResourceLimits;
 use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
+use Mfonte\SecureImageConverter\Validation\ImageInfo;
 
 /**
  * What every backend shares: one private working directory per job, the input linked into it under a fixed name, a
@@ -52,17 +53,21 @@ use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
  *   (OutputFile), checks the copy (OutputCheck) and only then renames it over the output path, and removes the
  *   directory.
  *
- * A program that fails on a job without hitting a limit (an exit code, or a crash such as SIGSEGV), or writes an output
- * that OutputCheck refuses, failed either on the input or by itself. The input passed the header checks of
- * ImageInspector, which read no pixel data, so a decoder can still meet data it refuses or crashes on (a truncated
- * stream, more chunks than libpng caches, a crafted file), and an encoder can still write what the input made of it
- * (a TIFF of 18 samples from one of 16). convert() tells the two apart by converting the probe image of the input's
- * format (its animation for an animated job) to the same output with the same program: when that succeeds the
- * program is sound and the input is the cause, reported as InvalidImageException (invalid_image, 422; a retry will
- * not help); otherwise the failure is the backend's, ConversionFailedException (conversion_failed, 500). This costs
- * one conversion of a small image, and only after a failure. No other backend is tried: each decoder that reads a
- * hostile input is more attack surface. A missing, linked or oversized output file, and a failure to copy it, stay
- * conversion_failed.
+ * A program that fails on a job without hitting a limit (an exit code, or a crash such as SIGSEGV) failed either on
+ * the input or by itself. The input passed the header checks of ImageInspector, which read no pixel data, so a
+ * decoder can still meet data it refuses or crashes on: a truncated stream, more chunks than libpng caches, a crafted
+ * file. convert() tells the two apart by converting the probe image of the input's format (its animation for an
+ * animated job) with the same program and the job's own parameters (output format, fit and size relative to the
+ * input, orientation, frames, quality, effort, lossless mode, metadata handling): when that succeeds the program is
+ * sound and the input is the cause, reported as InvalidImageException (invalid_image, 422; a retry will not help);
+ * otherwise the failure is the backend's, ConversionFailedException (conversion_failed, 500). A failure that may come
+ * from the host stays conversion_failed whatever the probe does: one whose program output reports a host error (no
+ * space left, a read-only or failing file system, too many open files), and any failure while the file system of
+ * the working directory has less free space than the largest output a job may write. This costs one conversion of
+ * a small image, and only after a failure. No other backend is tried: each decoder that reads a hostile input is
+ * more attack surface. An output that OutputCheck refuses (a program that exited with 0 and wrote a file that is not
+ * the image asked for) is the backend's fault, conversion_failed: a backend whose encoder cannot produce what a job
+ * asks for must not declare it (CapabilityProber).
  *
  * Capabilities are probed with CapabilityProber on first use and kept in the capability cache (BackendOptions), keyed
  * by the programs (path, size, modification time, inode), the isolation level and the isolation options. A cache that
@@ -573,8 +578,7 @@ abstract class AbstractBackend implements BackendInterface
 
     /**
      * Runs one job; $timeoutSeconds bounds probe runs below the runner's timeout. With $attribute, a program failure
-     * that is no resource limit or timeout, and an output that OutputCheck refuses, are checked against the probe
-     * image (see attribute()).
+     * that is no resource limit or timeout is checked against the probe image (see attribute()).
      *
      * @param array<string, string> $facts
      *
@@ -615,7 +619,7 @@ abstract class AbstractBackend implements BackendInterface
             );
             if (!$result->isSuccessful()) {
                 $failure = ProcessFailure::exception($this->getName(), $result, $this->isWorker());
-                if ($attribute && $failure instanceof ConversionFailedException) {
+                if ($attribute && $failure instanceof ConversionFailedException && !$this->mayBeHostFailure($result, $directory, $runner)) {
                     $directory->remove();
                     $failure = $this->attribute($job, $facts, $failure);
                 }
@@ -624,30 +628,17 @@ abstract class AbstractBackend implements BackendInterface
             }
             $maxBytes = $runner->getOptions()->getResourceLimits()->getFileSizeBytes();
             $name = $this->getName();
-            $unusable = null;
-
-            try {
-                OutputFile::copy(
-                    $directory->pathOf($output),
-                    $job->getOutputPath(),
-                    $maxBytes,
-                    static function (string $copy) use ($job, $maxBytes, $name, &$unusable): void {
-                        $problem = OutputCheck::problem($job, $copy, $maxBytes);
-                        if ($problem !== null) {
-                            $unusable = new ConversionFailedException(sprintf('The %s conversion produced an unusable output: %s.', $name, $problem));
-
-                            throw $unusable;
-                        }
+            OutputFile::copy(
+                $directory->pathOf($output),
+                $job->getOutputPath(),
+                $maxBytes,
+                static function (string $copy) use ($job, $maxBytes, $name): void {
+                    $problem = OutputCheck::problem($job, $copy, $maxBytes);
+                    if ($problem !== null) {
+                        throw new ConversionFailedException(sprintf('The %s conversion produced an unusable output: %s.', $name, $problem));
                     }
-                );
-            } catch (ConversionFailedException $exception) {
-                if (!$attribute || $exception !== $unusable) {
-                    throw $exception;
                 }
-                $directory->remove();
-
-                throw $this->attribute($job, $facts, $exception);
-            }
+            );
 
             return new BackendResult($this->getName(), $job, $result->getDurationMs(), $result->getIsolationLevel());
         } finally {
@@ -656,10 +647,25 @@ abstract class AbstractBackend implements BackendInterface
     }
 
     /**
-     * The exception for a job whose program failed without hitting a limit, or wrote an output that OutputCheck
-     * refuses: InvalidImageException when the program still converts the probe image of the input's format (its
-     * animation, for an animated job) to the job's output format, so that the input is what it could not process; the
-     * given failure otherwise, also when there is no probe image of the format or the check cannot run.
+     * Whether a failed run may be the host's doing rather than the input's: its output reports a host error
+     * (ProcessFailure::reportsHostError()), or the file system of the working directory has less free space than
+     * the largest file the run may write, or its free space cannot be read.
+     */
+    private function mayBeHostFailure(ProcessResult $result, WorkingDirectory $directory, ProcessRunnerInterface $runner): bool
+    {
+        if (ProcessFailure::reportsHostError($result->getStderr() . "\n" . $result->getStdout())) {
+            return true;
+        }
+        $free = @disk_free_space(\dirname($directory->getPath()));
+
+        return !is_float($free) || $free < $runner->getOptions()->getResourceLimits()->getFileSizeBytes();
+    }
+
+    /**
+     * The exception for a job whose program failed without hitting a limit: InvalidImageException when the program
+     * still converts the probe image of the input's format (its animation, for an animated job) with the job's
+     * parameters (probeJob()), so that the input is what it could not process; the given failure otherwise, also
+     * when there is no probe image of the format or the check cannot run.
      *
      * @param array<string, string> $facts
      *
@@ -681,15 +687,11 @@ abstract class AbstractBackend implements BackendInterface
         }
 
         try {
-            $probe = new BackendJob(
-                $image[0],
-                $image[1],
-                $directory->pathOf(self::OUTPUT_NAME . '.' . ImageFormat::extension($job->getOutputFormat())),
-                $job->getOutputFormat(),
-                $image[1]->getWidth(),
-                $image[1]->getHeight()
+            $this->perform(
+                self::probeJob($job, $image, $directory->pathOf(self::OUTPUT_NAME . '.' . ImageFormat::extension($job->getOutputFormat()))),
+                $facts,
+                self::PROBE_TIMEOUT_SECONDS
             );
-            $this->perform($probe->withKeepIccProfile(false)->withEffort(0), $facts, self::PROBE_TIMEOUT_SECONDS);
         } catch (ExceptionInterface $exception) {
             return $failure;
         } finally {
@@ -697,10 +699,41 @@ abstract class AbstractBackend implements BackendInterface
         }
 
         return new InvalidImageException(sprintf(
-            '%s It converts a valid %s image, so the cause is this image: it is malformed or uses something the backend refuses.',
+            '%s It converts a valid %s image, so this image is malformed or uses something its decoder refuses.',
             $failure->getMessage(),
             $job->getInputFormat()
         ));
+    }
+
+    /**
+     * The job of attribute(): the probe image converted as the job converts its input. The output format, fit,
+     * orientation, frames kept, quality, effort, lossless mode and metadata handling are the job's; the size is the
+     * probe image's, after the orientation, scaled as the job scales its input when it resizes (from 1 pixel to the
+     * job's own size per side). The probe image is upright and carries no metadata, so the orientation and the metadata options only
+     * select the same program options.
+     *
+     * @param array{0: string, 1: ImageInfo} $image
+     */
+    private static function probeJob(BackendJob $job, array $image, string $outputPath): BackendJob
+    {
+        $info = $image[1];
+        $transposed = $job->getOrientation() >= BackendJob::FIRST_TRANSPOSING_ORIENTATION;
+        $width = $transposed ? $info->getHeight() : $info->getWidth();
+        $height = $transposed ? $info->getWidth() : $info->getHeight();
+        if ($job->isResized()) {
+            $width = max(1, min($job->getWidth(), (int) round($width * $job->getWidth() / $job->getOrientedWidth())));
+            $height = max(1, min($job->getHeight(), (int) round($height * $job->getHeight() / $job->getOrientedHeight())));
+        }
+
+        return (new BackendJob($image[0], $info, $outputPath, $job->getOutputFormat(), $width, $height))
+            ->withFit($job->getFit())
+            ->withOrientation($job->getOrientation())
+            ->withAnimation($job->keepsAnimation())
+            ->withQuality($job->getRequestedQuality())
+            ->withEffort($job->getEffort())
+            ->withLossless($job->isLossless())
+            ->withStripMetadata($job->shouldStripMetadata())
+            ->withKeepIccProfile($job->shouldKeepIccProfile());
     }
 
     /**

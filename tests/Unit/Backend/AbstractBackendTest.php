@@ -40,9 +40,10 @@ final class AbstractBackendTest extends TestCase
     use FakePrograms;
 
     /**
-     * What the fake cwebp does: "copy", "fail", "signal", "timeout", "link", "truncated", "wrong size", or "fail on
-     * input", "crash on input" and "unusable on input" (an exit code 1, SIGSEGV or a truncated output for the job of
-     * hostileJob(), a copy for every other run).
+     * What the fake cwebp does: "copy", "fail", "signal", "timeout", "link", "truncated", "wrong size", "fail at
+     * quality 42" (an exit code 1 for any input at that quality), or "fail on input", "crash on input", "disk full on
+     * input" and "truncated on input" (an exit code 1, SIGSEGV, an exit code 1 that reports ENOSPC, or a truncated
+     * output for the job of hostileJob(), a copy for every other run).
      *
      * @var string
      */
@@ -88,15 +89,20 @@ final class AbstractBackendTest extends TestCase
                 if (substr($behaviour, -9) === ' on input') {
                     $behaviour = $hostile ? $behaviour : 'copy';
                 }
+                if ($behaviour === 'fail at quality 42') {
+                    $behaviour = in_array('42', $command, true) ? 'fail' : 'copy';
+                }
                 switch ($behaviour) {
+                    case 'disk full on input':
+                        return FakeProcessRunner::result(1, '', 'Error! Cannot save file: No space left on device');
+                    case 'truncated on input':
+                        file_put_contents($output, substr((string) file_get_contents(__DIR__ . '/../../../resources/probe/still.webp'), 0, 20));
+
+                        return FakeProcessRunner::result(0);
                     case 'fail on input':
                         return FakeProcessRunner::result(1, '', 'libpng error: IDAT: invalid distance too far back');
                     case 'crash on input':
                         return FakeProcessRunner::result(0, '', '', 11);
-                    case 'unusable on input':
-                        file_put_contents($output, substr((string) file_get_contents(__DIR__ . '/../../../resources/probe/still.webp'), 0, 20));
-
-                        return FakeProcessRunner::result(0);
                     case 'fail':
                         return FakeProcessRunner::result(1, '', 'Unsupported color conversion request');
                     case 'signal':
@@ -353,9 +359,8 @@ final class AbstractBackendTest extends TestCase
     }
 
     /**
-     * A program that fails, crashes or writes an unusable output on the input while it still converts the probe image of
-     * the format failed on the input: invalid_image, never conversion_failed. One more run checks the probe image, and
-     * nothing is left behind.
+     * A program that fails or crashes on the input while it still converts the probe image of the format failed on the
+     * input: invalid_image, never conversion_failed. One more run checks the probe image, and nothing is left behind.
      */
     public function testAFailureOnTheInputAloneIsAnInvalidImage(): void
     {
@@ -363,9 +368,8 @@ final class AbstractBackendTest extends TestCase
         $backend = new CwebpBackend($runner, $this->options());
         $backend->getCapabilities();
         $expected = [
-            'fail on input' => 'The cwebp conversion failed (exit code 1). It converts a valid png image, so the cause is this image: it is malformed or uses something the backend refuses.',
-            'crash on input' => 'The cwebp conversion crashed (signal 11). It converts a valid png image, so the cause is this image: it is malformed or uses something the backend refuses.',
-            'unusable on input' => 'The cwebp conversion produced an unusable output: it is not a valid webp image. It converts a valid png image, so the cause is this image: it is malformed or uses something the backend refuses.',
+            'fail on input' => 'The cwebp conversion failed (exit code 1). It converts a valid png image, so this image is malformed or uses something its decoder refuses.',
+            'crash on input' => 'The cwebp conversion crashed (signal 11). It converts a valid png image, so this image is malformed or uses something its decoder refuses.',
         ];
         foreach ($expected as $behaviour => $message) {
             $this->behaviour = $behaviour;
@@ -383,6 +387,75 @@ final class AbstractBackendTest extends TestCase
             self::assertSame('previous', file_get_contents($job->getOutputPath()), $behaviour . ': the destination is left alone');
             self::assertSame([], glob(\dirname($job->getOutputPath()) . '/.sic-*'), $behaviour . ': no copy is left behind');
         }
+    }
+
+    /**
+     * The probe image is converted with the job's parameters: a program that fails at a quality fails on the probe
+     * image at that quality too, so the failure stays conversion_failed although it converts the probe image at the
+     * default quality.
+     */
+    public function testAFailureThatTheJobParametersCauseIsAConversionFailure(): void
+    {
+        $runner = $this->runner();
+        $backend = new CwebpBackend($runner, $this->options());
+        $backend->getCapabilities();
+        $this->behaviour = 'fail at quality 42';
+        $runs = count($runner->getRuns());
+
+        try {
+            $backend->convert($this->hostileJob()->withQuality(42));
+            self::fail('The conversion must fail.');
+        } catch (ConversionFailedException $exception) {
+            self::assertSame('The cwebp conversion failed (exit code 1).', $exception->getMessage());
+        }
+        self::assertCount($runs + 2, $runner->getRuns(), 'the job, then the probe image at quality 42');
+        self::assertContains('42', $runner->getRuns()[$runs + 1]['command']);
+        $backend->convert($this->hostileJob());
+    }
+
+    /**
+     * A failure that reports a host error (ENOSPC here) is not blamed on the input, and the probe image is not
+     * converted: conversion_failed.
+     */
+    public function testAFailureThatReportsAHostErrorIsAConversionFailure(): void
+    {
+        $runner = $this->runner();
+        $backend = new CwebpBackend($runner, $this->options());
+        $backend->getCapabilities();
+        $this->behaviour = 'disk full on input';
+        $runs = count($runner->getRuns());
+
+        try {
+            $backend->convert($this->hostileJob());
+            self::fail('The conversion must fail.');
+        } catch (ConversionFailedException $exception) {
+            self::assertSame('conversion_failed', $exception->getErrorCode());
+        }
+        self::assertCount($runs + 1, $runner->getRuns(), 'no probe run');
+    }
+
+    /**
+     * An output that the output check refuses is the backend's fault even when the backend converts the probe image:
+     * conversion_failed, and the probe image is not converted.
+     */
+    public function testAnUnusableOutputOfTheInputIsAConversionFailure(): void
+    {
+        $runner = $this->runner();
+        $backend = new CwebpBackend($runner, $this->options());
+        $backend->getCapabilities();
+        $this->behaviour = 'truncated on input';
+        $job = $this->hostileJob();
+        $runs = count($runner->getRuns());
+
+        try {
+            $backend->convert($job);
+            self::fail('The conversion must fail.');
+        } catch (ConversionFailedException $exception) {
+            self::assertSame('conversion_failed', $exception->getErrorCode());
+            self::assertStringContainsString('unusable output', $exception->getMessage());
+        }
+        self::assertCount($runs + 1, $runner->getRuns(), 'no probe run');
+        self::assertFileDoesNotExist($job->getOutputPath());
     }
 
     /**

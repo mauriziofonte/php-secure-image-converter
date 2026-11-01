@@ -20,7 +20,7 @@ namespace Mfonte\SecureImageConverter\Contract\Exception;
  * |                              |        |                               | or a variant of it that is not accepted (see  |
  * |                              |        |                               | UnsupportedFormatException)                   |
  * | `invalid_image`              | 422    | InvalidImageException         | identified but malformed, truncated, spoofed, |
- * |                              |        |                               | or failing a backend that converts a valid    |
+ * |                              |        |                               | or failing a decoder that converts a valid    |
  * |                              |        |                               | image of its format                           |
  * | `animation_rejected`         | 422    | InvalidImageException         | animated input with animation policy reject   |
  * | `file_too_large`             | 413    | LimitExceededException        | input byte size above max_bytes               |

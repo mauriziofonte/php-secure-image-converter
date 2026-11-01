@@ -52,8 +52,8 @@ interface BackendInterface
      * @throws ConversionTimeoutException    when the process exceeded its wall-clock timeout
      * @throws IsolationUnavailableException when the isolation level of the runner is not available on the host
      * @throws InvalidImageException         when the program fails or crashes on the input without hitting a limit,
-     *                                       or writes an unusable output, while it converts the probe image of the
-     *                                       input's format (see AbstractBackend)
+     *                                       while it converts the probe image of the input's format (see
+     *                                       AbstractBackend)
      * @throws ConversionFailedException     when the backend is unavailable, its capabilities do not cover the job,
      *                                       or the program fails (on the probe image too) or leaves no regular
      *                                       output file

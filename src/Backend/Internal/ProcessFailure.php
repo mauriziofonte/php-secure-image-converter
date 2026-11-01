@@ -24,7 +24,8 @@ use Mfonte\SecureImageConverter\Isolation\ProcessResult;
  * | any other exit code or signal                                      | ConversionFailedException  | conversion_failed  |
  *
  * AbstractBackend::convert() turns the last row into InvalidImageException (invalid_image) when the backend still
- * converts its probe image of the input's format: the program is sound, the input is what it failed on.
+ * converts its probe image of the input's format with the job's parameters: the program is sound, the input is what
+ * it failed on. A run whose output reports a host error (reportsHostError()) stays conversion_failed.
  *
  * Under the address space limit an allocation fails: the program reports it and exits (ENOMEM, "out of memory",
  * "failed to allocate"), or aborts (GLib's g_error() raises SIGTRAP or SIGABRT after "failed to allocate"), or
@@ -67,6 +68,22 @@ final class ProcessFailure
         'exceeds limit',
         'failed to map segment',
         'error creating thread',
+    ];
+
+    /**
+     * Error output that reports a fault of the host rather than of the input, in lower case.
+     */
+    private const HOST_ERROR_PATTERNS = [
+        'no space left',
+        'enospc',
+        'disk quota exceeded',
+        'edquot',
+        'read-only file system',
+        'erofs',
+        'input/output error',
+        'too many open files',
+        'emfile',
+        'enfile',
     ];
 
     /**
@@ -121,6 +138,22 @@ final class ProcessFailure
         }
 
         return null;
+    }
+
+    /**
+     * Whether program output reports a fault of the host (a full or failing file system, too many open files), which
+     * AbstractBackend never blames on the input.
+     */
+    public static function reportsHostError(string $output): bool
+    {
+        $output = strtolower($output);
+        foreach (self::HOST_ERROR_PATTERNS as $pattern) {
+            if (strpos($output, $pattern) !== false) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
