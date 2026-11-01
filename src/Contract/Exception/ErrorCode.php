@@ -24,8 +24,8 @@ namespace Mfonte\SecureImageConverter\Contract\Exception;
  * | `file_too_large`             | 413    | LimitExceededException        | input byte size above max_bytes               |
  * | `image_too_large`            | 422    | LimitExceededException        | input or resolved output above a dimension,   |
  * |                              |        |                               | pixel or frame limit                          |
- * | `conversion_timeout`         | 422    | ConversionTimeoutException    | processing budget exhausted; a retry will not |
- * |                              |        |                               | help                                          |
+ * | `conversion_timeout`         | 422    | ConversionTimeoutException    | processing budget exhausted or exceeded by    |
+ * |                              |        |                               | the estimate; a retry will not help           |
  * | `resource_limit`             | 422    | ResourceLimitException        | a conversion process ran out of its memory,   |
  * |                              |        |                               | CPU time or file size budget; a retry will    |
  * |                              |        |                               | not help                                      |

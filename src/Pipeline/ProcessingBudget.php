@@ -39,7 +39,8 @@ use Mfonte\SecureImageConverter\Isolation\ResourceLimits;
  * wall-clock timeout normally stops a job first.
  *
  * Admission: a job whose budget before the ceiling is applied exceeds the ceiling is refused before anything runs
- * (ResourceLimitException, resource_limit, 422), never started to be stopped later. With the default ceiling of
+ * (ConversionTimeoutException, conversion_timeout, 422: the input exceeds the processing budget, a retry will not
+ * help), never started to be stopped later. With the default ceiling of
  * DEFAULT_MAX_SECONDS (one hour) and the default Limits (40 megapixels, 400 megapixels over all frames), every request
  * with the default parameters (WEBP, effort 4) fits: at most about 300 seconds for a still image and 2800 for the
  * largest animation. The requests that do not fit, in megapixels over all frames: AVIF above about 23 (effort 7) and

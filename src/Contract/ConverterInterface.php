@@ -72,7 +72,9 @@ interface ConverterInterface
      * @throws IsolationUnavailableException the isolation level required by the policy is not available
      *                                       [isolation_unavailable, 503]
      * @throws ConcurrencyLimitException     no conversion slot became free in time [concurrency_limit, 503]
-     * @throws ConversionTimeoutException    the conversion exceeded its wall-clock timeout [conversion_timeout, 422]
+     * @throws ConversionTimeoutException    the conversion exceeded its wall-clock timeout, or its estimated
+     *                                       processing time exceeds the processing budget, so that it was refused
+     *                                       before it ran [conversion_timeout, 422]
      * @throws ResourceLimitException        a conversion process ran out of its memory, CPU time or file size
      *                                       budget, or every backend able to convert the input would need more
      *                                       memory than the configured ceiling [resource_limit, 422]

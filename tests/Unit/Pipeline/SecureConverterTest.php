@@ -353,8 +353,8 @@ final class SecureConverterTest extends TestCase
 
         $exception = $this->failure([$backend], ImageBuilder::png(40, 30), (new ConversionRequest(ImageFormat::AVIF))->withEffort(9), $options);
 
-        self::assertInstanceOf(ResourceLimitException::class, $exception);
-        self::assertSame(ErrorCode::RESOURCE_LIMIT, $exception->getErrorCode());
+        self::assertInstanceOf(ConversionTimeoutException::class, $exception);
+        self::assertSame(ErrorCode::CONVERSION_TIMEOUT, $exception->getErrorCode());
         self::assertSame([], $backend->jobs);
     }
 

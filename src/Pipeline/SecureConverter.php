@@ -15,10 +15,10 @@ use Mfonte\SecureImageConverter\Contract\ConversionRequest;
 use Mfonte\SecureImageConverter\Contract\ConversionResult;
 use Mfonte\SecureImageConverter\Contract\ConverterInterface;
 use Mfonte\SecureImageConverter\Contract\Exception\ConversionFailedException;
+use Mfonte\SecureImageConverter\Contract\Exception\ConversionTimeoutException;
 use Mfonte\SecureImageConverter\Contract\Exception\ExceptionInterface;
 use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
 use Mfonte\SecureImageConverter\Contract\Exception\LimitExceededException;
-use Mfonte\SecureImageConverter\Contract\Exception\ResourceLimitException;
 use Mfonte\SecureImageConverter\Contract\ImageFormat;
 use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
 use Mfonte\SecureImageConverter\Validation\ImageInfo;
@@ -42,7 +42,7 @@ use Mfonte\SecureImageConverter\Validation\ImageInspectorInterface;
  *    with the reason in the result's warnings. When no available backend applies the orientation, the job is resolved
  *    again with the pixels as stored, with a warning.
  * 5. Sets the job's timeout and CPU time limit from its work (ProcessingBudget; a job above the ceiling is refused
- *    with resource_limit before it runs) and runs the backend.
+ *    with conversion_timeout before it runs) and runs the backend.
  * 6. Verifies the output (OutputVerifier: sniffed format, size, frames, limits).
  * 7. Keeps the smaller file (P-12): when the output is not smaller than the input and the input already satisfies the
  *    request (PassthroughPolicy), the input copy is returned instead, byte for byte, and the result says so.
@@ -144,7 +144,7 @@ final class SecureConverter implements ConverterInterface
             $budget = $this->options->getBudget();
             $job = $selection->getJob();
             if (!$budget->admits($job)) {
-                throw new ResourceLimitException(sprintf(
+                throw new ConversionTimeoutException(sprintf(
                     'This conversion needs an estimated %d seconds, above the processing ceiling of %d seconds.',
                     (int) ceil($budget->estimateSeconds($job)),
                     (int) $budget->getMaxSeconds()
