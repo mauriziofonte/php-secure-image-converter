@@ -243,6 +243,23 @@ final class SecureConverterTest extends TestCase
         self::assertSame(['No available backend applies the EXIF orientation 6 of this jpeg image: it is converted as stored.'], $result->getWarnings());
     }
 
+    public function testTheErrorOfTheAsStoredJobIsReportedWhenNeitherJobCanRun(): void
+    {
+        $input = ImageBuilder::jpeg(40, 30, 1, ImageBuilder::jpegSegment(0xE1, "Exif\0\0" . ImageBuilder::exifOrientation(6)));
+        $plain = self::backend('cwebp', [ImageFormat::JPEG], [ImageFormat::WEBP], self::webpWriter());
+        // The upright job fails for the orientation (conversion_failed), the job as stored for the memory ceiling.
+        $converter = new SecureConverter(self::inspector(), new BackendResolver([$plain], 16777216), (new ConverterOptions())->withWorkingDirectoryParent($this->path('work')));
+
+        try {
+            $converter->convert($this->file('in.jpg', $input), $this->path('out.webp'), new ConversionRequest());
+            self::fail('The conversion ran above the memory ceiling.');
+        } catch (ResourceLimitException $exception) {
+            self::assertStringContainsString('above the memory ceiling', $exception->getMessage());
+        }
+        self::assertSame([], $plain->jobs);
+        $this->assertCleanedUp();
+    }
+
     public function testATargetThatNoBackendEncodesIsUnsupported(): void
     {
         $backend = self::backend('cwebp', [ImageFormat::JPEG], [ImageFormat::WEBP], self::webpWriter());

@@ -266,18 +266,23 @@ final class SecureConverter implements ConverterInterface
      *
      * @param non-empty-list<BackendJob> $jobs
      *
-     * @throws ExceptionInterface what the resolver throws for the first job, when no job can be performed
+     * @throws ExceptionInterface when no job can be performed: what the resolver throws for the last job, or for an
+     *                            earlier one when the last fails with ConversionFailedException and it does not
      *
      * @return array{0: BackendSelection, 1: list<string>}
      */
     private function select(array $jobs, ImageInfo $info): array
     {
-        $first = null;
+        $failure = null;
         foreach ($jobs as $index => $job) {
             try {
                 $selection = $this->resolver->resolve($job);
             } catch (ExceptionInterface $exception) {
-                $first = $first !== null ? $first : $exception;
+                // A later job (the pixels as stored) tells more about the input than the upright one, which fails for
+                // the orientation alone, unless it fails with the generic conversion_failed only.
+                if ($failure === null || !$exception instanceof ConversionFailedException || $failure instanceof ConversionFailedException) {
+                    $failure = $exception;
+                }
                 continue;
             }
             $warnings = [];
@@ -310,7 +315,7 @@ final class SecureConverter implements ConverterInterface
             return [$selection, array_merge($warnings, $selection->getWarnings())];
         }
 
-        throw $first;
+        throw $failure;
     }
 
     /**
