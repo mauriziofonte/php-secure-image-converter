@@ -415,7 +415,7 @@ final class ImageInspectorTest extends TestCase
             . ImageBuilder::gifImage(0, 0, 8, 8) . "\x3B";
 
         return [
-            'png' => [ImageFormat::PNG, ImageBuilder::png(8, 8, 8, 2, ImageBuilder::repeat(ImageBuilder::pngChunk('tEXt', "k\0"), PngParser::MAX_CHUNKS))],
+            'png' => [ImageFormat::PNG, ImageBuilder::png(8, 8, 8, 2, ImageBuilder::repeat(ImageBuilder::pngChunk('prVt', ''), PngParser::MAX_CHUNKS))],
             'gif' => [ImageFormat::GIF, $gif],
             'webp' => [ImageFormat::WEBP, ImageBuilder::riff(ImageBuilder::vp8x(0, 8, 8) . ImageBuilder::webpChunk('VP8L', ImageBuilder::vp8l(8, 8))
                 . ImageBuilder::repeat(ImageBuilder::webpChunk('ABCD', ''), WebpParser::MAX_CHUNKS))],

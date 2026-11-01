@@ -20,7 +20,9 @@ use Mfonte\SecureImageConverter\Validation\Limits;
  * - Chunk types must be four ASCII letters, lengths at most 2^31 - 1, and every chunk must fit in the file; an
  *   unknown critical chunk is refused, as decoders refuse it. PLTE must precede IDAT (and is required for colour type
  *   3, forbidden for grey types), IDAT chunks must be consecutive, IEND must be present and empty: a file cut anywhere
- *   is refused as truncated. At most MAX_CHUNKS chunks are walked.
+ *   is refused as truncated. At most MAX_CHUNKS chunks are walked, of which at most MAX_TEXT_CHUNKS text chunks
+ *   (tEXt, zTXt and iTXt together) and MAX_SUGGESTED_PALETTES sPLT chunks, the limits of libspng, which vips
+ *   decodes PNG with: a file over them is one that decoder refuses ("reached chunk/cache limits").
  * - APNG: an acTL chunk before IDAT declares the frame count, checked against the limits at once; every fcTL (whose
  *   CRC is checked) must describe a non-empty region inside the canvas, and their number must equal the declared
  *   frame count.
@@ -42,6 +44,19 @@ final class PngParser implements ParserInterface
      * frames. Outputs are walked with a limit that grows with their allowed size (ImageInspector::forOutput()).
      */
     public const MAX_CHUNKS = 16384;
+
+    /**
+     * Largest number of text chunks (tEXt, zTXt and iTXt together) in a file, input or output: libspng refuses a file
+     * with more. Real files have a few.
+     */
+    public const MAX_TEXT_CHUNKS = 1000;
+
+    /**
+     * Largest number of suggested palettes (sPLT chunks) in a file, input or output: libspng refuses a file with more.
+     */
+    public const MAX_SUGGESTED_PALETTES = 1000;
+
+    private const TEXT_CHUNKS = ['tEXt', 'zTXt', 'iTXt'];
 
     private const SIGNATURE = "\x89PNG\r\n\x1A\n";
 
@@ -121,6 +136,8 @@ final class PngParser implements ParserInterface
         $exif = false;
         $otherMetadata = false;
         $orientation = ImageInfo::ORIENTATION_NORMAL;
+        $textChunks = 0;
+        $suggestedPalettes = 0;
 
         for ($chunks = 2; ; ++$chunks) {
             if ($chunks > $this->maxChunks) {
@@ -203,6 +220,12 @@ final class PngParser implements ParserInterface
                 default:
                     if ((ord($type[0]) & 0x20) === 0) {
                         throw self::invalid('the file has an unknown critical chunk');
+                    }
+                    if (in_array($type, self::TEXT_CHUNKS, true) && ++$textChunks > self::MAX_TEXT_CHUNKS) {
+                        throw self::invalid(sprintf('the file has more than %d text chunks', self::MAX_TEXT_CHUNKS));
+                    }
+                    if ($type === 'sPLT' && ++$suggestedPalettes > self::MAX_SUGGESTED_PALETTES) {
+                        throw self::invalid(sprintf('the file has more than %d sPLT chunks', self::MAX_SUGGESTED_PALETTES));
                     }
                     if ($length > self::fieldsLength($type, $colourType, $paletteEntries) || isset($ancillaryTypes[$type])) {
                         $otherMetadata = true;

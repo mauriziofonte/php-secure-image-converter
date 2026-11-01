@@ -283,13 +283,31 @@ final class ImageCorpus
                 ImageBuilder::png(8, 4, 8, 2, ImageBuilder::pngChunk('eXIf', ImageBuilder::exifOrientation(3, true))),
                 self::accept(ImageFormat::PNG, 8, 4, 1, ['exif' => true, 'orientation' => 3])
             ),
-            // The most chunks a file may have, then one too many: the walk stays far below 50 ms.
+            // The most chunks a file may have (private ancillary chunks, which decoders skip), then one too many: the
+            // walk stays far below 50 ms.
             'png/valid-most-chunks.png' => self::generated(
-                ImageBuilder::png(8, 8, 8, 2, ImageBuilder::repeat(ImageBuilder::pngChunk('tEXt', "k\0"), PngParser::MAX_CHUNKS - 3)),
+                ImageBuilder::png(8, 8, 8, 2, ImageBuilder::repeat(ImageBuilder::pngChunk('prVt', ''), PngParser::MAX_CHUNKS - 3)),
                 self::accept(ImageFormat::PNG, 8, 8, 1, ['metadata' => true])
             ),
             'png/spoof-too-many-chunks.png' => self::generated(
-                ImageBuilder::png(8, 8, 8, 2, ImageBuilder::repeat(ImageBuilder::pngChunk('tEXt', "k\0"), PngParser::MAX_CHUNKS - 2)),
+                ImageBuilder::png(8, 8, 8, 2, ImageBuilder::repeat(ImageBuilder::pngChunk('prVt', ''), PngParser::MAX_CHUNKS - 2)),
+                self::reject(ErrorCode::INVALID_IMAGE)
+            ),
+            // The most text chunks and suggested palettes that libspng (vips) decodes, then one too many of each.
+            'png/valid-most-text-chunks.png' => self::committed(
+                ImageBuilder::png(8, 8, 8, 2, ImageBuilder::repeat(ImageBuilder::pngChunk('tEXt', "k\0"), PngParser::MAX_TEXT_CHUNKS - 1) . ImageBuilder::pngChunk('zTXt', "k\0\0" . ImageBuilder::zlibStored('corpus'))),
+                self::accept(ImageFormat::PNG, 8, 8, 1, ['metadata' => true])
+            ),
+            'png/spoof-too-many-text-chunks.png' => self::committed(
+                ImageBuilder::png(8, 8, 8, 2, ImageBuilder::repeat(ImageBuilder::pngChunk('tEXt', "k\0"), PngParser::MAX_TEXT_CHUNKS) . ImageBuilder::pngChunk('iTXt', "k\0\0\0\0\0")),
+                self::reject(ErrorCode::INVALID_IMAGE)
+            ),
+            'png/valid-most-suggested-palettes.png' => self::committed(
+                ImageBuilder::png(8, 8, 8, 2, ImageBuilder::repeat(ImageBuilder::pngChunk('sPLT', "p\0\x08"), PngParser::MAX_SUGGESTED_PALETTES)),
+                self::accept(ImageFormat::PNG, 8, 8, 1, ['metadata' => true])
+            ),
+            'png/spoof-too-many-suggested-palettes.png' => self::committed(
+                ImageBuilder::png(8, 8, 8, 2, ImageBuilder::repeat(ImageBuilder::pngChunk('sPLT', "p\0\x08"), PngParser::MAX_SUGGESTED_PALETTES + 1)),
                 self::reject(ErrorCode::INVALID_IMAGE)
             ),
             'png/bomb-100000x100000.png' => self::committed(
