@@ -1,0 +1,310 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Mfonte\SecureImageConverter\Backend;
+
+use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
+use Mfonte\SecureImageConverter\Isolation\ExecutableFinder;
+use Mfonte\SecureImageConverter\Isolation\ResourceLimits;
+use Psr\Log\LoggerInterface;
+use Psr\Log\NullLogger;
+
+/**
+ * How backends run their jobs and keep their capabilities. Immutable value object; every with*() method returns a
+ * modified copy.
+ *
+ * | Option                     | Default                     | Meaning                                         |
+ * | -------------------------- | --------------------------- | ----------------------------------------------- |
+ * | memory ceiling             | 2 GiB                       | largest estimate admitted; address space limit  |
+ * | working directory parent   | sys_get_temp_dir()          | where each job's private directory is created   |
+ * | PHP binary                 | the running CLI, else "php" | PHP CLI that runs the GD and Imagick workers     |
+ * | PHP extension directory    | the binary's built-in one   | where the workers load gd and imagick from      |
+ * | capability cache directory | PrivateCacheDirectory       | where probed capabilities are kept              |
+ * | capability cache TTL       | 1 day                       | age after which capabilities are probed again   |
+ * | logger                     | NullLogger                  | receives the warnings of the backends           |
+ *
+ * Capability cache: probing every backend takes seconds and dozens of sandboxed runs, so the capabilities are kept
+ * in a directory private to the effective user, by default sys_get_temp_dir()/secure-image-converter-<euid>. On a
+ * host where other users share that temporary directory (shared hosting, several PHP-FPM pools), another user can
+ * create the default directory first: it is then not private and is ignored, every process probes again, and a
+ * warning is logged (once per BackendFactory call, and once per backend created directly). Pass a directory that only
+ * the PHP user can reach, such as one in the application's own cache directory: withCapabilityCache(true,
+ * '/srv/app/var/cache/image-converter'); it is created with mode 0700 when missing.
+ *
+ * Memory: at the rlimit and sandbox isolation levels, every backend process runs with the memory ceiling as its address
+ * space limit, in place of the address space limit of the runner's ResourceLimits (the CPU time, file size and open
+ * file limits of the runner apply unchanged). At the none and process levels the runner sets no resource limit: nothing
+ * bounds the address space of a backend process, the PHP workers run with memory_limit=-1, and only ImageMagick's own
+ * memory and map limits, set to the ceiling, bound the pixel cache of the Imagick worker (see ImagickBackend). The
+ * ceiling bounds one process; Concurrency\Semaphore bounds how many run at once, so size the two together: slots x
+ * ceiling must fit in the memory the host can give to conversions (8 slots of the default 2 GiB take up to 16 GiB of
+ * address space, though most jobs use far less). Before a job runs, the backend estimates the address space it needs
+ * (BackendInterface::estimateMemoryBytes()) from the pixels it decodes (every frame of a kept animation) and encodes,
+ * the output format, the effort, the lossless mode, the bits per channel and the input format; a job whose estimate is
+ * above the ceiling is refused with resource_limit before anything runs, and BackendResolver picks another backend or
+ * fallback format. The estimate only admits jobs. It is set above the peaks measured on several kinds of content, with
+ * a margin (AbstractBackend::estimate()), because the memory an encoder takes depends on the content as well as on the
+ * pixels: AV1 needs the most for screenshots and 256-colour images (at effort 4 and 8.3 megapixels, avifenc takes 831
+ * MiB for a screenshot and 212 for noise, vips 1086 and 568). Content that was not measured, such as photographs, and
+ * other library versions can need more; a job that then reaches the ceiling fails at the rlimit and sandbox levels (see
+ * AbstractBackend::estimate()). The largest still image, in megapixels, that each backend admits below the default
+ * ceiling, with 8 bits per channel (16 bits in parentheses where fewer); the default Limits allow 40 megapixels per
+ * frame, and the default effort is 4:
+ *
+ * | Output               | Effort | vips | cwebp | gif2webp | GD  | Imagick | avifenc |
+ * | -------------------- | ------ | ---- | ----- | -------- | --- | ------- | ------- |
+ * | JPEG, PNG, TIFF, BMP | any    | 88   |       |          | 126 | 55 (49) |         |
+ * | GIF                  | any    | 25   |       |          | 126 | 51      |         |
+ * | WEBP                 | 0 to 8 | 23   | 47    | 27       | 38  | 33      |         |
+ * | WEBP                 | 9      | 16   | 29    | 21       | 38  | 23      |         |
+ * | WEBP lossless        | 0 to 7 | 23   | 46    | 30       | 35  | 32      |         |
+ * | WEBP lossless        | 8, 9   | 23   | 24    | 24       | 35  | 32      |         |
+ * | AVIF                 | 0 to 2 | 12   |       |          |     | 13 (11) | 16      |
+ * | AVIF                 | 3, 4   | 9    |       |          |     | 10 (9)  | 16      |
+ * | AVIF                 | 5 to 9 | 9    |       |          |     | 10 (9)  | 13      |
+ * | AVIF lossless        | 0 to 4 | 9    |       |          |     |         | 14      |
+ * | AVIF lossless        | 5 to 9 | 9    |       |          |     |         | 12      |
+ *
+ * The largest animations fit only in gif2webp, which keeps one frame in memory (vips decodes every frame).
+ */
+final class BackendOptions
+{
+    /**
+     * Default memory ceiling: 2 GiB.
+     */
+    public const DEFAULT_MEMORY_CEILING_BYTES = 2147483648;
+
+    /**
+     * Default capability cache TTL: one day.
+     */
+    public const DEFAULT_CAPABILITY_CACHE_TTL_SECONDS = 86400;
+
+    /**
+     * @var int
+     */
+    private $memoryCeilingBytes = self::DEFAULT_MEMORY_CEILING_BYTES;
+
+    /**
+     * @var string|null
+     */
+    private $workingDirectoryParent;
+
+    /**
+     * @var string|null
+     */
+    private $phpBinary;
+
+    /**
+     * @var string|null
+     */
+    private $phpExtensionDirectory;
+
+    /**
+     * @var bool
+     */
+    private $capabilityCache = true;
+
+    /**
+     * @var string|null
+     */
+    private $capabilityCacheDirectory;
+
+    /**
+     * @var int
+     */
+    private $capabilityCacheTtlSeconds = self::DEFAULT_CAPABILITY_CACHE_TTL_SECONDS;
+
+    /**
+     * @var LoggerInterface|null
+     */
+    private $logger;
+
+    /**
+     * The largest memory estimate of a job that runs and, at the rlimit and sandbox isolation levels, the address
+     * space limit of every backend process, in bytes.
+     */
+    public function getMemoryCeilingBytes(): int
+    {
+        return $this->memoryCeilingBytes;
+    }
+
+    /**
+     * @param int $bytes from ResourceLimits::MIN_ADDRESS_SPACE_BYTES to ResourceLimits::MAX_BYTES
+     *
+     * @throws InvalidArgumentException when the value is out of range
+     */
+    public function withMemoryCeilingBytes(int $bytes): self
+    {
+        if ($bytes < ResourceLimits::MIN_ADDRESS_SPACE_BYTES || $bytes > ResourceLimits::MAX_BYTES) {
+            throw new InvalidArgumentException(sprintf(
+                'BackendOptions: the memory ceiling must be from %d to %d bytes.',
+                ResourceLimits::MIN_ADDRESS_SPACE_BYTES,
+                ResourceLimits::MAX_BYTES
+            ));
+        }
+        $clone = clone $this;
+        $clone->memoryCeilingBytes = $bytes;
+
+        return $clone;
+    }
+
+    /**
+     * Directory where each job's private working directory is created, or null for sys_get_temp_dir().
+     */
+    public function getWorkingDirectoryParent(): ?string
+    {
+        return $this->workingDirectoryParent;
+    }
+
+    /**
+     * @param string|null $directory absolute, normalised path of an existing directory, or null for
+     *                               sys_get_temp_dir()
+     *
+     * @throws InvalidArgumentException when the path is not absolute and normalised
+     */
+    public function withWorkingDirectoryParent(?string $directory): self
+    {
+        $clone = clone $this;
+        $clone->workingDirectoryParent = self::checkPath('working directory parent', $directory);
+
+        return $clone;
+    }
+
+    /**
+     * Absolute path of the PHP CLI binary that runs the workers, or null to use the running PHP when it is the CLI
+     * and "php" from the runner's search path otherwise (PHP_BINARY under PHP-FPM is the FPM binary).
+     */
+    public function getPhpBinary(): ?string
+    {
+        return $this->phpBinary;
+    }
+
+    /**
+     * @param string|null $path absolute, normalised path of a PHP CLI binary, or null for the default
+     *
+     * @throws InvalidArgumentException when the path is not absolute and normalised
+     */
+    public function withPhpBinary(?string $path): self
+    {
+        $clone = clone $this;
+        $clone->phpBinary = self::checkPath('PHP binary', $path);
+
+        return $clone;
+    }
+
+    /**
+     * Directory the workers load their extension (gd.so, imagick.so) from when the PHP build does not include it, or
+     * null for the extension directory built into the binary. The workers run "php -n", which reads no php.ini: an
+     * extension_dir set there does not apply, so a host whose extensions live elsewhere (such as /opt/php/ext) sets
+     * it here. The extension is loaded from it only when the directory holds <extension>.so and the directory, the
+     * shared object and every directory above them are owned by root or the effective user and not writable by
+     * others (a directory above may be, with its sticky bit set, as /tmp); the backend is unavailable otherwise. A
+     * backend resolves the path, with its symbolic links, once: the workers load the shared object it resolved to,
+     * checked again before every run, and each run mounts that file alone, read-only, in the sandbox.
+     */
+    public function getPhpExtensionDirectory(): ?string
+    {
+        return $this->phpExtensionDirectory;
+    }
+
+    /**
+     * @param string|null $directory absolute, normalised path of a directory, or null for the built-in one
+     *
+     * @throws InvalidArgumentException when the path is not absolute and normalised
+     */
+    public function withPhpExtensionDirectory(?string $directory): self
+    {
+        $clone = clone $this;
+        $clone->phpExtensionDirectory = self::checkPath('PHP extension directory', $directory);
+
+        return $clone;
+    }
+
+    /**
+     * Whether probed capabilities are kept in a cache file between processes.
+     */
+    public function isCapabilityCacheEnabled(): bool
+    {
+        return $this->capabilityCache;
+    }
+
+    /**
+     * Directory of the capability cache, or null for the default private directory (see PrivateCacheDirectory).
+     */
+    public function getCapabilityCacheDirectory(): ?string
+    {
+        return $this->capabilityCacheDirectory;
+    }
+
+    /**
+     * @param bool        $enabled   false to probe again in every process
+     * @param string|null $directory absolute, normalised path of a directory only the effective user can write
+     *                               (created with mode 0700 when missing), or null for the default, which another
+     *                               user of the same temporary directory can make unusable (see the class
+     *                               description)
+     *
+     * @throws InvalidArgumentException when the path is not absolute and normalised
+     */
+    public function withCapabilityCache(bool $enabled, ?string $directory = null): self
+    {
+        $clone = clone $this;
+        $clone->capabilityCache = $enabled;
+        $clone->capabilityCacheDirectory = self::checkPath('capability cache directory', $directory);
+
+        return $clone;
+    }
+
+    /**
+     * Age in seconds after which cached capabilities are probed again. Programs are also probed again when their
+     * binary changes (path, size, modification time or inode); the TTL covers libraries updated without them.
+     */
+    public function getCapabilityCacheTtlSeconds(): int
+    {
+        return $this->capabilityCacheTtlSeconds;
+    }
+
+    /**
+     * @param int $seconds from 1 second to 7 days
+     *
+     * @throws InvalidArgumentException when the value is out of range
+     */
+    public function withCapabilityCacheTtlSeconds(int $seconds): self
+    {
+        if ($seconds < 1 || $seconds > 604800) {
+            throw new InvalidArgumentException('BackendOptions: the capability cache TTL must be from 1 second to 7 days.');
+        }
+        $clone = clone $this;
+        $clone->capabilityCacheTtlSeconds = $seconds;
+
+        return $clone;
+    }
+
+    /**
+     * The logger that receives the warnings of the backends: a capability cache that cannot be used.
+     */
+    public function getLogger(): LoggerInterface
+    {
+        return $this->logger !== null ? $this->logger : new NullLogger();
+    }
+
+    public function withLogger(LoggerInterface $logger): self
+    {
+        $clone = clone $this;
+        $clone->logger = $logger;
+
+        return $clone;
+    }
+
+    /**
+     * @throws InvalidArgumentException
+     */
+    private static function checkPath(string $what, ?string $path): ?string
+    {
+        if ($path !== null && !ExecutableFinder::isAbsolutePath($path)) {
+            throw new InvalidArgumentException(sprintf('BackendOptions: the %s must be an absolute, normalised path.', $what));
+        }
+
+        return $path;
+    }
+}

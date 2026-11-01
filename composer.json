@@ -1,0 +1,78 @@
+{
+  "name": "mfonte/secure-image-converter",
+  "description": "Turns untrusted images into web-optimised WEBP and AVIF files with input validation, isolated decoding and output verification.",
+  "type": "library",
+  "license": "BSD-3-Clause",
+  "keywords": [
+    "image",
+    "webp",
+    "avif",
+    "conversion",
+    "security",
+    "sandbox"
+  ],
+  "authors": [
+    {
+      "name": "Maurizio Fonte",
+      "homepage": "https://github.com/mauriziofonte"
+    }
+  ],
+  "require": {
+    "php": "^7.2.5 || ^8.0",
+    "php-64bit": "*",
+    "ext-hash": "*",
+    "ext-json": "*",
+    "psr/log": "^1.1 || ^2.0 || ^3.0"
+  },
+  "require-dev": {
+    "phpunit/phpunit": "^8.5.52 || ^9.6.33 || ^10.5.62 || ^11.5.50",
+    "yoast/phpunit-polyfills": "^2.0 || ^3.0 || ^4.0"
+  },
+  "suggest": {
+    "ext-posix": "Needed for the process, rlimit and sandbox isolation levels: kills the whole process group on timeout and checks the owner of the isolation cache."
+  },
+  "autoload": {
+    "psr-4": {
+      "Mfonte\\SecureImageConverter\\": "src/"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "Mfonte\\SecureImageConverter\\Tests\\": "tests/"
+    }
+  },
+  "config": {
+    "optimize-autoloader": true,
+    "sort-packages": true
+  },
+  "minimum-stability": "stable",
+  "prefer-stable": true,
+  "scripts": {
+    "test": "@php vendor/bin/phpunit",
+    "analyse": [
+      "@php tools/require-tool.php phpstan",
+      "@php tools/phpstan/vendor/bin/phpstan analyse --configuration=phpstan.neon.dist --no-progress --memory-limit=1G",
+      "@php tools/phpstan/vendor/bin/phpstan analyse --configuration=phpstan-php85.neon.dist --no-progress --memory-limit=1G"
+    ],
+    "cs:check": [
+      "@php tools/require-tool.php php-cs-fixer",
+      "@php tools/php-cs-fixer/vendor/bin/php-cs-fixer fix --dry-run --diff"
+    ],
+    "cs:fix": [
+      "@php tools/require-tool.php php-cs-fixer",
+      "@php tools/php-cs-fixer/vendor/bin/php-cs-fixer fix"
+    ],
+    "ci": [
+      "@cs:check",
+      "@analyse",
+      "@test"
+    ]
+  },
+  "scripts-descriptions": {
+    "test": "Run the PHPUnit test suite.",
+    "analyse": "Run PHPStan at level max as PHP 7.2.5 and as PHP 8.5 (needs tools/phpstan).",
+    "cs:check": "Report coding style violations as a diff, without changing files (needs tools/php-cs-fixer).",
+    "cs:fix": "Fix coding style violations in place (needs tools/php-cs-fixer).",
+    "ci": "Run cs:check, analyse and test, in this order."
+  }
+}
