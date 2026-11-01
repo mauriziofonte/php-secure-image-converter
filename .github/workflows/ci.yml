@@ -519,11 +519,10 @@ jobs:
 
   # Scans the reference image for vulnerabilities of its packages; nightly.yml
   # runs the same scan every night, so that an advisory published after the
-  # last push is seen. Policy (see tests/docker/Dockerfile): a critical
-  # vulnerability with a fixed package fails the job and is fixed by
-  # rebuilding (the build installs the security updates) or by a new base
-  # digest; a vulnerability without a fix yet is listed in the report but
-  # does not fail the job, and is reviewed when it appears.
+  # last push is seen. Policy (see tests/docker/Dockerfile): the high and
+  # critical ones are reported; any critical one, with a fixed package or
+  # not, fails the job unless tests/docker/.trivyignore lists it with a
+  # reason and an expiry date.
   trivy:
     name: Trivy (reference image)
     runs-on: ubuntu-24.04
@@ -557,7 +556,7 @@ jobs:
           format: table
           exit-code: '0'
 
-      - name: Fail on a critical vulnerability that has a fix
+      - name: Fail on a critical vulnerability, fixed or not
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           version: v0.70.0
@@ -565,6 +564,7 @@ jobs:
           image-ref: sic-reference:ci
           scanners: vuln
           severity: CRITICAL
-          ignore-unfixed: true
+          ignore-unfixed: false
+          trivyignores: tests/docker/.trivyignore
           format: table
           exit-code: '1'

@@ -1,0 +1,15 @@
+# Critical vulnerabilities of the reference image that the trivy jobs of
+# ci.yml and nightly.yml accept for now (see the policy in the Dockerfile).
+# Only an unfixed one, in a package the tests cannot do without, may be
+# listed, as two or more lines:
+#
+#   # <package>: why the vulnerability does not reach the conversion of
+#   # untrusted images, and the Ubuntu tracker link
+#   CVE-YYYY-NNNNN exp:YYYY-MM-DD
+#
+# The expiry is at most 30 days after the entry is added: Trivy stops
+# ignoring the vulnerability that day, the scan fails again, and the entry
+# is reviewed (removed once the fix ships, renewed with a new reason).
+#
+# No entries: the scan of 2026-11-01 reported no critical vulnerability,
+# fixed or not.

@@ -16,11 +16,13 @@
 #
 # Install the Composer dependencies on the host first, for PHP 8.3 (the PHP
 # of the image). The group "slow" (highest-effort AVIF of large screenshots
-# and GIFs) takes over an hour: run it on its own with --group slow. Add
-# --user 65534:65534 -e HOME=/tmp to run as an unprivileged user, as a
-# deployment would. The security corpus and the fuzz runs take the same
-# options with --group security and --group fuzz; their variables
-# (SIC_FUZZ_SEED and others) are listed in the fuzz tests.
+# and GIFs) takes over an hour: run it on its own with --group slow. The
+# image runs as the unprivileged user "tester" (uid 10001), as a deployment
+# would; CI runs it as --user 65534:65534 -e HOME=/tmp, which works the
+# same, and --user root is there for debugging only. The security corpus
+# and the fuzz runs take the same options with --group security and
+# --group fuzz; their variables (SIC_FUZZ_SEED and others) are listed in
+# the fuzz tests.
 #
 # Docker's default seccomp and AppArmor profiles forbid the user namespaces
 # that bubblewrap needs: without the security options the tests run at the
@@ -34,15 +36,19 @@
 # new digest: the image follows the archive, it is not a frozen snapshot.
 #
 # Vulnerability policy (the trivy jobs of ci.yml and nightly.yml): Trivy
-# scans the image on every push and every night. A critical vulnerability
-# for which Ubuntu ships a fixed package fails the scan; it is fixed by
-# rebuilding, or by a new base digest when the fix is in the base image.
-# One without a fixed package (unfixed) is listed in the report with the
-# high ones but does not fail the scan, since nothing can be installed to
-# fix it: it is reviewed when it appears, and a package whose
-# vulnerability reaches the conversion of untrusted images is kept out of
-# the image until it is fixed. The image only runs tests; the policy for
-# deployments is the operator's.
+# scans the image on every push and every night, and reports the high and
+# critical vulnerabilities. Any critical one fails the scan, fixed or not,
+# unless .trivyignore (next to this file) lists it:
+# - with a fixed package, it is fixed by rebuilding (apt-get upgrade), or
+#   by a new base digest when the fix is in the base image; it is never
+#   listed.
+# - without a fixed package (unfixed), the package is removed from the
+#   image when the tests can do without it; a package a backend needs
+#   (and so the conversion of untrusted images) is listed only with the
+#   reason the vulnerability does not reach the conversion, and an expiry
+#   date of at most 30 days, after which the scan fails again and the entry
+#   is reviewed.
+# The image only runs tests; the policy for deployments is the operator's.
 FROM mirror.gcr.io/library/ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852
 
 LABEL org.opencontainers.image.title="secure-image-converter reference test image" \
@@ -83,6 +89,11 @@ RUN apt-get -o Acquire::Retries=3 update \
     && convert -version \
     && bwrap --version \
     && prlimit --version
+
+# The tests run as this user: nothing in the image needs root at run time.
+RUN useradd --create-home --uid 10001 --user-group --shell /usr/sbin/nologin tester
+
+USER tester
 
 WORKDIR /src
 

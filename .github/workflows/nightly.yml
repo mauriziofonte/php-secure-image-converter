@@ -47,7 +47,7 @@ jobs:
           format: table
           exit-code: '0'
 
-      - name: Fail on a critical vulnerability that has a fix
+      - name: Fail on a critical vulnerability, fixed or not
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           version: v0.70.0
@@ -55,6 +55,7 @@ jobs:
           image-ref: sic-reference:ci
           scanners: vuln
           severity: CRITICAL
-          ignore-unfixed: true
+          ignore-unfixed: false
+          trivyignores: tests/docker/.trivyignore
           format: table
           exit-code: '1'
