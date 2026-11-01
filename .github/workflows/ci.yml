@@ -437,3 +437,82 @@ jobs:
             -e SIC_EXPECTED_ISOLATION_LEVEL=sandbox \
             -e SIC_EXPECTED_BACKENDS=vips,cwebp,gif2webp,avifenc,imagick,gd \
             sic-reference:ci php vendor/bin/phpunit --group backends --exclude-group slow
+
+  # The security corpus (ImageCorpus) and the fuzz runs, in the reference
+  # image on amd64, as an unprivileged user at the sandbox level with every
+  # backend expected (see tests/Integration/Security/SecurityTestCase.php
+  # for the rules every hostile input is held to). The container gets 4 GiB
+  # of memory, so that a decoder that escaped its own ceiling would be
+  # killed here rather than pass. The seed is fixed: a failure reproduces
+  # locally with the same command, and each failing input is uploaded.
+  security:
+    name: Security corpus (PHP 8.3, reference image)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.3'
+          coverage: none
+          tools: composer:v2
+
+      - name: Install dependencies (highest)
+        run: composer update --no-progress
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build the reference image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: tests/docker
+          platforms: linux/amd64
+          load: true
+          push: false
+          provenance: false
+          tags: sic-reference:ci
+
+      - name: Run the security corpus and the fuzz runs in the image
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          out="$RUNNER_TEMP/security"
+          mkdir -p "$out/failures"
+          chmod -R 0777 "$out"
+          docker run --rm --user 65534:65534 -e HOME=/tmp --memory 4g \
+            --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
+            --security-opt systempaths=unconfined \
+            -v "$PWD:/src:ro" -w /src -v "$out:/out" \
+            -e SIC_EXPECTED_ISOLATION_LEVEL=sandbox \
+            -e SIC_EXPECTED_BACKENDS=vips,cwebp,gif2webp,avifenc,imagick,gd \
+            -e SIC_SECURITY_REPORT=/out/report.tsv \
+            -e SIC_FUZZ_FAILURES=/out/failures \
+            -e SIC_FUZZ_SEED=20261101 \
+            -e SIC_FUZZ_ITERATIONS=200000 \
+            -e SIC_FUZZ_CONVERSIONS=500 \
+            sic-reference:ci \
+            sh -c 'php vendor/bin/phpunit --group security && php vendor/bin/phpunit --group fuzz'
+
+      # Outcome and milliseconds of every corpus conversion, slowest first.
+      - name: Show the slowest conversions
+        if: always()
+        run: |
+          report="$RUNNER_TEMP/security/report.tsv"
+          if [ -f "$report" ]; then
+            printf 'path\trequest\toutcome\tms\n'
+            sort -t "$(printf '\t')" -k4,4nr "$report" | head -n 40
+          fi
+
+      - name: Upload the failing fuzz inputs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: security-failures
+          path: ${{ runner.temp }}/security/failures
+          if-no-files-found: ignore
+          retention-days: 7
