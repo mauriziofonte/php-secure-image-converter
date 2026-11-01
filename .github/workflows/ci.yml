@@ -113,9 +113,18 @@ jobs:
       # the conversion programs installed and SIC_EXPECTED_BACKENDS set.
       # Here they would run only for the extensions setup-php happens to
       # enable, slow group included, at whatever isolation level the runner
-      # gives.
+      # gives. The security corpus converts with the real programs as well
+      # and runs in the reference image (Security job). PHPUnit 8 to 10
+      # keep only the last --exclude-group, and PHPUnit 11 warns about a
+      # comma-separated list (a warning fails the run).
       - name: Run the test suite
-        run: composer test -- --exclude-group backends
+        run: |
+          case "$(php vendor/bin/phpunit --version)" in
+            'PHPUnit 8.'* | 'PHPUnit 9.'* | 'PHPUnit 10.'*)
+              composer test -- --exclude-group backends,security ;;
+            *)
+              composer test -- --exclude-group backends --exclude-group security ;;
+          esac
 
       # Some ownership checks need a directory or a symbolic link owned by
       # another user, which only root can create: those tests skip themselves
