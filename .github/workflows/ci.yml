@@ -194,10 +194,13 @@ jobs:
           ini-file: development
           tools: composer:v2
 
+      # Bounded like the apt step of the backends job below.
       - name: Install bubblewrap and allow unprivileged user namespaces
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends bubblewrap
+          apt_options=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+          sudo apt-get "${apt_options[@]}" update
+          sudo apt-get "${apt_options[@]}" install --yes --no-install-recommends bubblewrap
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           bwrap --version
           prlimit --version
@@ -281,10 +284,15 @@ jobs:
           extensions: gd, imagick
           tools: composer:v2
 
+      # A stalled mirror once held this step for 45 minutes, until the job
+      # timed out: apt retries and gives up on a silent connection, and the
+      # step stops after ten minutes.
       - name: Install the conversion programs and bubblewrap
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends bubblewrap \
+          apt_options=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+          sudo apt-get "${apt_options[@]}" update
+          sudo apt-get "${apt_options[@]}" install --yes --no-install-recommends bubblewrap \
             libvips-tools libheif-plugin-aomenc webp libavif-bin imagemagick
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           sudo mkdir -p /usr/share/nginx/html
