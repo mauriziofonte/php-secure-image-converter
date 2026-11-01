@@ -19,7 +19,8 @@ use Mfonte\SecureImageConverter\Validation\ImageInspector;
  * | anim.gif   | 3 frames of 16 x 12                                                           |
  * | anim.webp  | 3 frames of 16 x 12                                                           |
  * | anim.png   | an APNG of 4 frames of 12 x 6                                                 |
- * | oriented.* | a 16 x 12 JPEG with EXIF orientation 6 (displayed 12 x 16)                     |
+ * | oriented.* | a 16 x 12 JPEG with EXIF orientation 6 (displayed 12 x 16), its quadrants red, |
+ * |            | green, blue and yellow, so that a turn or a mirror shows                       |
  * | variant-*  | a 16 x 12 still of each variant of ImageInfo::VARIANTS, such as                |
  * |            | variant-jpeg_cmyk.jpg (CMYK) and variant-bmp_bit_fields.bmp (32-bit, V4)        |
  *
