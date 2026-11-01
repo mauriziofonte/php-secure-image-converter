@@ -104,8 +104,9 @@ final class SandboxVisibilityTest extends BackendTestCase
     }
 
     /**
-     * A PHP worker's sandbox, seen from inside: no private path, only the PHP binary in /usr/bin, an empty read-only
-     * /tmp, TMPDIR and HOME in the writable working directory (so that tmpfile() works), and its time zone data,
+     * A PHP worker's sandbox, seen from inside: no private path, only the PHP binary in /usr/bin, a read-only /tmp
+     * that holds only the skeletons of the mounts below it (the working directory, and the library's own paths when
+     * its checkout lives below /tmp), TMPDIR and HOME in the writable working directory (so that tmpfile() works), and its time zone data,
      * worker scripts and (for Imagick) policy visible.
      */
     public function testAPhpWorkerSeesOnlyItsAllowlist(): void
@@ -179,8 +180,7 @@ final class SandboxVisibilityTest extends BackendTestCase
             self::assertIsString($entry);
             self::assertStringStartsWith('php', $entry, '/usr/bin holds more than the PHP binary.');
         }
-        $parts = explode('/', $directory->getPath());
-        self::assertSame(\count($parts) > 2 && $parts[1] === 'tmp' ? [$parts[2]] : [], $seen['tmp'], '/tmp holds more than the working directory.');
+        self::assertSame(self::tmpEntries(array_merge([$directory->getPath()], $backend->getSandboxPaths(), $backend->getSandboxResourcePaths())), $seen['tmp'], '/tmp holds more than the mounts below it.');
         self::assertFalse($seen['tmp_writable'], '/tmp is writable.');
         self::assertSame($directory->getPath(), $seen['tmpdir']);
         self::assertSame($directory->getPath(), $seen['home']);
@@ -304,6 +304,28 @@ final class SandboxVisibilityTest extends BackendTestCase
                 self::assertTrue(copy($source . '/' . $entry, $destination . '/' . $entry));
             }
         }
+    }
+
+    /**
+     * The entries of the sandbox's /tmp that the mounts below it create: the first component of each.
+     *
+     * @param list<string> $mounts
+     *
+     * @return list<string>
+     */
+    private static function tmpEntries(array $mounts): array
+    {
+        $entries = [];
+        foreach ($mounts as $mount) {
+            $parts = explode('/', $mount);
+            if (\count($parts) > 2 && $parts[0] === '' && $parts[1] === 'tmp' && $parts[2] !== '') {
+                $entries[] = $parts[2];
+            }
+        }
+        $entries = array_values(array_unique($entries));
+        sort($entries, SORT_STRING);
+
+        return $entries;
     }
 
     private static function checkout(): string
