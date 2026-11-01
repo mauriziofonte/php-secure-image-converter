@@ -41,7 +41,8 @@ final class AbstractBackendTest extends TestCase
 
     /**
      * What the fake cwebp does: "copy", "fail", "signal", "timeout", "link", "truncated", "wrong size", or "fail on
-     * input" and "crash on input" (an exit code 1 or SIGSEGV for the job of hostileJob(), a copy for every other run).
+     * input", "crash on input" and "unusable on input" (an exit code 1, SIGSEGV or a truncated output for the job of
+     * hostileJob(), a copy for every other run).
      *
      * @var string
      */
@@ -92,6 +93,10 @@ final class AbstractBackendTest extends TestCase
                         return FakeProcessRunner::result(1, '', 'libpng error: IDAT: invalid distance too far back');
                     case 'crash on input':
                         return FakeProcessRunner::result(0, '', '', 11);
+                    case 'unusable on input':
+                        file_put_contents($output, substr((string) file_get_contents(__DIR__ . '/../../../resources/probe/still.webp'), 0, 20));
+
+                        return FakeProcessRunner::result(0);
                     case 'fail':
                         return FakeProcessRunner::result(1, '', 'Unsupported color conversion request');
                     case 'signal':
@@ -348,8 +353,9 @@ final class AbstractBackendTest extends TestCase
     }
 
     /**
-     * A program that fails or crashes on the input while it still converts the probe image of the format failed on the
-     * input: invalid_image, never conversion_failed. One more run checks the probe image, and nothing is left behind.
+     * A program that fails, crashes or writes an unusable output on the input while it still converts the probe image of
+     * the format failed on the input: invalid_image, never conversion_failed. One more run checks the probe image, and
+     * nothing is left behind.
      */
     public function testAFailureOnTheInputAloneIsAnInvalidImage(): void
     {
@@ -357,8 +363,9 @@ final class AbstractBackendTest extends TestCase
         $backend = new CwebpBackend($runner, $this->options());
         $backend->getCapabilities();
         $expected = [
-            'fail on input' => 'The cwebp conversion failed (exit code 1). It converts a valid png image, so this image is malformed or uses something its decoder refuses.',
-            'crash on input' => 'The cwebp conversion crashed (signal 11). It converts a valid png image, so this image is malformed or uses something its decoder refuses.',
+            'fail on input' => 'The cwebp conversion failed (exit code 1). It converts a valid png image, so the cause is this image: it is malformed or uses something the backend refuses.',
+            'crash on input' => 'The cwebp conversion crashed (signal 11). It converts a valid png image, so the cause is this image: it is malformed or uses something the backend refuses.',
+            'unusable on input' => 'The cwebp conversion produced an unusable output: it is not a valid webp image. It converts a valid png image, so the cause is this image: it is malformed or uses something the backend refuses.',
         ];
         foreach ($expected as $behaviour => $message) {
             $this->behaviour = $behaviour;

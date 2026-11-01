@@ -64,10 +64,10 @@ interface ConverterInterface
      *                                       format is not enabled for input or is SVG, or it is a variant of its
      *                                       format that the library does not accept (see
      *                                       UnsupportedFormatException) [unsupported_format, 415]
-     * @throws InvalidImageException         the input is malformed, truncated or spoofed, also when only the decoder
-     *                                       finds out (it fails or crashes on the input while it converts a valid
-     *                                       image of the format) [invalid_image, 422], or animated while the
-     *                                       animation policy is reject [animation_rejected, 422]
+     * @throws InvalidImageException         the input is malformed, truncated or spoofed, also when only the backend
+     *                                       finds out (it fails, crashes or writes an unusable output on the input
+     *                                       while it converts a valid image of the format) [invalid_image, 422], or
+     *                                       animated while the animation policy is reject [animation_rejected, 422]
      * @throws LimitExceededException        the input exceeds max_bytes [file_too_large, 413], or the input or the
      *                                       resolved output exceeds a dimension, pixel or frame limit
      *                                       [image_too_large, 422]

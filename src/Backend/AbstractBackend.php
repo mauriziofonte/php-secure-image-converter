@@ -52,14 +52,17 @@ use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
  *   (OutputFile), checks the copy (OutputCheck) and only then renames it over the output path, and removes the
  *   directory.
  *
- * A program that fails on a job without hitting a limit (an exit code, or a crash such as SIGSEGV) failed either on
- * the input or by itself. The input passed the header checks of ImageInspector, which read no pixel data, so a
- * decoder can still meet data it refuses or crashes on: a truncated stream, more chunks than libpng caches, a crafted
- * file. convert() tells the two apart by converting the probe image of the input's format (its animation for an
- * animated job) to the same output with the same program: when that succeeds the program is sound and the input is
- * the cause, reported as InvalidImageException (invalid_image, 422; a retry will not help); otherwise the failure is
- * the backend's, ConversionFailedException (conversion_failed, 500). This costs one conversion of a 16 x 12 image,
- * and only after a failure. No other backend is tried: each decoder that reads a hostile input is more attack surface.
+ * A program that fails on a job without hitting a limit (an exit code, or a crash such as SIGSEGV), or writes an output
+ * that OutputCheck refuses, failed either on the input or by itself. The input passed the header checks of
+ * ImageInspector, which read no pixel data, so a decoder can still meet data it refuses or crashes on (a truncated
+ * stream, more chunks than libpng caches, a crafted file), and an encoder can still write what the input made of it
+ * (a TIFF of 18 samples from one of 16). convert() tells the two apart by converting the probe image of the input's
+ * format (its animation for an animated job) to the same output with the same program: when that succeeds the
+ * program is sound and the input is the cause, reported as InvalidImageException (invalid_image, 422; a retry will
+ * not help); otherwise the failure is the backend's, ConversionFailedException (conversion_failed, 500). This costs
+ * one conversion of a small image, and only after a failure. No other backend is tried: each decoder that reads a
+ * hostile input is more attack surface. A missing, linked or oversized output file, and a failure to copy it, stay
+ * conversion_failed.
  *
  * Capabilities are probed with CapabilityProber on first use and kept in the capability cache (BackendOptions), keyed
  * by the programs (path, size, modification time, inode), the isolation level and the isolation options. A cache that
@@ -570,7 +573,8 @@ abstract class AbstractBackend implements BackendInterface
 
     /**
      * Runs one job; $timeoutSeconds bounds probe runs below the runner's timeout. With $attribute, a program failure
-     * that is no resource limit or timeout is checked against the probe image (see attribute()).
+     * that is no resource limit or timeout, and an output that OutputCheck refuses, are checked against the probe
+     * image (see attribute()).
      *
      * @param array<string, string> $facts
      *
@@ -620,17 +624,30 @@ abstract class AbstractBackend implements BackendInterface
             }
             $maxBytes = $runner->getOptions()->getResourceLimits()->getFileSizeBytes();
             $name = $this->getName();
-            OutputFile::copy(
-                $directory->pathOf($output),
-                $job->getOutputPath(),
-                $maxBytes,
-                static function (string $copy) use ($job, $maxBytes, $name): void {
-                    $problem = OutputCheck::problem($job, $copy, $maxBytes);
-                    if ($problem !== null) {
-                        throw new ConversionFailedException(sprintf('The %s conversion produced an unusable output: %s.', $name, $problem));
+            $unusable = null;
+
+            try {
+                OutputFile::copy(
+                    $directory->pathOf($output),
+                    $job->getOutputPath(),
+                    $maxBytes,
+                    static function (string $copy) use ($job, $maxBytes, $name, &$unusable): void {
+                        $problem = OutputCheck::problem($job, $copy, $maxBytes);
+                        if ($problem !== null) {
+                            $unusable = new ConversionFailedException(sprintf('The %s conversion produced an unusable output: %s.', $name, $problem));
+
+                            throw $unusable;
+                        }
                     }
+                );
+            } catch (ConversionFailedException $exception) {
+                if (!$attribute || $exception !== $unusable) {
+                    throw $exception;
                 }
-            );
+                $directory->remove();
+
+                throw $this->attribute($job, $facts, $exception);
+            }
 
             return new BackendResult($this->getName(), $job, $result->getDurationMs(), $result->getIsolationLevel());
         } finally {
@@ -639,10 +656,10 @@ abstract class AbstractBackend implements BackendInterface
     }
 
     /**
-     * The exception for a job whose program failed without hitting a limit: InvalidImageException when the program
-     * still converts the probe image of the input's format (its animation, for an animated job) to the job's output
-     * format, so that the input is what it could not process; the given failure otherwise, also when there is no
-     * probe image of the format or the check cannot run.
+     * The exception for a job whose program failed without hitting a limit, or wrote an output that OutputCheck
+     * refuses: InvalidImageException when the program still converts the probe image of the input's format (its
+     * animation, for an animated job) to the job's output format, so that the input is what it could not process; the
+     * given failure otherwise, also when there is no probe image of the format or the check cannot run.
      *
      * @param array<string, string> $facts
      *
@@ -680,7 +697,7 @@ abstract class AbstractBackend implements BackendInterface
         }
 
         return new InvalidImageException(sprintf(
-            '%s It converts a valid %s image, so this image is malformed or uses something its decoder refuses.',
+            '%s It converts a valid %s image, so the cause is this image: it is malformed or uses something the backend refuses.',
             $failure->getMessage(),
             $job->getInputFormat()
         ));
