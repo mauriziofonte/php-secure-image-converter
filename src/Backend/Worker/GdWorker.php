@@ -112,7 +112,7 @@ final class GdWorker extends AbstractWorker
         }
         if ($mirror) {
             // It fails only for an unknown mode (always true since PHP 8.0).
-            imageflip($image, (int) constant('IMG_FLIP_HORIZONTAL'));
+            imageflip($image, self::gdConstant('IMG_FLIP_HORIZONTAL'));
         }
         $width = imagesx($image);
         $height = imagesy($image);
@@ -146,10 +146,8 @@ final class GdWorker extends AbstractWorker
                 $written = function_exists('imagebmp') && imagebmp($image, $output, false);
                 break;
             case 'webp':
-                if ($job['lossless'] && !defined('IMG_WEBP_LOSSLESS')) {
-                    throw new \RuntimeException('GD cannot encode a lossless WEBP.', self::EXIT_FAILED);
-                }
-                $written = imagewebp($image, $output, $job['lossless'] ? (int) constant('IMG_WEBP_LOSSLESS') : $job['quality']);
+                // IMG_WEBP_LOSSLESS exists from PHP 8.1 (gdConstant() throws without it).
+                $written = imagewebp($image, $output, $job['lossless'] ? self::gdConstant('IMG_WEBP_LOSSLESS') : $job['quality']);
                 break;
             default:
                 throw new \RuntimeException('GD does not support this format.', self::EXIT_FAILED);
@@ -160,5 +158,20 @@ final class GdWorker extends AbstractWorker
         self::assertWritten($output);
         // GD keeps no metadata of the input, but its JPEG encoder adds a comment of its own.
         self::dropEncoderMetadata($output, $job['output_format'], false);
+    }
+
+    /**
+     * Reads an integer GD constant by name, for one that this PHP may not define.
+     *
+     * @throws \RuntimeException when this PHP does not define it as an integer
+     */
+    private static function gdConstant(string $name): int
+    {
+        $value = defined($name) ? constant($name) : null;
+        if (!is_int($value)) {
+            throw new \RuntimeException('GD does not define ' . $name . '.', self::EXIT_FAILED);
+        }
+
+        return $value;
     }
 }
