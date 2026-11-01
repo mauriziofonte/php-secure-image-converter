@@ -253,7 +253,8 @@ final class CapabilityMatrixTest extends BackendTestCase
 
     /**
      * A lossless job from the first input format to every format the backend encodes losslessly; a lossless WEBP
-     * has a VP8L chunk and no lossy VP8 one.
+     * has a VP8L chunk and no lossy VP8 one. GD before PHP 8.1 has no IMG_WEBP_LOSSLESS and declares no lossless
+     * output, so the test skips there; every other backend must declare one.
      *
      * @dataProvider enabledBackends
      */
@@ -262,6 +263,10 @@ final class CapabilityMatrixTest extends BackendTestCase
     {
         $backend = self::backend($name);
         $capabilities = $backend->getCapabilities();
+        if ($name === 'gd' && PHP_VERSION_ID < 80100) {
+            self::assertSame([], $capabilities->getLosslessFormats());
+            self::markTestSkipped('GD encodes WEBP losslessly from PHP 8.1 on.');
+        }
         $input = self::still($capabilities->getInputFormats()[0]);
         $jobs = [];
         foreach ($capabilities->getLosslessFormats() as $output) {
