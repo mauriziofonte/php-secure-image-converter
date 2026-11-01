@@ -47,8 +47,8 @@ interface ConverterInterface
      *   ANIMATION_FIRST_FRAME), and, when $request->shouldStripMetadata() is true, it carries no metadata other than
      *   an ICC profile kept by shouldKeepIccProfile(). Such an input is passed through when the converted output is
      *   not smaller ("keep the smaller file"). An input that does not satisfy the request is never passed through,
-     *   even when the converted output is larger: the converter returns the smallest output it can produce that
-     *   satisfies the request (for example metadata stripped without re-encoding, in the input format).
+     *   even when the converted output is larger: the converter returns the converted output, which satisfies the
+     *   request. The library's converter always re-encodes; it never strips metadata from the input bytes alone.
      * - On success the output is at $outputPath, passthrough included, and any previous file there is replaced. On
      *   failure an exception implementing Exception\ExceptionInterface is thrown and no partial output is left at
      *   $outputPath.
