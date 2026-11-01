@@ -7,14 +7,17 @@ namespace Mfonte\SecureImageConverter\Tests\Unit\Backend\Internal;
 use Mfonte\SecureImageConverter\Backend\BackendJob;
 use Mfonte\SecureImageConverter\Backend\Internal\CapabilityProber;
 use Mfonte\SecureImageConverter\Backend\Internal\ProbeImages;
+use Mfonte\SecureImageConverter\Contract\Exception\ConversionFailedException;
 use Mfonte\SecureImageConverter\Contract\ImageFormat;
 use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
 use Mfonte\SecureImageConverter\Tests\Fixtures\ImageBuilder;
+use Mfonte\SecureImageConverter\Validation\ImageInfo;
 use PHPUnit\Framework\Attributes\CoversClass;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
- * The orientation probe: a backend applies orientations only when it turned the oriented probe image upright.
+ * The orientation probe: a backend applies orientations only when it turned the oriented probe image upright. The
+ * variant probe: a backend that crashes on the image of a variant does not decode that variant.
  *
  * @covers \Mfonte\SecureImageConverter\Backend\Internal\CapabilityProber
  */
@@ -67,6 +70,38 @@ final class CapabilityProberTest extends TestCase
         foreach ($jobs as $job) {
             self::assertFalse($job->needsOrientation());
         }
+    }
+
+    /**
+     * The 64-bit BMP is probed at 40 x 30, the size on which an ImageMagick build crashed after converting 16 x 12, and
+     * a crash on it (signal 11, as ProcessFailure reports it) leaves that variant out while the others are declared.
+     */
+    public function testABackendThatCrashesOnAVariantDoesNotDecodeIt(): void
+    {
+        self::assertNotNull($this->directory);
+        $image = (new ProbeImages())->variant(ImageInfo::VARIANT_BMP_64_BIT);
+        self::assertNotNull($image);
+        self::assertSame([40, 30], [$image[1]->getWidth(), $image[1]->getHeight()]);
+        $prober = new CapabilityProber(
+            'fake',
+            static function (BackendJob $job): void {
+                if (in_array(ImageInfo::VARIANT_BMP_64_BIT, $job->getInput()->getVariants(), true)) {
+                    throw new ConversionFailedException('The fake conversion crashed (signal 11).');
+                }
+                file_put_contents($job->getOutputPath(), ImageBuilder::png($job->getWidth(), $job->getHeight()));
+            },
+            new ProbeImages(),
+            $this->directory
+        );
+        $candidates = self::candidates();
+        $candidates['inputs'] = [ImageFormat::BMP];
+
+        $capabilities = $prober->probe($candidates);
+
+        self::assertSame([ImageFormat::BMP], $capabilities->getInputFormats());
+        self::assertNotContains(ImageInfo::VARIANT_BMP_64_BIT, $capabilities->getInputVariants());
+        self::assertContains(ImageInfo::VARIANT_BMP_BIT_FIELDS, $capabilities->getInputVariants());
+        self::assertContains('it failed to convert the bmp_64_bit variant', $capabilities->getNotes());
     }
 
     /**

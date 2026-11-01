@@ -22,9 +22,15 @@ use Mfonte\SecureImageConverter\Validation\ImageInspector;
  * | oriented.* | a 16 x 12 JPEG with EXIF orientation 6 (displayed 12 x 16), its quadrants red, |
  * |            | green, blue and yellow, so that a turn or a mirror shows                       |
  * | variant-*  | a 16 x 12 still of each variant of ImageInfo::VARIANTS, such as                |
- * |            | variant-jpeg_cmyk.jpg (CMYK) and variant-bmp_bit_fields.bmp (32-bit, V4)        |
+ * |            | variant-jpeg_cmyk.jpg (CMYK) and variant-bmp_bit_fields.bmp (32-bit, V4); the  |
+ * |            | 64-bit BMP is 40 x 30                                                          |
  *
  * Each file is inspected with ImageInspector before use, so that a probe never relies on a damaged installation.
+ *
+ * A probe proves what a decoder does with its probe image only. An ImageMagick build crashed (signal 11) on a
+ * 64-bit BMP of 40 x 30 after it had converted one of 16 x 12, so that probe image is the 40 x 30 one that crashed;
+ * a crash on a probe image counts as "cannot decode", like any failure. A decoder that fails or crashes on a later
+ * input anyway makes the conversion invalid_image (see AbstractBackend).
  *
  * @internal
  */
