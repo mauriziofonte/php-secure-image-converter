@@ -16,6 +16,7 @@ use Mfonte\SecureImageConverter\Backend\ImagickBackend;
 use Mfonte\SecureImageConverter\Backend\VipsBackend;
 use Mfonte\SecureImageConverter\Contract\ConversionRequest;
 use Mfonte\SecureImageConverter\Contract\Exception\ConversionFailedException;
+use Mfonte\SecureImageConverter\Contract\Exception\InvalidImageException;
 use Mfonte\SecureImageConverter\Contract\Exception\UnsupportedFormatException;
 use Mfonte\SecureImageConverter\Contract\ImageFormat;
 use Mfonte\SecureImageConverter\Tests\Fixtures\ContentImages;
@@ -456,7 +457,7 @@ final class CapabilityMatrixTest extends BackendTestCase
     /**
      * vips thumbnail picks its loader by content: a resize is declared only where VIPS_BLOCK_UNTRUSTED works, and then
      * an input whose content only an untrusted loader reads (a PPM passed as a validated PNG) is refused, resized or
-     * not, while a PNG converts.
+     * not, while a PNG converts. The refusal is invalid_image: vips converts the probe PNG, so the input is the cause.
      */
     public function testVipsReadsNoInputWithAnUntrustedLoader(): void
     {
@@ -476,7 +477,7 @@ final class CapabilityMatrixTest extends BackendTestCase
             try {
                 $vips->convert($this->job($disguised, ImageFormat::WEBP, $size[0], $size[1]));
                 self::fail(sprintf('vips read a PPM at %dx%d.', $size[0], $size[1]));
-            } catch (ConversionFailedException $exception) {
+            } catch (InvalidImageException $exception) {
                 self::assertStringContainsString('vips', $exception->getMessage());
             }
             self::assertNull(self::check($vips, $this->job($png, ImageFormat::WEBP, $size[0], $size[1])));

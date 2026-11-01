@@ -6,6 +6,7 @@ namespace Mfonte\SecureImageConverter\Backend;
 
 use Mfonte\SecureImageConverter\Contract\Exception\ConversionFailedException;
 use Mfonte\SecureImageConverter\Contract\Exception\ConversionTimeoutException;
+use Mfonte\SecureImageConverter\Contract\Exception\InvalidImageException;
 use Mfonte\SecureImageConverter\Contract\Exception\IsolationUnavailableException;
 use Mfonte\SecureImageConverter\Contract\Exception\ResourceLimitException;
 
@@ -50,8 +51,12 @@ interface BackendInterface
      *                                       process ran out of its address space, CPU time or file size limit
      * @throws ConversionTimeoutException    when the process exceeded its wall-clock timeout
      * @throws IsolationUnavailableException when the isolation level of the runner is not available on the host
+     * @throws InvalidImageException         when the program fails or crashes on the input without hitting a limit,
+     *                                       while it converts the probe image of the input's format (see
+     *                                       AbstractBackend)
      * @throws ConversionFailedException     when the backend is unavailable, its capabilities do not cover the job,
-     *                                       or the program fails or leaves no regular output file
+     *                                       or the program fails (on the probe image too) or leaves no regular
+     *                                       output file
      */
     public function convert(BackendJob $job): BackendResult;
 }

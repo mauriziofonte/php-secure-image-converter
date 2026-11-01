@@ -23,6 +23,9 @@ use Mfonte\SecureImageConverter\Isolation\ProcessResult;
  * | exit code WORKER_RESOURCE_LIMIT_EXIT of a PHP worker                | ResourceLimitException     | resource_limit     |
  * | any other exit code or signal                                      | ConversionFailedException  | conversion_failed  |
  *
+ * AbstractBackend::convert() turns the last row into InvalidImageException (invalid_image) when the backend still
+ * converts its probe image of the input's format: the program is sound, the input is what it failed on.
+ *
  * Under the address space limit an allocation fails: the program reports it and exits (ENOMEM, "out of memory",
  * "failed to allocate"), or aborts (GLib's g_error() raises SIGTRAP or SIGABRT after "failed to allocate"), or
  * crashes without a word (SIGSEGV). A tight limit also stops the dynamic loader ("failed to map segment") and GLib's

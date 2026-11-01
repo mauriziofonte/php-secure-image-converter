@@ -16,6 +16,7 @@ use Mfonte\SecureImageConverter\Backend\Internal\SandboxPaths;
 use Mfonte\SecureImageConverter\Contract\Exception\ConversionFailedException;
 use Mfonte\SecureImageConverter\Contract\Exception\ExceptionInterface;
 use Mfonte\SecureImageConverter\Contract\Exception\InvalidArgumentException;
+use Mfonte\SecureImageConverter\Contract\Exception\InvalidImageException;
 use Mfonte\SecureImageConverter\Contract\Exception\ResourceLimitException;
 use Mfonte\SecureImageConverter\Contract\ImageFormat;
 use Mfonte\SecureImageConverter\Contract\IsolationLevel;
@@ -50,6 +51,15 @@ use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
  * - maps a failure to its exception (ProcessFailure), or copies "output.<extension>" next to the job's output path
  *   (OutputFile), checks the copy (OutputCheck) and only then renames it over the output path, and removes the
  *   directory.
+ *
+ * A program that fails on a job without hitting a limit (an exit code, or a crash such as SIGSEGV) failed either on
+ * the input or by itself. The input passed the header checks of ImageInspector, which read no pixel data, so a
+ * decoder can still meet data it refuses or crashes on: a truncated stream, more chunks than libpng caches, a crafted
+ * file. convert() tells the two apart by converting the probe image of the input's format (its animation for an
+ * animated job) to the same output with the same program: when that succeeds the program is sound and the input is
+ * the cause, reported as InvalidImageException (invalid_image, 422; a retry will not help); otherwise the failure is
+ * the backend's, ConversionFailedException (conversion_failed, 500). This costs one conversion of a 16 x 12 image,
+ * and only after a failure. No other backend is tried: each decoder that reads a hostile input is more attack surface.
  *
  * Capabilities are probed with CapabilityProber on first use and kept in the capability cache (BackendOptions), keyed
  * by the programs (path, size, modification time, inode), the isolation level and the isolation options. A cache that
@@ -197,7 +207,7 @@ abstract class AbstractBackend implements BackendInterface
             ));
         }
 
-        return $this->perform($job, $this->facts, null);
+        return $this->perform($job, $this->facts, null, true);
     }
 
     /**
@@ -559,13 +569,14 @@ abstract class AbstractBackend implements BackendInterface
     }
 
     /**
-     * Runs one job; $timeoutSeconds bounds probe runs below the runner's timeout.
+     * Runs one job; $timeoutSeconds bounds probe runs below the runner's timeout. With $attribute, a program failure
+     * that is no resource limit or timeout is checked against the probe image (see attribute()).
      *
      * @param array<string, string> $facts
      *
      * @throws ExceptionInterface
      */
-    private function perform(BackendJob $job, array $facts, ?float $timeoutSeconds): BackendResult
+    private function perform(BackendJob $job, array $facts, ?float $timeoutSeconds, bool $attribute = false): BackendResult
     {
         $programs = $this->requirePrograms();
         $directory = WorkingDirectory::create($this->options->getWorkingDirectoryParent());
@@ -599,7 +610,13 @@ abstract class AbstractBackend implements BackendInterface
                 array_merge([$job->getInputPath()], $this->getSandboxResourcePaths())
             );
             if (!$result->isSuccessful()) {
-                throw ProcessFailure::exception($this->getName(), $result, $this->isWorker());
+                $failure = ProcessFailure::exception($this->getName(), $result, $this->isWorker());
+                if ($attribute && $failure instanceof ConversionFailedException) {
+                    $directory->remove();
+                    $failure = $this->attribute($job, $facts, $failure);
+                }
+
+                throw $failure;
             }
             $maxBytes = $runner->getOptions()->getResourceLimits()->getFileSizeBytes();
             $name = $this->getName();
@@ -619,6 +636,54 @@ abstract class AbstractBackend implements BackendInterface
         } finally {
             $directory->remove();
         }
+    }
+
+    /**
+     * The exception for a job whose program failed without hitting a limit: InvalidImageException when the program
+     * still converts the probe image of the input's format (its animation, for an animated job) to the job's output
+     * format, so that the input is what it could not process; the given failure otherwise, also when there is no
+     * probe image of the format or the check cannot run.
+     *
+     * @param array<string, string> $facts
+     *
+     * @return ConversionFailedException|InvalidImageException
+     */
+    private function attribute(BackendJob $job, array $facts, ConversionFailedException $failure): ExceptionInterface
+    {
+        $images = new ProbeImages();
+        $image = $job->isAnimated() ? $images->animation($job->getInputFormat()) : null;
+        $image = $image !== null ? $image : $images->still($job->getInputFormat());
+        if ($image === null) {
+            return $failure;
+        }
+
+        try {
+            $directory = WorkingDirectory::create($this->options->getWorkingDirectoryParent());
+        } catch (ExceptionInterface $exception) {
+            return $failure;
+        }
+
+        try {
+            $probe = new BackendJob(
+                $image[0],
+                $image[1],
+                $directory->pathOf(self::OUTPUT_NAME . '.' . ImageFormat::extension($job->getOutputFormat())),
+                $job->getOutputFormat(),
+                $image[1]->getWidth(),
+                $image[1]->getHeight()
+            );
+            $this->perform($probe->withKeepIccProfile(false)->withEffort(0), $facts, self::PROBE_TIMEOUT_SECONDS);
+        } catch (ExceptionInterface $exception) {
+            return $failure;
+        } finally {
+            $directory->remove();
+        }
+
+        return new InvalidImageException(sprintf(
+            '%s It converts a valid %s image, so this image is malformed or uses something its decoder refuses.',
+            $failure->getMessage(),
+            $job->getInputFormat()
+        ));
     }
 
     /**

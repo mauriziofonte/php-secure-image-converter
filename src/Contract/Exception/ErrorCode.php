@@ -19,7 +19,9 @@ namespace Mfonte\SecureImageConverter\Contract\Exception;
  * | `unsupported_format`         | 415    | UnsupportedFormatException    | input format unidentifiable or not enabled,   |
  * |                              |        |                               | or a variant of it that is not accepted (see  |
  * |                              |        |                               | UnsupportedFormatException)                   |
- * | `invalid_image`              | 422    | InvalidImageException         | identified but malformed, truncated, spoofed  |
+ * | `invalid_image`              | 422    | InvalidImageException         | identified but malformed, truncated, spoofed, |
+ * |                              |        |                               | or failing a decoder that converts a valid    |
+ * |                              |        |                               | image of its format                           |
  * | `animation_rejected`         | 422    | InvalidImageException         | animated input with animation policy reject   |
  * | `file_too_large`             | 413    | LimitExceededException        | input byte size above max_bytes               |
  * | `image_too_large`            | 422    | LimitExceededException        | input or resolved output above a dimension,   |
@@ -32,7 +34,8 @@ namespace Mfonte\SecureImageConverter\Contract\Exception;
  * | `isolation_unavailable`      | 503    | IsolationUnavailableException | required isolation level missing on the host  |
  * | `concurrency_limit`          | 503    | ConcurrencyLimitException     | no conversion slot or key lock free in time;  |
  * |                              |        |                               | retry later (Retry-After from the exception)  |
- * | `conversion_failed`          | 500    | ConversionFailedException     | no backend could produce the output           |
+ * | `conversion_failed`          | 500    | ConversionFailedException     | no backend could produce the output, or one   |
+ * |                              |        |                               | failed on a valid image too                   |
  * | `output_verification_failed` | 500    | OutputVerificationException   | the produced output was not what was asked    |
  * | `internal_error`             | 500    | InvalidArgumentException      | programming, configuration or integration     |
  * |                              |        |                               | error                                         |

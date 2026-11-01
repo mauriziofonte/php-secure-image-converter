@@ -12,6 +12,7 @@ use Mfonte\SecureImageConverter\Backend\Internal\CapabilityProber;
 use Mfonte\SecureImageConverter\Backend\Internal\SandboxPaths;
 use Mfonte\SecureImageConverter\Contract\Exception\ConversionFailedException;
 use Mfonte\SecureImageConverter\Contract\Exception\ConversionTimeoutException;
+use Mfonte\SecureImageConverter\Contract\Exception\InvalidImageException;
 use Mfonte\SecureImageConverter\Contract\Exception\ResourceLimitException;
 use Mfonte\SecureImageConverter\Contract\ImageFormat;
 use Mfonte\SecureImageConverter\Isolation\ProcessOptions;
@@ -39,7 +40,8 @@ final class AbstractBackendTest extends TestCase
     use FakePrograms;
 
     /**
-     * What the fake cwebp does: "copy", "fail", "signal", "timeout" or "link".
+     * What the fake cwebp does: "copy", "fail", "signal", "timeout", "link", "truncated", "wrong size", or "fail on
+     * input" and "crash on input" (an exit code 1 or SIGSEGV for the job of hostileJob(), a copy for every other run).
      *
      * @var string
      */
@@ -80,7 +82,16 @@ final class AbstractBackendTest extends TestCase
                     return $this->trace !== null ? FakeProcessRunner::result(0, $this->trace) : FakeProcessRunner::result(1);
                 }
                 $output = $directory->pathOf((string) $command[count($command) - 1]);
-                switch ($this->behaviour) {
+                $hostile = $this->files !== null && @readlink($directory->pathOf('input.png')) === $this->files->getPath() . '/hostile.png';
+                $behaviour = $this->behaviour;
+                if (substr($behaviour, -9) === ' on input') {
+                    $behaviour = $hostile ? $behaviour : 'copy';
+                }
+                switch ($behaviour) {
+                    case 'fail on input':
+                        return FakeProcessRunner::result(1, '', 'libpng error: IDAT: invalid distance too far back');
+                    case 'crash on input':
+                        return FakeProcessRunner::result(0, '', '', 11);
                     case 'fail':
                         return FakeProcessRunner::result(1, '', 'Unsupported color conversion request');
                     case 'signal':
@@ -123,6 +134,26 @@ final class AbstractBackendTest extends TestCase
 
         return new BackendJob(
             (string) realpath($input),
+            (new ImageInspector())->inspect($input),
+            $this->files->getPath() . '/converted.webp',
+            ImageFormat::WEBP,
+            16,
+            12
+        );
+    }
+
+    /**
+     * The job of a copy of the PNG probe image, "hostile.png", which the fake cwebp fails on in the "on input"
+     * behaviours.
+     */
+    private function hostileJob(): BackendJob
+    {
+        self::assertNotNull($this->files);
+        $input = $this->files->getPath() . '/hostile.png';
+        copy(__DIR__ . '/../../../resources/probe/still.png', $input);
+
+        return new BackendJob(
+            $input,
             (new ImageInspector())->inspect($input),
             $this->files->getPath() . '/converted.webp',
             ImageFormat::WEBP,
@@ -314,6 +345,57 @@ final class AbstractBackendTest extends TestCase
             self::assertSame('previous', file_get_contents($this->job()->getOutputPath()), $behaviour . ': the destination is left alone');
             self::assertSame([], glob(\dirname($this->job()->getOutputPath()) . '/.sic-*'), $behaviour . ': no copy is left behind');
         }
+    }
+
+    /**
+     * A program that fails or crashes on the input while it still converts the probe image of the format failed on the
+     * input: invalid_image, never conversion_failed. One more run checks the probe image, and nothing is left behind.
+     */
+    public function testAFailureOnTheInputAloneIsAnInvalidImage(): void
+    {
+        $runner = $this->runner();
+        $backend = new CwebpBackend($runner, $this->options());
+        $backend->getCapabilities();
+        $expected = [
+            'fail on input' => 'The cwebp conversion failed (exit code 1). It converts a valid png image, so this image is malformed or uses something its decoder refuses.',
+            'crash on input' => 'The cwebp conversion crashed (signal 11). It converts a valid png image, so this image is malformed or uses something its decoder refuses.',
+        ];
+        foreach ($expected as $behaviour => $message) {
+            $this->behaviour = $behaviour;
+            $job = $this->hostileJob();
+            file_put_contents($job->getOutputPath(), 'previous');
+            $runs = count($runner->getRuns());
+            try {
+                $backend->convert($job);
+                self::fail('The conversion must fail: ' . $behaviour);
+            } catch (InvalidImageException $exception) {
+                self::assertSame($message, $exception->getMessage(), $behaviour);
+                self::assertSame('invalid_image', $exception->getErrorCode());
+            }
+            self::assertCount($runs + 2, $runner->getRuns(), $behaviour . ': the job, then the probe image');
+            self::assertSame('previous', file_get_contents($job->getOutputPath()), $behaviour . ': the destination is left alone');
+            self::assertSame([], glob(\dirname($job->getOutputPath()) . '/.sic-*'), $behaviour . ': no copy is left behind');
+        }
+    }
+
+    /**
+     * A program that fails on the probe image too is broken: the failure stays conversion_failed.
+     */
+    public function testAFailureOnTheProbeImageTooIsAConversionFailure(): void
+    {
+        $runner = $this->runner();
+        $backend = new CwebpBackend($runner, $this->options());
+        $backend->getCapabilities();
+        $this->behaviour = 'fail';
+        $runs = count($runner->getRuns());
+
+        try {
+            $backend->convert($this->hostileJob());
+            self::fail('The conversion must fail.');
+        } catch (ConversionFailedException $exception) {
+            self::assertSame('The cwebp conversion failed (exit code 1).', $exception->getMessage());
+        }
+        self::assertCount($runs + 2, $runner->getRuns());
     }
 
     public function testAJobOutsideTheCapabilitiesDoesNotRun(): void
