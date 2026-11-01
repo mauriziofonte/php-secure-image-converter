@@ -516,3 +516,55 @@ jobs:
           path: ${{ runner.temp }}/security/failures
           if-no-files-found: ignore
           retention-days: 7
+
+  # Scans the reference image for vulnerabilities of its packages; nightly.yml
+  # runs the same scan every night, so that an advisory published after the
+  # last push is seen. Policy (see tests/docker/Dockerfile): a critical
+  # vulnerability with a fixed package fails the job and is fixed by
+  # rebuilding (the build installs the security updates) or by a new base
+  # digest; a vulnerability without a fix yet is listed in the report but
+  # does not fail the job, and is reviewed when it appears.
+  trivy:
+    name: Trivy (reference image)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build the reference image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: tests/docker
+          platforms: linux/amd64
+          load: true
+          push: false
+          provenance: false
+          tags: sic-reference:ci
+
+      - name: Report high and critical vulnerabilities, fixed or not
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.70.0
+          image-ref: sic-reference:ci
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          format: table
+          exit-code: '0'
+
+      - name: Fail on a critical vulnerability that has a fix
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.70.0
+          skip-setup-trivy: true
+          image-ref: sic-reference:ci
+          scanners: vuln
+          severity: CRITICAL
+          ignore-unfixed: true
+          format: table
+          exit-code: '1'
