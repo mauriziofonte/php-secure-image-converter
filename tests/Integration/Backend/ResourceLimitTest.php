@@ -232,9 +232,10 @@ final class ResourceLimitTest extends BackendTestCase
 
     /**
      * A slow job under a CPU time limit of one second fails with ResourceLimitException, from the kill and neither
-     * from the memory estimate nor from the address space limit: a noisy image at the highest effort, of 6 megapixels to AVIF, or of 20 megapixels to
-     * lossless WEBP (GD's encoder ignores the effort: its worker took 2.3 seconds of CPU time for 6 megapixels in
-     * tests/docker and 8.1 for 20, and converted 6 megapixels within the limit on GitHub's runners).
+     * from the memory estimate nor from the address space limit: a noisy image at the highest effort, of 6 megapixels
+     * to AVIF, or of 20 megapixels to lossless WEBP (GD's encoder ignores the effort: its worker took 2.3 seconds of
+     * CPU time for 6 megapixels in tests/docker and 8.1 for 20, and converted 6 megapixels within the limit on
+     * GitHub's runners).
      *
      * @dataProvider enabledBackends
      */

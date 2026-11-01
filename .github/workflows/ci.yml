@@ -164,9 +164,9 @@ jobs:
 
   # The tests job runs the isolation tests too (composer test runs every
   # group but backends), but without bubblewrap, so there the sandbox tests
-  # skip; the static job runs no tests. This job installs bubblewrap and lifts Ubuntu
-  # 24.04's AppArmor restriction on unprivileged user namespaces, so that
-  # every sandbox test really runs: with
+  # skip; the static job runs no tests. This job installs bubblewrap and
+  # lifts Ubuntu 24.04's AppArmor restriction on unprivileged user
+  # namespaces, so that every sandbox test really runs: with
   # SIC_EXPECTED_ISOLATION_LEVEL set, a test that needs a level the host
   # lacks fails instead of skipping. It then disables user namespaces and
   # checks that detection falls back to the rlimit level.
