@@ -227,9 +227,10 @@ abstract class AbstractWorker
 
     /**
      * An answer as JSON, written with core functions only (see decodeJob()): lists, objects, strings, integers,
-     * booleans and null, as json_encode() writes them for the format names and the fixed English sentences of the
-     * answers. A byte outside ASCII is written as "?", so that the output is valid UTF-8 whatever a library message
-     * holds.
+     * booleans and null. Floats are not supported (written as null); no answer holds one. A string escapes the quote,
+     * the backslash and the slash, and writes the control characters and DEL as \u00XX, where json_encode() writes
+     * \n, \t... and DEL as is: json_decode() reads both alike. A byte outside ASCII is written as "?", so that the
+     * output is valid UTF-8 whatever a library message holds.
      *
      * @param mixed $value
      */
