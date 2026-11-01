@@ -38,7 +38,7 @@ use Mfonte\SecureImageConverter\Contract\ValidatedSerializationTrait;
  *   (which hasIccProfile(), hasExif() and hasMetadata() report). A consumer that must never return bytes it has not
  *   decoded re-encodes every image, and strips or rebuilds the colour profile, whatever the flag.
  * - getVariants() names the variants of the format that some decoders do not read (see VARIANTS): a CMYK JPEG, a BMP
- *   with bit-field masks, 2 or 64 bits per pixel, or a V2 or V3 header. Backends probe which of them they decode, so
+ *   with bit-field masks, 2 or 64 bits per pixel, a V2 or V3 header, or a colour profile before its pixels. Backends probe which of them they decode, so
  *   that an image is never given to a decoder that cannot read it.
  *
  * Only the first image is described, and backends must decode it alone (page, scene or item 0): for TIFF, the first
@@ -102,6 +102,12 @@ final class ImageInfo
     public const VARIANT_BMP_V3_HEADER = 'bmp_v3_header';
 
     /**
+     * A V5 BMP whose embedded colour profile lies before its pixel data, which the specification allows and
+     * ImageMagick 6 refuses ("improper image header").
+     */
+    public const VARIANT_BMP_PROFILE_BEFORE_PIXELS = 'bmp_profile_before_pixels';
+
+    /**
      * Every variant, in canonical order, with the format it belongs to.
      */
     public const VARIANTS = [
@@ -112,6 +118,7 @@ final class ImageInfo
         self::VARIANT_BMP_64_BIT => ImageFormat::BMP,
         self::VARIANT_BMP_V2_HEADER => ImageFormat::BMP,
         self::VARIANT_BMP_V3_HEADER => ImageFormat::BMP,
+        self::VARIANT_BMP_PROFILE_BEFORE_PIXELS => ImageFormat::BMP,
     ];
 
     /**

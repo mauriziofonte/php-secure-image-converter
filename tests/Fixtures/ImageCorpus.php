@@ -476,6 +476,7 @@ final class ImageCorpus
             'bmp/valid-zip-before-pixels.bmp' => self::committed(self::bmpWithGap(ImageBuilder::bmp(7, 5), "PK\x05\x06" . ImageBuilder::repeat("\0", 18)), self::accept(ImageFormat::BMP, 7, 5, 1, ['trailing_data' => true])),
             // A colour profile there is not hidden data.
             'bmp/valid-v5-icc-before-pixels.bmp' => self::committed(self::bmpProfileBeforePixels(), self::accept(ImageFormat::BMP, 4, 4, 1, ['icc_profile' => true, 'trailing_data' => false])),
+            'bmp/valid-v5-icc-before-rgb-pixels.bmp' => self::committed(self::bmpProfileBeforePixels(24, 0), self::accept(ImageFormat::BMP, 4, 4, 1, ['icc_profile' => true, 'trailing_data' => false])),
             // Images of more than 8 bits have no palette for decoders to read, whatever the colours-used field says.
             'bmp/valid-zip-as-unused-palette.bmp' => self::committed(
                 ImageBuilder::patch(self::bmpWithGap($valid, "PK\x05\x06" . ImageBuilder::repeat("\0", 20)), 46, pack('V', 6)),
@@ -960,13 +961,13 @@ final class ImageCorpus
     }
 
     /**
-     * A 4 x 4 V5 BMP whose embedded colour profile lies between the header and the pixel data, where some writers
-     * store it.
+     * A 4 x 4 V5 BMP (32-bit bit fields by default) whose embedded colour profile lies between the header and the
+     * pixel data, where some writers store it.
      */
-    private static function bmpProfileBeforePixels(): string
+    private static function bmpProfileBeforePixels(int $bitCount = 32, int $compression = 3): string
     {
         $profile = ImageBuilder::iccProfile();
-        $bmp = ImageBuilder::bmp(4, 4, 32, 3, 124, false, 'MBED', $profile);
+        $bmp = ImageBuilder::bmp(4, 4, $bitCount, $compression, 124, false, 'MBED', $profile);
         $bmp = self::bmpWithGap((string) substr($bmp, 0, -strlen($profile)), $profile);
 
         // The profile offset (at 112 in the V5 header) counts from the start of the header, 124 bytes long.

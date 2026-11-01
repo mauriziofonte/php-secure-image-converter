@@ -323,6 +323,11 @@ final class ImageInspectorTest extends TestCase
             '64-bit BMP' => [ImageBuilder::bmp(4, 4, 64), [ImageInfo::VARIANT_BMP_64_BIT]],
             'V2 header BMP' => [ImageBuilder::bmp(4, 4, 24, 0, 52), [ImageInfo::VARIANT_BMP_V2_HEADER]],
             'V3 header bit-field BMP' => [ImageBuilder::bmp(4, 4, 32, 3, 56), [ImageInfo::VARIANT_BMP_BIT_FIELDS, ImageInfo::VARIANT_BMP_V3_HEADER]],
+            'V5 BMP with its profile after the pixels' => [ImageBuilder::bmp(4, 4, 24, 0, 124, false, 'MBED', ImageBuilder::iccProfile()), []],
+            'V5 BMP with its profile before the pixels' => [
+                (string) file_get_contents(\dirname(__DIR__, 2) . '/Fixtures/corpus/bmp/valid-v5-icc-before-rgb-pixels.bmp'),
+                [ImageInfo::VARIANT_BMP_PROFILE_BEFORE_PIXELS],
+            ],
         ];
     }
 
