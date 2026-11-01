@@ -31,6 +31,9 @@ use Mfonte\SecureImageConverter\Validation\ImageInfo;
  * | lossless         | a lossless conversion succeeds (a WEBP must use the lossless VP8L bitstream)           |
  * | ICC profile      | the JPEG source, stripped with the ICC profile kept: the profile is there, EXIF is not  |
  * | metadata         | the JPEG source, not stripped: EXIF is there                                           |
+ * | unstripped       | a format that is both an input and an output, whose image with metadata               |
+ * |                  | (ProbeImages::metadata()) re-encoded as itself with metadata stripped was wrong, kept |
+ * |                  | metadata or failed; a format without such an image (AVIF, BMP) is not probed           |
  * | oriented formats | the oriented JPEG (16 x 12 stored, EXIF orientation 6) converted with its orientation |
  * |                  | applied: the output is 12 x 16 and carries no orientation; then every candidate input  |
  * |                  | format is declared, the backend applying the orientation the same way to all of them  |
@@ -209,6 +212,13 @@ final class CapabilityProber
         if ($oriented !== [] && in_array(ImageFormat::JPEG, $inputs, true) && $this->appliesOrientation($reference)) {
             $capabilities = $capabilities->withOrientedFormats($oriented);
         }
+        $unstripped = [];
+        foreach (array_intersect($inputs, $outputs) as $format) {
+            if (!$this->stripsReencode($format)) {
+                $unstripped[] = $format;
+            }
+        }
+        $capabilities = $capabilities->withUnstrippedFormats($unstripped);
         $metadataOutput = in_array(ImageFormat::JPEG, $inputs, true) ? self::first(self::METADATA_ORDER, $outputs) : null;
         if ($metadataOutput !== null) {
             $capabilities = $capabilities
@@ -409,6 +419,26 @@ final class CapabilityProber
             self::matches($info, $output, $image[1]->getHeight(), $image[1]->getWidth(), 1)
                 && $info->getOrientation() === ImageInfo::ORIENTATION_NORMAL,
             'its output of an oriented image was not upright'
+        );
+    }
+
+    /**
+     * Whether the image of a format with metadata, re-encoded as the same format with metadata stripped, comes out
+     * right and without metadata; true when there is no such image.
+     */
+    private function stripsReencode(string $format): bool
+    {
+        $image = $this->images->metadata($format);
+        if ($image === null) {
+            return true;
+        }
+        $info = $this->run($this->job($image, $format, $image[1]->getWidth(), $image[1]->getHeight()), 'a ' . $format . ' with metadata to ' . $format);
+
+        return $info !== null && $this->check(
+            self::matches($info, $format, $image[1]->getWidth(), $image[1]->getHeight(), 1)
+                && !$info->hasMetadata()
+                && !$info->hasIccProfile(),
+            sprintf('its %s output from a %s with metadata kept the metadata', $format, $format)
         );
     }
 

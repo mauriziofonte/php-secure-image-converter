@@ -33,6 +33,7 @@ final class BackendCapabilitiesTest extends TestCase
             ->withFits([ConversionRequest::FIT_FILL, ConversionRequest::FIT_CONTAIN, ConversionRequest::FIT_COVER])
             ->withAnimatedFits([ConversionRequest::FIT_CONTAIN])
             ->withOrientedFormats([ImageFormat::JPEG])
+            ->withUnstrippedFormats([ImageFormat::PNG])
             ->withIccProfile(true)
             ->withMetadata(false)
             ->withNotes(['its resize with fit cover of an animation had the wrong size']);
@@ -99,6 +100,7 @@ final class BackendCapabilitiesTest extends TestCase
             'unknown fit' => ['fits' => ['stretch']] + $valid,
             'animated fit not a fit' => ['fits' => [ConversionRequest::FIT_FILL], 'animated_fits' => [ConversionRequest::FIT_COVER]] + $valid,
             'oriented format not an input' => ['oriented_formats' => [ImageFormat::BMP]] + $valid,
+            'unstripped format not an output' => ['unstripped_formats' => [ImageFormat::GIF]] + $valid,
             'flag not a boolean' => ['icc_profile' => 1] + $valid,
             'note with a newline' => ['notes' => ["two\nlines"]] + $valid,
             'bad backend name' => ['backend' => 'Vips!'] + $valid,
@@ -183,6 +185,18 @@ final class BackendCapabilitiesTest extends TestCase
             }],
             'orientation ignored' => [null, static function () {
                 return self::job(self::info(ImageFormat::PNG)->withOrientation(6), ImageFormat::WEBP);
+            }],
+            'metadata kept by a re-encode' => ['it does not strip the metadata of a png re-encoded as png', static function () {
+                return self::job(self::info(ImageFormat::PNG)->withMetadata(false, false, true), ImageFormat::PNG);
+            }],
+            'metadata stripped by another output' => [null, static function () {
+                return self::job(self::info(ImageFormat::PNG)->withMetadata(false, true, false), ImageFormat::WEBP);
+            }],
+            'no metadata to strip' => [null, static function () {
+                return self::job(self::info(ImageFormat::PNG)->withMetadata(true, false, false), ImageFormat::PNG);
+            }],
+            'metadata not stripped' => [null, static function () {
+                return self::job(self::info(ImageFormat::PNG)->withMetadata(false, true, true), ImageFormat::PNG)->withStripMetadata(false);
             }],
         ];
     }

@@ -27,11 +27,14 @@ use Mfonte\SecureImageConverter\Validation\ImageInfo;
  * | fits                    | fits (contain, cover, fill) with which it scales a still image to an exact size       |
  * | animated fits           | fits with which it scales every frame of an animation to an exact size                |
  * | oriented formats        | input formats whose EXIF orientation it applies on request (BackendJob::getOrientation()) |
+ * | unstripped formats      | formats whose metadata it leaves in an image re-encoded as the same format, although  |
+ * |                         | stripping is requested (vips 8.15 keeps PNG text chunks): such a job is not given to it |
  * | ICC profile             | it keeps the ICC profile while it strips the other metadata                           |
  * | metadata                | it keeps every metadata block when stripping is not requested                         |
  *
  * Every backend strips metadata on request: a backend whose output kept metadata after stripping fails its probes
- * and does not list that output format. An unavailable backend lists nothing and says why. Notes are short English
+ * and does not list that output format, or, when only a re-encode as the same format kept the metadata of the input,
+ * lists that format as unstripped. An unavailable backend lists nothing and says why. Notes are short English
  * sentences on probes that failed, for logs, /healthz and check-env: printable ASCII, never a path or tool output.
  *
  * Immutable value object. toArray() and fromArray() store it in the capability cache, strictly: an array of another
@@ -42,7 +45,7 @@ final class BackendCapabilities
     /**
      * Version of the array shape of toArray() and fromArray().
      */
-    public const SCHEMA_VERSION = 3;
+    public const SCHEMA_VERSION = 4;
 
     /**
      * Maximum length of a note or of the reason a backend is unavailable, in characters.
@@ -67,6 +70,7 @@ final class BackendCapabilities
         'fits',
         'animated_fits',
         'oriented_formats',
+        'unstripped_formats',
         'icc_profile',
         'metadata',
         'notes',
@@ -131,6 +135,11 @@ final class BackendCapabilities
      * @var list<string>
      */
     private $orientedFormats = [];
+
+    /**
+     * @var list<string>
+     */
+    private $unstrippedFormats = [];
 
     /**
      * @var bool
@@ -233,6 +242,7 @@ final class BackendCapabilities
             ->withFits(self::stringList('fits', $data['fits']))
             ->withAnimatedFits(self::stringList('animated fits', $data['animated_fits']))
             ->withOrientedFormats(self::stringList('oriented formats', $data['oriented_formats']))
+            ->withUnstrippedFormats(self::stringList('unstripped formats', $data['unstripped_formats']))
             ->withIccProfile($data['icc_profile'])
             ->withMetadata($data['metadata'])
             ->withNotes(self::stringList('notes', $data['notes']));
@@ -499,6 +509,35 @@ final class BackendCapabilities
     }
 
     /**
+     * Formats whose metadata (other than an ICC profile) the backend leaves in an image re-encoded as the same format
+     * although stripping is requested, in canonical order: a job that strips the metadata of such an input to its own
+     * format is not given to it.
+     *
+     * @return list<string>
+     */
+    public function getUnstrippedFormats(): array
+    {
+        return $this->unstrippedFormats;
+    }
+
+    /**
+     * @param list<string> $formats formats among both the input and the output formats
+     *
+     * @throws InvalidArgumentException when a format is not both an input and an output format
+     */
+    public function withUnstrippedFormats(array $formats): self
+    {
+        $clone = $this->availableClone();
+        $clone->unstrippedFormats = self::checkSubset(
+            'unstripped formats',
+            $formats,
+            array_values(array_intersect($this->inputFormats, $this->outputFormats))
+        );
+
+        return $clone;
+    }
+
+    /**
      * Whether the backend keeps the ICC profile while it strips the other metadata.
      */
     public function keepsIccProfile(): bool
@@ -587,8 +626,8 @@ final class BackendCapabilities
 
     /**
      * Why the backend cannot perform a job, or null when it can. Only the hard requirements are checked: the input
-     * (explainUndecodable()), the output (still or animated), the fit when the size changes, the lossless mode, and
-     * the orientation when the job applies one.
+     * (explainUndecodable()), the output (still or animated), the fit when the size changes, the lossless mode, the
+     * orientation when the job applies one, and the stripping of an input with metadata re-encoded as its own format.
      * The metadata requirements are reported by getMetadataGaps().
      */
     public function explainUnsupported(BackendJob $job): ?string
@@ -623,6 +662,14 @@ final class BackendCapabilities
         if ($job->needsOrientation() && !in_array($job->getInputFormat(), $this->orientedFormats, true)) {
             return sprintf('it does not apply the orientation of %s', $job->getInputFormat());
         }
+        if (
+            $output === $job->getInputFormat()
+            && $job->shouldStripMetadata()
+            && $job->getInput()->hasMetadata()
+            && in_array($output, $this->unstrippedFormats, true)
+        ) {
+            return sprintf('it does not strip the metadata of a %s re-encoded as %s', $output, $output);
+        }
 
         return null;
     }
@@ -649,7 +696,7 @@ final class BackendCapabilities
     /**
      * Array representation, for the capability cache and for diagnostics (/healthz, check-env).
      *
-     * @return array{schema: int, backend: string, available: bool, unavailable_reason: string|null, input_formats: list<string>, input_variants: list<string>, first_frame_formats: list<string>, animated_input_formats: list<string>, output_formats: list<string>, animated_output_formats: list<string>, lossless_formats: list<string>, fits: list<string>, animated_fits: list<string>, oriented_formats: list<string>, icc_profile: bool, metadata: bool, notes: list<string>}
+     * @return array{schema: int, backend: string, available: bool, unavailable_reason: string|null, input_formats: list<string>, input_variants: list<string>, first_frame_formats: list<string>, animated_input_formats: list<string>, output_formats: list<string>, animated_output_formats: list<string>, lossless_formats: list<string>, fits: list<string>, animated_fits: list<string>, oriented_formats: list<string>, unstripped_formats: list<string>, icc_profile: bool, metadata: bool, notes: list<string>}
      */
     public function toArray(): array
     {
@@ -668,6 +715,7 @@ final class BackendCapabilities
             'fits' => $this->fits,
             'animated_fits' => $this->animatedFits,
             'oriented_formats' => $this->orientedFormats,
+            'unstripped_formats' => $this->unstrippedFormats,
             'icc_profile' => $this->iccProfile,
             'metadata' => $this->metadata,
             'notes' => $this->notes,

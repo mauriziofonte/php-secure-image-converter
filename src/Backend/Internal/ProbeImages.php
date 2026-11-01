@@ -21,6 +21,9 @@ use Mfonte\SecureImageConverter\Validation\ImageInspector;
  * | anim.png   | an APNG of 4 frames of 12 x 6                                                 |
  * | oriented.* | a 16 x 12 JPEG with EXIF orientation 6 (displayed 12 x 16), its quadrants red, |
  * |            | green, blue and yellow, so that a turn or a mirror shows                       |
+ * | meta.*     | the still image of PNG, GIF, JPEG, WEBP and TIFF with metadata other than an   |
+ * |            | ICC profile added: tEXt and eXIf chunks, a comment extension, a COM segment,   |
+ * |            | an EXIF chunk (VP8X), description and software tags                            |
  * | variant-*  | a 16 x 12 still of each variant of ImageInfo::VARIANTS, such as                |
  * |            | variant-jpeg_cmyk.jpg (CMYK) and variant-bmp_bit_fields.bmp (32-bit, V4); the  |
  * |            | 64-bit BMP is 40 x 30                                                          |
@@ -73,6 +76,19 @@ final class ProbeImages
     public function still(string $format): ?array
     {
         return $this->image('still.' . ImageFormat::extension($format), $format, false);
+    }
+
+    /**
+     * Path and header of the still image of a format with metadata other than an ICC profile, or null when there is
+     * none (AVIF, and BMP, which carries none) or it is missing or invalid.
+     *
+     * @return array{0: string, 1: ImageInfo}|null
+     */
+    public function metadata(string $format): ?array
+    {
+        $image = $this->image('meta.' . ImageFormat::extension($format), $format, false);
+
+        return $image !== null && $image[1]->hasMetadata() ? $image : null;
     }
 
     /**

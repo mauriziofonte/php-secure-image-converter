@@ -17,7 +17,8 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
  * The orientation probe: a backend applies orientations only when it turned the oriented probe image upright. The
- * variant probe: a backend that crashes on the image of a variant does not decode that variant.
+ * variant probe: a backend that crashes on the image of a variant does not decode that variant. The re-encode probe:
+ * a backend that keeps the metadata of a PNG re-encoded as PNG lists PNG as unstripped.
  *
  * @covers \Mfonte\SecureImageConverter\Backend\Internal\CapabilityProber
  */
@@ -70,6 +71,41 @@ final class CapabilityProberTest extends TestCase
         foreach ($jobs as $job) {
             self::assertFalse($job->needsOrientation());
         }
+    }
+
+    public function testABackendThatStripsEveryReencodeListsNoUnstrippedFormat(): void
+    {
+        self::assertSame([], $this->prober(true)->probe(self::candidates())->getUnstrippedFormats());
+    }
+
+    /**
+     * vips 8.15 keeps the text chunks of a PNG saved as PNG whatever it is told: the backend below copies a PNG input
+     * with metadata to a PNG output as it is, and writes a clean image otherwise.
+     */
+    public function testABackendThatKeepsTheMetadataOfAReencodeListsItsFormat(): void
+    {
+        self::assertNotNull($this->directory);
+        $image = (new ProbeImages())->metadata(ImageFormat::PNG);
+        self::assertNotNull($image);
+        $prober = new CapabilityProber(
+            'fake',
+            static function (BackendJob $job): void {
+                if ($job->getInput()->hasMetadata() && $job->getInputFormat() === $job->getOutputFormat()) {
+                    copy($job->getInputPath(), $job->getOutputPath());
+
+                    return;
+                }
+                file_put_contents($job->getOutputPath(), ImageBuilder::png($job->getWidth(), $job->getHeight()));
+            },
+            new ProbeImages(),
+            $this->directory
+        );
+
+        $capabilities = $prober->probe(self::candidates());
+
+        self::assertSame([ImageFormat::PNG], $capabilities->getUnstrippedFormats());
+        self::assertSame([ImageFormat::JPEG, ImageFormat::PNG], $capabilities->getInputFormats());
+        self::assertContains('its png output from a png with metadata kept the metadata', $capabilities->getNotes());
     }
 
     /**
