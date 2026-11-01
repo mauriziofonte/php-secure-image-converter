@@ -113,7 +113,8 @@ final class ImageInspector implements ImageInspectorInterface
      * each unit of GifParser::MAX_BLOCKS at least one byte per GifParser::BLOCK_COST units, so these walks stay
      * linear in the file size, which $maxBytes bounds. The other parsers' constants already exceed what any output
      * of OUTPUT_DIMENSION_MAX pixels per side holds (a TIFF of at most 16383 rows has at most 16383 strips per plane
-     * in the layouts the backends write).
+     * in the layouts the backends write). A TIFF output may hold TiffParser::OUTPUT_EXTRA_SAMPLES samples per pixel
+     * more than an input.
      *
      * @param list<string> $formats  ImageFormat values to accept
      * @param int          $maxBytes largest accepted file size, from 1 to Capabilities::LIMIT_VALUE_MAX (clamped)
@@ -302,7 +303,7 @@ final class ImageInspector implements ImageInspectorInterface
             case ImageFormat::AVIF:
                 return new AvifParser();
             case ImageFormat::TIFF:
-                return new TiffParser();
+                return new TiffParser($bytes !== null ? TiffParser::MAX_SAMPLES + TiffParser::OUTPUT_EXTRA_SAMPLES : TiffParser::MAX_SAMPLES);
             default:
                 throw new UnsupportedFormatException('SVG input is not supported: this library never rasterises SVG.');
         }

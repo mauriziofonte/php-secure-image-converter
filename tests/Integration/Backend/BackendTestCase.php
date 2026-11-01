@@ -21,7 +21,6 @@ use Mfonte\SecureImageConverter\Isolation\ProcessRunner;
 use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
 use Mfonte\SecureImageConverter\Validation\ImageInfo;
 use Mfonte\SecureImageConverter\Validation\ImageInspector;
-use Mfonte\SecureImageConverter\Validation\Limits;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 /**
@@ -395,17 +394,13 @@ abstract class BackendTestCase extends TestCase
     }
 
     /**
-     * What ImageInspector reads from an output, or null when it is not a valid image. No limit applies: a large
-     * uncompressed output is as valid as a small one.
+     * What an output inspector (ImageInspector::forOutput(), as OutputCheck uses) reads from an output, or null when it
+     * is not a valid image. No limit applies: a large uncompressed output is as valid as a small one.
      */
     protected static function inspect(string $path): ?ImageInfo
     {
         if (self::$inspector === null) {
-            $limits = new Limits();
-            foreach (Capabilities::limitNames() as $name) {
-                $limits = $limits->withLimit($name, Capabilities::LIMIT_VALUE_MAX);
-            }
-            self::$inspector = new ImageInspector($limits, ImageFormat::all());
+            self::$inspector = ImageInspector::forOutput(ImageFormat::all(), Capabilities::LIMIT_VALUE_MAX);
         }
         try {
             return self::$inspector->inspect($path);

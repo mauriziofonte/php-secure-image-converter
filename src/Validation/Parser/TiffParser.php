@@ -18,7 +18,8 @@ use Mfonte\SecureImageConverter\Validation\Limits;
  * - The IFD0 offset must point inside the file after the 8-byte header; the directory has 1 to MAX_ENTRIES entries,
  *   must fit in the file, and may not hold a tag twice (decoders disagree on which copy wins).
  * - ImageWidth and ImageLength (SHORT or LONG) are required and non-zero, and are checked against the limits at once.
- *   BitsPerSample values are at most 64, SamplesPerPixel from 1 to MAX_SAMPLES, PlanarConfiguration 1 or 2.
+ *   BitsPerSample values are at most 64, SamplesPerPixel from 1 to MAX_SAMPLES (MAX_SAMPLES + OUTPUT_EXTRA_SAMPLES
+ *   for an output), PlanarConfiguration 1 or 2.
  * - Compression must be none, CCITT (2, 3, 4), LZW, JPEG (7), Deflate or PackBits; other schemes, old-style JPEG (6)
  *   included, are refused as unsupported.
  * - The image is stored either in strips or in tiles, never both. Strips: RowsPerStrip from 1 (all rows by default),
@@ -48,7 +49,21 @@ final class TiffParser implements ParserInterface
      */
     public const MAX_DATA_BLOCKS = 32768;
 
-    private const MAX_SAMPLES = 16;
+    /**
+     * Largest number of samples per pixel of an input.
+     */
+    public const MAX_SAMPLES = 16;
+
+    /**
+     * Samples an encoder may add to those of its input: vips resizes a grey image with extra samples in sRGB and
+     * writes two more colour samples, so a 16-sample input becomes an 18-sample output.
+     */
+    public const OUTPUT_EXTRA_SAMPLES = 2;
+
+    /**
+     * @var int
+     */
+    private $maxSamples;
 
     /**
      * Tiles are multiples of this size in both directions.
@@ -120,6 +135,15 @@ final class TiffParser implements ParserInterface
      */
     private $end = 0;
 
+    /**
+     * @param int $maxSamples largest number of samples per pixel: MAX_SAMPLES for untrusted input;
+     *                        ImageInspector::forOutput() adds OUTPUT_EXTRA_SAMPLES
+     */
+    public function __construct(int $maxSamples = self::MAX_SAMPLES)
+    {
+        $this->maxSamples = max(self::MAX_SAMPLES, min(self::MAX_SAMPLES + self::OUTPUT_EXTRA_SAMPLES, $maxSamples));
+    }
+
     public function parse(ByteReader $reader, Limits $limits): ImageInfo
     {
         $reader->seek(0);
@@ -147,7 +171,7 @@ final class TiffParser implements ParserInterface
             throw new UnsupportedFormatException('This TIFF compression scheme is not supported.');
         }
         $samples = $this->readScalar($tags, self::TAG_SAMPLES_PER_PIXEL, 1);
-        if ($samples < 1 || $samples > self::MAX_SAMPLES) {
+        if ($samples < 1 || $samples > $this->maxSamples) {
             throw self::invalid('the first directory declares an invalid number of samples per pixel');
         }
         $planar = $this->readScalar($tags, self::TAG_PLANAR_CONFIGURATION, 1);
@@ -155,7 +179,7 @@ final class TiffParser implements ParserInterface
             throw self::invalid('the first directory declares an invalid planar configuration');
         }
         $bitDepth = 8;
-        foreach ($this->readValues($reader, $tags, self::TAG_BITS_PER_SAMPLE, self::MAX_SAMPLES) as $bits) {
+        foreach ($this->readValues($reader, $tags, self::TAG_BITS_PER_SAMPLE, $this->maxSamples) as $bits) {
             if ($bits < 1 || $bits > 64) {
                 throw self::invalid('the first directory declares an invalid number of bits per sample');
             }

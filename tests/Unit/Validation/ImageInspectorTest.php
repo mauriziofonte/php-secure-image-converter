@@ -18,6 +18,7 @@ use Mfonte\SecureImageConverter\Validation\ImageInspector;
 use Mfonte\SecureImageConverter\Validation\Limits;
 use Mfonte\SecureImageConverter\Validation\Parser\GifParser;
 use Mfonte\SecureImageConverter\Validation\Parser\PngParser;
+use Mfonte\SecureImageConverter\Validation\Parser\TiffParser;
 use Mfonte\SecureImageConverter\Validation\Parser\WebpParser;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -404,8 +405,9 @@ final class ImageInspectorTest extends TestCase
 
     /**
      * Encoders write more structures than an untrusted input may hold (vips splits PNG data into 8 KiB IDAT chunks,
-     * so a PNG output above 134 MB has more than PngParser::MAX_CHUNKS chunks): an output inspector scales its walks
-     * with the allowed size, while an input inspector keeps the constants.
+     * so a PNG output above 134 MB has more than PngParser::MAX_CHUNKS chunks; vips adds two colour samples to a
+     * grey TIFF with extra samples): an output inspector scales its walks with the allowed size and accepts
+     * TiffParser::OUTPUT_EXTRA_SAMPLES more samples, while an input inspector keeps the constants.
      *
      * @return array<string, array{string, string}>
      */
@@ -419,7 +421,17 @@ final class ImageInspectorTest extends TestCase
             'gif' => [ImageFormat::GIF, $gif],
             'webp' => [ImageFormat::WEBP, ImageBuilder::riff(ImageBuilder::vp8x(0, 8, 8) . ImageBuilder::webpChunk('VP8L', ImageBuilder::vp8l(8, 8))
                 . ImageBuilder::repeat(ImageBuilder::webpChunk('ABCD', ''), WebpParser::MAX_CHUNKS))],
+            'tiff' => [ImageFormat::TIFF, ImageBuilder::tiff(4, 4, false, TiffParser::MAX_SAMPLES + TiffParser::OUTPUT_EXTRA_SAMPLES)],
         ];
+    }
+
+    public function testAnOutputInspectorRefusesMoreSamplesThanAnEncoderAdds(): void
+    {
+        $output = ImageInspector::forOutput([ImageFormat::TIFF], 1048576);
+        $this->expectException(InvalidImageException::class);
+        $this->expectExceptionMessage('samples per pixel');
+
+        $output->inspect($this->temporaryFile(ImageBuilder::tiff(4, 4, false, TiffParser::MAX_SAMPLES + TiffParser::OUTPUT_EXTRA_SAMPLES + 1)));
     }
 
     /**
