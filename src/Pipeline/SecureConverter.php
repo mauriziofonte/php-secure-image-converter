@@ -324,13 +324,17 @@ final class SecureConverter implements ConverterInterface
     private function copyInput(string $input, string $copy): void
     {
         // "n" opens without blocking, so that a FIFO put in place of the file cannot stall the conversion.
-        $stream = @fopen($input, 'rbn');
-        if ($stream === false) {
+        $stream = self::attempt(static function () use ($input) {
+            return @fopen($input, 'rbn');
+        });
+        if (!is_resource($stream)) {
             throw new InvalidArgumentException('The input path is not a readable file.');
         }
+        $target = false;
+        $copied = false;
 
         try {
-            $stat = fstat($stream);
+            $stat = @fstat($stream);
             if (!is_array($stat) || ($stat['mode'] & 0170000) !== 0100000) {
                 throw new InvalidArgumentException('The input path is not a regular file.');
             }
@@ -339,21 +343,62 @@ final class SecureConverter implements ConverterInterface
             if ($stat['size'] > $maxBytes) {
                 throw LimitExceededException::forInput(Capabilities::LIMIT_MAX_BYTES, $maxBytes, $stat['size']);
             }
-            $target = @fopen($copy, 'xb');
-            if ($target === false) {
+            $target = self::attempt(static function () use ($copy) {
+                return @fopen($copy, 'xb');
+            });
+            if (!is_resource($target)) {
+                $target = false;
+
                 throw new ConversionFailedException('The input could not be copied.');
             }
-            $copied = stream_copy_to_stream($stream, $target, $maxBytes + 1);
-            $closed = fclose($target);
-            if ($copied === false || !$closed) {
+            $written = self::attempt(static function () use ($stream, $target, $maxBytes) {
+                $count = @stream_copy_to_stream($stream, $target, $maxBytes + 1);
+
+                return $count !== false && @fflush($target) ? $count : false;
+            });
+            $closed = OutputFile::close($target);
+            $target = false;
+            if (!is_int($written) || !$closed) {
                 throw new ConversionFailedException('The input could not be copied.');
             }
-            if ($copied > $maxBytes) {
+            if ($written > $maxBytes) {
                 // The file grew after fstat(): what was read is refused like a large file.
-                throw LimitExceededException::forInput(Capabilities::LIMIT_MAX_BYTES, $maxBytes, $copied);
+                throw LimitExceededException::forInput(Capabilities::LIMIT_MAX_BYTES, $maxBytes, $written);
             }
+            if ($written !== $stat['size']) {
+                throw new ConversionFailedException('The input changed while it was copied.');
+            }
+            $copied = true;
         } finally {
-            fclose($stream);
+            if ($target !== false) {
+                OutputFile::close($target);
+            }
+            OutputFile::close($stream);
+            if (!$copied) {
+                self::attempt(static function () use ($copy): bool {
+                    return @unlink($copy);
+                });
+            }
+        }
+    }
+
+    /**
+     * Runs a file system call; false when it throws an \ErrorException (an error handler that turns the warnings of
+     * silenced calls into exceptions), so that a failed read or write is never anything but the converter's own
+     * exception.
+     *
+     * @template T
+     *
+     * @param callable(): T $call
+     *
+     * @return T|false
+     */
+    private static function attempt(callable $call)
+    {
+        try {
+            return $call();
+        } catch (\ErrorException $exception) {
+            return false;
         }
     }
 

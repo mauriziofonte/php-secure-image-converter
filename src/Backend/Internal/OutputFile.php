@@ -16,7 +16,9 @@ use Mfonte\SecureImageConverter\Contract\Exception\ConversionFailedException;
  * shows the same file again. Its bytes are then copied through that descriptor into a new file next to the
  * destination: a process that still holds the original open cannot change the copy. The copy is checked (the
  * caller's verifier) before it is renamed over the destination, so that an output that fails the check never
- * replaces the destination, nor appears at its path.
+ * replaces the destination, nor appears at its path. A copy that stops short (a full filesystem, a file size limit)
+ * is a ConversionFailedException whatever the error handler does with PHP's warning, and its temporary file is
+ * removed.
  *
  * @internal
  */
@@ -38,32 +40,86 @@ final class OutputFile
     {
         $stream = self::open($source, $maxBytes);
         $temporary = \dirname($destination) . '/.sic-' . bin2hex(random_bytes(8)) . '.tmp';
-        $target = @fopen($temporary, 'xb');
-        if ($target === false) {
-            fclose($stream);
-
-            throw new ConversionFailedException('The output file could not be written.');
-        }
-        $copied = stream_copy_to_stream($stream, $target);
-        $closed = fclose($target);
-        fclose($stream);
+        $target = false;
+        $created = false;
         $renamed = false;
 
         try {
-            if ($copied === false || $copied < 1 || !$closed) {
+            $stat = @fstat($stream);
+            $target = @fopen($temporary, 'xb');
+            $created = $target !== false;
+            if (!is_array($stat) || $target === false || !self::transfer($stream, $target, $stat['size'])) {
+                throw new ConversionFailedException('The output file could not be written.');
+            }
+            $closed = self::close($target);
+            $target = false;
+            if (!$closed) {
                 throw new ConversionFailedException('The output file could not be written.');
             }
             if ($verify !== null) {
                 $verify($temporary);
             }
-            $renamed = @rename($temporary, $destination);
+            $renamed = self::silently(static function () use ($temporary, $destination): bool {
+                return @rename($temporary, $destination);
+            });
             if (!$renamed) {
                 throw new ConversionFailedException('The output file could not be written.');
             }
         } finally {
-            if (!$renamed) {
-                @unlink($temporary);
+            if ($target !== false) {
+                self::close($target);
             }
+            self::close($stream);
+            if ($created && !$renamed) {
+                self::silently(static function () use ($temporary): bool {
+                    return @unlink($temporary);
+                });
+            }
+        }
+    }
+
+    /**
+     * Copies a stream to another, all of it: exactly $size bytes. False when a read or a write fails (a full
+     * filesystem, a file size limit) or the source does not hold $size bytes, whatever the error handler does with
+     * the warning PHP raises: the calls are silenced, and an exception the handler throws for them anyway (one that
+     * ignores the @ operator) is taken as the failure.
+     *
+     * @param resource $from
+     * @param resource $to
+     */
+    public static function transfer($from, $to, int $size): bool
+    {
+        return self::silently(static function () use ($from, $to, $size): bool {
+            $copied = @stream_copy_to_stream($from, $to);
+
+            return $copied !== false && $copied === $size && $size > 0 && @fflush($to);
+        });
+    }
+
+    /**
+     * Closes a stream; false when the close fails (the last buffered write) or raises an error.
+     *
+     * @param resource $stream
+     */
+    public static function close($stream): bool
+    {
+        return self::silently(static function () use ($stream): bool {
+            return @fclose($stream);
+        });
+    }
+
+    /**
+     * Runs a file system call; false when it throws an \ErrorException (an error handler that turns the warnings of
+     * silenced calls into exceptions).
+     *
+     * @param callable(): bool $call
+     */
+    private static function silently(callable $call): bool
+    {
+        try {
+            return $call();
+        } catch (\ErrorException $exception) {
+            return false;
         }
     }
 
