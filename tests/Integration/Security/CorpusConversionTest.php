@@ -6,6 +6,7 @@ namespace Mfonte\SecureImageConverter\Tests\Integration\Security;
 
 use Mfonte\SecureImageConverter\Backend\AbstractBackend;
 use Mfonte\SecureImageConverter\Contract\ConversionRequest;
+use Mfonte\SecureImageConverter\Contract\Exception\ErrorCode;
 use Mfonte\SecureImageConverter\Contract\ImageFormat;
 use Mfonte\SecureImageConverter\Contract\IsolationLevel;
 use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
@@ -22,11 +23,14 @@ use PHPUnit\Framework\Attributes\Group;
  *
  * - A file the inspector refuses is refused by the converter with the same error code, in under REFUSAL_SECONDS,
  *   before any backend runs.
- * - A file the inspector accepts is converted to WEBP, to AVIF and to its own format resized to 32 x 32, or refused
- *   with a 4xx code; never conversion_failed. With the default limits the bombs of 40 megapixels and the animation of
- *   300 frames reach the decoders.
- * - Memory: the same accepted files, converted at the rlimit level with a memory ceiling of MEMORY_CEILING_BYTES in a
- *   separate PHP process, are converted or refused, and no conversion process ever held more than the ceiling.
+ * - A file the inspector accepts is converted to WEBP, to AVIF, to its own format and to its own format resized to
+ *   32 x 32, or refused with a 4xx code; never conversion_failed. A valid file is converted (see
+ *   SecurityTestCase::KNOWN_REFUSALS). With the default limits the bombs of 40 megapixels and the animation of 300
+ *   frames reach the decoders.
+ * - Memory: the same accepted files, converted to WEBP at the rlimit level with a memory ceiling of
+ *   MEMORY_CEILING_BYTES in a separate PHP process: the decompression bombs of 40 megapixels, which need more, are
+ *   refused with resource_limit, the valid files still convert, and no conversion process ever held more than the
+ *   ceiling.
  *
  * SIC_SECURITY_REPORT names a file to which every conversion is appended as a line "path, request, outcome,
  * milliseconds" (CI prints it).
@@ -47,9 +51,20 @@ final class CorpusConversionTest extends SecurityTestCase
     private const REFUSAL_SECONDS = 1.0;
 
     /**
-     * Memory ceiling of the memory test: 512 MiB.
+     * Memory ceiling of the memory test: 384 MiB, below what each decompression bomb of 40 megapixels needs and above
+     * what every backend needs for the valid files (below about 336 MiB, vips is left out and the valid files go to
+     * backends that decode less).
      */
-    private const MEMORY_CEILING_BYTES = 536870912;
+    private const MEMORY_CEILING_BYTES = 402653184;
+
+    /**
+     * Files the memory test expects refused with resource_limit.
+     */
+    private const MEMORY_BOMBS = [
+        'png/bomb-decompression-40-megapixels.png',
+        'jpeg/bomb-decompression-40-megapixels.jpg',
+        'gif/bomb-decompression-40-megapixels.gif',
+    ];
 
     /**
      * Largest peak memory of the PHP process of the memory test, which holds the whole corpus (about 30 MB).
@@ -83,6 +98,7 @@ final class CorpusConversionTest extends SecurityTestCase
             self::report($path, 'webp', $outcome, $seconds);
             self::assertSame([], $problems, $path);
             self::assertSame($expect['error'], $outcome, $path . ' is refused as the inspector refuses it');
+            self::assertNull(self::validProblem($path, $outcome));
             self::assertLessThan(self::REFUSAL_SECONDS, $seconds, $path . ' is refused before any decoder runs');
 
             return;
@@ -91,13 +107,15 @@ final class CorpusConversionTest extends SecurityTestCase
         $requests = [
             'webp' => new ConversionRequest(),
             'avif' => new ConversionRequest(ImageFormat::AVIF),
+            'original' => new ConversionRequest(ConversionRequest::FORMAT_ORIGINAL),
             'original 32x32 cover' => (new ConversionRequest(ConversionRequest::FORMAT_ORIGINAL))->withWidth(32)->withHeight(32)->withFit(ConversionRequest::FIT_COVER),
         ];
         $failures = [];
         foreach ($requests as $label => $request) {
             list($outcome, $seconds, $problems) = $this->convertHostile($converter, $bytes, $request);
             self::report($path, $label, $outcome, $seconds);
-            foreach ($problems as $problem) {
+            $problem = self::validProblem($path, $outcome);
+            foreach ($problem !== null ? array_merge($problems, [$problem]) : $problems as $problem) {
                 $failures[] = $label . ': ' . $problem;
             }
         }
@@ -105,10 +123,10 @@ final class CorpusConversionTest extends SecurityTestCase
     }
 
     /**
-     * Every file the inspector accepts, converted at the rlimit level with a memory ceiling of 512 MiB: converted or
-     * refused with a 4xx code (resource_limit when the ceiling stops a decoder or refuses its estimate), while no
-     * conversion process exceeded the ceiling (getrusage() of the child PHP process; the address space limit is the
-     * ceiling, and a resident set never exceeds the address space).
+     * Every file the inspector accepts, converted at the rlimit level with a memory ceiling of 384 MiB: the bombs of
+     * MEMORY_BOMBS refused with resource_limit, the valid files converted, the others converted or refused with a 4xx
+     * code, while no conversion process exceeded the ceiling (getrusage() of the child PHP process; the address space
+     * limit is the ceiling, and a resident set never exceeds the address space).
      */
     public function testAMemoryCeilingBoundsEveryDecoder(): void
     {
@@ -134,11 +152,20 @@ final class CorpusConversionTest extends SecurityTestCase
             self::assertNotEmpty($report['outcomes']);
             $failures = [];
             foreach ($report['outcomes'] as $path => $outcome) {
-                if ($outcome !== self::CONVERTED && !in_array($outcome, self::REFUSALS, true)) {
-                    $failures[] = $path . ': ' . (is_string($outcome) ? $outcome : '?');
+                $path = (string) $path;
+                $outcome = is_string($outcome) ? $outcome : '?';
+                $problem = self::validProblem($path, $outcome);
+                if (in_array($path, self::MEMORY_BOMBS, true) && $outcome !== ErrorCode::RESOURCE_LIMIT) {
+                    $problem = 'a bomb above the ceiling ended as ' . $outcome;
+                } elseif ($outcome !== self::CONVERTED && !in_array($outcome, self::REFUSALS, true)) {
+                    $problem = $outcome;
+                }
+                if ($problem !== null) {
+                    $failures[] = $path . ': ' . $problem;
                 }
             }
             self::assertSame([], $failures, 'every file is converted or refused under the memory ceiling');
+            self::assertSame(self::MEMORY_BOMBS, array_values(array_intersect(self::MEMORY_BOMBS, array_keys($report['outcomes']))));
             self::assertIsInt($report['children_max_rss_bytes']);
             self::assertGreaterThan(0, $report['children_max_rss_bytes']);
             self::assertLessThanOrEqual(self::MEMORY_CEILING_BYTES, $report['children_max_rss_bytes'], 'no conversion process exceeded the ceiling');

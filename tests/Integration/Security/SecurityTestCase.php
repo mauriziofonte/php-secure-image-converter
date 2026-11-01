@@ -24,17 +24,21 @@ use Mfonte\SecureImageConverter\Validation\ImageInspector;
  * the strongest isolation level of the host, every raster input format enabled and the default limits
  * (SIC_BACKENDS, SIC_EXPECTED_BACKENDS and SIC_EXPECTED_ISOLATION_LEVEL work as for the backend tests).
  *
- * Every conversion must end in one of two ways, within bounded time and without leaving a file behind:
+ * Every conversion must end in one of two ways, within CONVERSION_SECONDS and without leaving a file behind:
  *
  * - converted: the output is at the output path and is the image the result describes;
  * - refused with a code of REFUSALS, the 4xx codes of an input-caused problem. conversion_failed,
  *   output_verification_failed and internal_error (500) are failures: a hostile input must never pass for a fault of
  *   the library or the host.
  *
- * The time bound of a conversion is MAX_SECONDS, the processing ceiling of the converter (a job estimated above it is
- * refused with conversion_timeout before it runs, a job that runs is stopped at its own budget), plus SLACK_SECONDS
- * for starting processes and checking a failure against the probe image. No file may remain in the converter's
- * working directory parent after a conversion, nor at the output path after a refusal.
+ * A valid corpus file (named valid-*) must be converted, when every backend is enabled and available (the reference
+ * image): a refusal of a valid image is a defect, except the refusals of KNOWN_REFUSALS, each with its reason.
+ *
+ * MAX_SECONDS, the processing ceiling of the converter, is what the library guarantees: a job estimated above it is
+ * refused with conversion_timeout before it runs, and a job that runs is stopped at its own budget. The corpus is
+ * held to CONVERSION_SECONDS, far tighter (the slowest conversion takes about 5 seconds in the reference image), so
+ * that a regression shows. No file may remain in the converter's working directory parent after a conversion, nor at
+ * the output path after a refusal.
  */
 abstract class SecurityTestCase extends BackendTestCase
 {
@@ -57,20 +61,47 @@ abstract class SecurityTestCase extends BackendTestCase
     public const CONVERTED = 'converted';
 
     /**
+     * Valid corpus files that the reference image refuses, with the code and why; every other valid file converts.
+     *
+     * @var array<string, array{0: string, 1: string}>
+     */
+    public const KNOWN_REFUSALS = [
+        'bmp/valid-v5-icc-before-pixels.bmp' => [
+            ErrorCode::UNSUPPORTED_FORMAT,
+            'bit fields with the colour profile before the pixels: ImageMagick 6 reads bit fields but refuses that layout, GD reads that layout but not bit fields',
+        ],
+        'avif/valid-sequence.avif' => [
+            ErrorCode::UNSUPPORTED_FORMAT,
+            'an AVIF sequence: no backend decodes every frame of one, and a request that keeps the animation is not flattened',
+        ],
+        'avif/valid-video-track.avif' => [
+            ErrorCode::UNSUPPORTED_FORMAT,
+            'an AVIF sequence: no backend decodes every frame of one, and a request that keeps the animation is not flattened',
+        ],
+    ];
+
+    /**
      * Processing ceiling of the converter under test: the default estimates admit a still image of 40 megapixels to
      * WEBP (about 295 seconds), and refuse AVIF at that size before it runs.
      */
     public const MAX_SECONDS = 300.0;
 
     /**
-     * Time a conversion may take beyond its budget.
+     * Longest time a corpus conversion may take, refusals and the check of a failure against the probe image included.
      */
-    public const SLACK_SECONDS = 30.0;
+    public const CONVERSION_SECONDS = 30.0;
 
     /**
      * @var SecureConverter|null
      */
     private static $converter;
+
+    /**
+     * Whether every backend of BackendFactory::NAMES is enabled and available.
+     *
+     * @var bool
+     */
+    private static $complete = false;
 
     /**
      * The working directory parent of the converter and its backends.
@@ -136,6 +167,7 @@ abstract class SecurityTestCase extends BackendTestCase
         if ($backends === []) {
             self::markTestSkipped('No enabled backend is available on this host.');
         }
+        self::$complete = count($backends) === count(BackendFactory::NAMES);
         $options = (new ConverterOptions())
             ->withIsolation($runner->getLevel())
             ->withWorkingDirectoryParent($parent)
@@ -180,7 +212,7 @@ abstract class SecurityTestCase extends BackendTestCase
         }
         $seconds = microtime(true) - $start;
 
-        if ($seconds > self::MAX_SECONDS + self::SLACK_SECONDS) {
+        if ($seconds > self::CONVERSION_SECONDS) {
             $problems[] = sprintf('took %.1f seconds', $seconds);
         }
         if ($result instanceof ConversionResult) {
@@ -203,6 +235,21 @@ abstract class SecurityTestCase extends BackendTestCase
         @unlink($input);
 
         return [$outcome, $seconds, $problems];
+    }
+
+    /**
+     * Why the outcome of a corpus file is wrong, or null: a valid file (valid-*) must be converted, or refused as
+     * KNOWN_REFUSALS says, when every backend is there; other files may be refused.
+     */
+    protected static function validProblem(string $path, string $outcome): ?string
+    {
+        if (!self::$complete || strpos(basename($path), 'valid-') !== 0) {
+            return null;
+        }
+        $known = self::KNOWN_REFUSALS[$path] ?? null;
+        $expected = $known !== null ? $known[0] : self::CONVERTED;
+
+        return $outcome === $expected ? null : sprintf('a valid file ended as %s instead of %s', $outcome, $expected);
     }
 
     /**
