@@ -23,9 +23,12 @@ use Mfonte\SecureImageConverter\Validation\Parser\WebpParser;
  * what the file is: valid-* (accepted), bomb-* (a dimension, decompression or frame bomb), spoof-* (malformed,
  * inconsistent or forged header), truncated-*, unsupported-* (an identified variant this library does not process),
  * polyglot-* (another file type dressed as an image, or the reverse). Cases larger than 100 KB are not committed and
- * the tests generate them in memory: a GIF of 10,000 frames, and the files that reach a walk cap of a parser (the
+ * the tests generate them in memory: a GIF of 10,000 frames, the files that reach a walk cap of a parser (the
  * most chunks, blocks, boxes, directory entries or strips allowed, then one too many), which bound the time a
- * hostile file costs.
+ * hostile file costs, and the larger decoder cases (see decoderCases()).
+ *
+ * The security tests (tests/Integration/Security) convert the same cases with SecureConverter and every backend: the
+ * accepted ones reach the decoders, among them the decoder cases, hostile files built to pass the header checks.
  *
  * An accepted case expects a subset of ImageInfo::toArray(); a refused case expects an error code. "max_bytes_read"
  * bounds the bytes the inspector may read from the file: bombs are refused from their header, whatever their size.
@@ -52,7 +55,8 @@ final class ImageCorpus
             self::webpCases(),
             self::avifCases(),
             self::tiffCases(),
-            self::otherCases()
+            self::otherCases(),
+            self::decoderCases()
         );
     }
 
@@ -1237,6 +1241,74 @@ final class ImageCorpus
             ImageBuilder::repeat(pack('v', 8), 16) . $offsets . ImageBuilder::repeat(pack('V', 1), $strips) . ImageBuilder::repeat("\0", $strips),
             $dataOffset
         );
+    }
+
+    /**
+     * Hostile files whose headers pass every check within the default limits, so that only the decoders and the limits
+     * of a conversion stand between them and the host; the security tests convert them with every backend.
+     *
+     * - Decompression bombs at the 40-megapixel limit: a PNG of 160 MB of pixels in about 160 KB, a JPEG of all-zero
+     *   blocks and a GIF whose LZW strings grow with every code (30 KB).
+     * - An animation at the 300-frame and 400-megapixel limits.
+     * - EXIF of 1 MiB in a JPEG (16 segments of the largest size), a PNG and a WEBP: far beyond the 64 KiB of one
+     *   JPEG segment, which is where EXIF usually ends.
+     * - Data streams cut short inside a complete file structure: the header and the end of the file are where they
+     *   belong, so the inspector, which reads no pixel data, accepts them and the decoder meets the end of the data.
+     * - A 64-bit BMP of 40 x 30, the variant and size on which an ImageMagick build crashed (signal 11) while it
+     *   converted the 16 x 12 probe image of the variant.
+     * - Wrong magic bytes: a PNG signature with one byte changed, and a GIF signature in front of a JPEG.
+     *
+     * @return array<string, array{bytes: string, committed: bool, expect: array<string, bool|int|string>}>
+     */
+    private static function decoderCases(): array
+    {
+        $exif = "II*\0" . pack('V', 8) . "\0\0" . pack('V', 0) . ImageBuilder::repeat("\0", 1048576);
+        $rows = ImageBuilder::repeat("\0" . ImageBuilder::repeat("\0", 64 * 3), 64);
+        $deflate = ImageBuilder::zlibStored($rows);
+        $jpeg = ImageBuilder::jpeg(64, 64, 3);
+        $scanStart = ImageBuilder::find($jpeg, "\xFF\xDA");
+        $scanStart += 2 + (ImageBuilder::readUint32($jpeg, $scanStart) & 0xFFFF);
+        $scanLength = strlen($jpeg) - 2 - $scanStart;
+
+        return [
+            'png/bomb-decompression-40-megapixels.png' => self::generated(ImageBuilder::pngDecompressionBomb(6324, 6324, 8, 6), self::accept(ImageFormat::PNG, 6324, 6324)),
+            'jpeg/bomb-decompression-40-megapixels.jpg' => self::generated(ImageBuilder::jpeg(8192, 4880, 3), self::accept(ImageFormat::JPEG, 8192, 4880)),
+            'gif/bomb-decompression-40-megapixels.gif' => self::committed(ImageBuilder::gifUniform(8192, 4880), self::accept(ImageFormat::GIF, 8192, 4880)),
+            'gif/bomb-300-frames.gif' => self::generated(ImageBuilder::gifUniform(400, 333, 300), self::accept(ImageFormat::GIF, 400, 333, 300)),
+            'jpeg/bomb-exif-1-mib.jpg' => self::generated(
+                ImageBuilder::jpeg(8, 8, 1, ImageBuilder::repeat(ImageBuilder::jpegExif(65533), 16)),
+                self::accept(ImageFormat::JPEG, 8, 8, 1, ['exif' => true])
+            ),
+            'png/bomb-exif-1-mib.png' => self::generated(
+                ImageBuilder::png(8, 8, 8, 2, ImageBuilder::pngChunk('eXIf', $exif)),
+                self::accept(ImageFormat::PNG, 8, 8, 1, ['exif' => true])
+            ),
+            'webp/bomb-exif-1-mib.webp' => self::generated(
+                ImageBuilder::riff(ImageBuilder::vp8x(0x08, 8, 8) . ImageBuilder::webpChunk('VP8L', ImageBuilder::vp8l(8, 8)) . ImageBuilder::webpChunk('EXIF', $exif)),
+                self::accept(ImageFormat::WEBP, 8, 8, 1, ['exif' => true])
+            ),
+            'png/truncated-deflate-stream.png' => self::committed(
+                ImageBuilder::PNG_SIGNATURE . ImageBuilder::pngHeader(64, 64) . ImageBuilder::pngChunk('IDAT', (string) substr($deflate, 0, intdiv(strlen($deflate), 2)))
+                    . ImageBuilder::pngChunk('IEND', ''),
+                self::accept(ImageFormat::PNG, 64, 64)
+            ),
+            'gif/truncated-lzw-data.gif' => self::committed(
+                ImageBuilder::gifScreen(64, 64) . ImageBuilder::patch(ImageBuilder::gifUniformImage(0, 0, 10, 10), 5, pack('vv', 64, 64)) . "\x3B",
+                self::accept(ImageFormat::GIF, 64, 64)
+            ),
+            'jpeg/truncated-entropy-data.jpg' => self::committed(
+                substr($jpeg, 0, $scanStart + intdiv($scanLength, 2)) . "\xFF\xD9",
+                self::accept(ImageFormat::JPEG, 64, 64)
+            ),
+            'webp/truncated-vp8l-bitstream.webp' => self::committed(
+                ImageBuilder::riff(ImageBuilder::webpChunk('VP8L', (string) substr(ImageBuilder::vp8l(64, 64), 0, 6))),
+                self::accept(ImageFormat::WEBP, 64, 64)
+            ),
+            'bmp/valid-64-bit.bmp' => self::committed(ImageBuilder::bmp(40, 30, 64), self::accept(ImageFormat::BMP, 40, 30)),
+            'other/unsupported-broken-png-signature.png' => self::committed(ImageBuilder::patch(ImageBuilder::png(8, 8), 7, "\x0B"), self::reject(ErrorCode::UNSUPPORTED_FORMAT)),
+            // The JPEG bytes after the signature read as a logical screen of 17994 px.
+            'other/spoof-gif-signature-on-jpeg.gif' => self::committed('GIF89a' . substr(ImageBuilder::jpeg(8, 8), 6), self::reject(ErrorCode::IMAGE_TOO_LARGE, true)),
+        ];
     }
 
     /**

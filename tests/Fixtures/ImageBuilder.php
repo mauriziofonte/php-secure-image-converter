@@ -210,14 +210,14 @@ final class ImageBuilder
     }
 
     /**
-     * A valid 1-bit greyscale PNG of 20000 x 20000 black pixels (400 megapixels, 50,020,000 bytes once inflated)
-     * whose IDAT is a single dynamic-Huffman Deflate block of under 50 KB: a literal zero, then matches of 258 bytes
-     * at distance 1, each coded on two bits.
+     * A valid PNG of black (all-zero) pixels whose IDAT is a single dynamic-Huffman Deflate block: a literal zero, then
+     * matches of 258 bytes at distance 1, each coded on two bits, so that the file is about a thousandth of its
+     * inflated size. By default a 1-bit greyscale image of 20000 x 20000 pixels (400 megapixels, 50,020,000 bytes
+     * once inflated, under 50 KB); an 8-bit RGBA image of 40 megapixels inflates to 160 MB from about 160 KB.
      */
-    public static function pngDecompressionBomb(): string
+    public static function pngDecompressionBomb(int $width = 20000, int $height = 20000, int $bitDepth = 1, int $colourType = 0): string
     {
-        $size = 20000;
-        $rawLength = $size * (1 + intdiv($size, 8));
+        $rawLength = $height * (1 + intdiv($width * self::PNG_CHANNELS[$colourType] * $bitDepth + 7, 8));
         $matches = intdiv($rawLength - 1, 258);
         $literals = $rawLength - 1 - 258 * $matches;
 
@@ -254,7 +254,7 @@ final class ImageBuilder
         // Adler-32 of zeros: the low sum stays 1, the high sum is the length.
         $adler = pack('N', (($rawLength % 65521) << 16) | 1);
 
-        return self::PNG_SIGNATURE . self::pngHeader($size, $size, 1, 0)
+        return self::PNG_SIGNATURE . self::pngHeader($width, $height, $bitDepth, $colourType)
             . self::pngChunk('IDAT', "\x78\x01" . $writer->getBytes() . $adler) . self::pngChunk('IEND', '');
     }
 
@@ -413,6 +413,59 @@ final class ImageBuilder
 
         return "\x2C" . pack('vvvvC', $left, $top, $width, $height, 0) . pack('C', $minimumCodeSize)
             . self::gifSubBlocks($writer->getBytes());
+    }
+
+    /**
+     * A GIF of uniform black frames of the whole canvas (gifUniformImage()), with the NETSCAPE loop extension and a
+     * graphic control extension per frame when animated.
+     */
+    public static function gifUniform(int $width, int $height, int $frames = 1): string
+    {
+        $frame = ($frames > 1 ? "\x21\xF9\x04\x04\x0A\x00\x00\x00" : '') . self::gifUniformImage(0, 0, $width, $height);
+
+        return self::gifScreen($width, $height) . ($frames > 1 ? self::gifLoop() : '') . self::repeat($frame, $frames) . "\x3B";
+    }
+
+    /**
+     * An image descriptor whose LZW data codes every pixel as colour 0 the way an encoder codes a uniform image: each
+     * code stands for a run one pixel longer than the one before, until the string table is full and a clear code
+     * starts it again. A table of 4096 entries covers about 8.4 million pixels in some 6 KB, so a 40-megapixel frame
+     * takes about 30 KB: a decompression bomb within the default limits.
+     */
+    public static function gifUniformImage(int $left, int $top, int $width, int $height): string
+    {
+        $clear = 4;
+        $writer = new BitWriter();
+        $bits = 3;
+        $writer->write($clear, $bits);
+        $next = $clear + 2;
+        $longest = 1;
+        for ($remaining = $width * $height; $remaining > 0;) {
+            // Code 0 is the run of one pixel; the entry added after the run of n pixels holds the run of n + 1. The
+            // width grows as in compress(1), the encoder GIF decoders follow: when the next free entry, before this
+            // code adds one, no longer fits.
+            $run = min($longest, $remaining);
+            $writer->write($run === 1 ? 0 : $clear + $run, $bits);
+            $remaining -= $run;
+            if ($next >= 1 << $bits && $bits < 12) {
+                ++$bits;
+            }
+            if ($remaining === 0) {
+                break;
+            }
+            if ($next < 4096) {
+                ++$next;
+                ++$longest;
+            } else {
+                $writer->write($clear, $bits);
+                $bits = 3;
+                $next = $clear + 2;
+                $longest = 1;
+            }
+        }
+        $writer->write($clear + 1, $bits);
+
+        return "\x2C" . pack('vvvvC', $left, $top, $width, $height, 0) . pack('C', 2) . self::gifSubBlocks($writer->getBytes());
     }
 
     /**
