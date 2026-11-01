@@ -14,11 +14,12 @@ use Yoast\PHPUnitPolyfills\TestCases\TestCase;
  * only what PHP 7.2 always builds in (Core, date, pcre, Reflection, SPL, standard) and their own extension. The
  * check reads the tokens of the worker files and looks each called function, named class and constant up in the
  * extensions of the running PHP, so that a 7.2 job sees the extensions as 7.2 splits them (json is one of its own
- * there, and shared in setup-php's build). A string literal that names a function or a class of the running PHP
- * counts as a reference too, as a string callable or a class_exists() check would use it; a function or class of an
- * extension this PHP lacks cannot be recognised that way. The check does not see constants named in strings
- * (defined(), constant()), which the workers guard themselves, names built at run time, or calls of the form
- * namespace\name(), which can only reach a function the worker files define themselves.
+ * there, and shared in setup-php's build). A string literal of two characters or more that names a function or a
+ * class of the running PHP exactly, case included, counts as a reference too, as a string callable or a
+ * class_exists() check would use it; a function or class of an extension this PHP lacks cannot be recognised that
+ * way. The check does not see constants named in strings (defined(), constant()), which the workers guard
+ * themselves, names built at run time, or calls of the form namespace\name(), which can only reach a function the
+ * worker files define themselves.
  *
  * @coversNothing
  */
@@ -74,7 +75,10 @@ final class WorkerDependencyTest extends TestCase
         self::assertIsString($file);
 
         try {
-            file_put_contents($file, "<?php\nnamespace A;\necho json_encode([\\JSON_THROW_ON_ERROR, new \\ArrayObject(), \\Imagick::class, image_type_to_extension(1), 'json_decode', 'png']);\n");
+            // Strings that name core functions or classes ('file', 'Error'), none ('png') or one only when case and
+            // length are ignored ('_' is gettext's _(), 'locale' intl's Locale) are not reported.
+            file_put_contents($file, "<?php\nnamespace A;\necho json_encode([\\JSON_THROW_ON_ERROR, new \\ArrayObject(), \\Imagick::class,"
+                . " image_type_to_extension(1), 'json_decode', 'png', 'file', 'key', 'end', 'next', 'Error', '_', 'locale']);\n");
             $outside = [];
             foreach (self::references($file) as $reference) {
                 if (!self::isAllowed($reference[0], $reference[1], 'gd')) {
@@ -122,11 +126,15 @@ final class WorkerDependencyTest extends TestCase
         $references = [];
         foreach ($tokens as $index => $token) {
             if ($token[0] === T_CONSTANT_ENCAPSED_STRING) {
+                // Only an exact name counts: function_exists() and class_exists() ignore case ("locale" finds
+                // intl's Locale), and a one-character string is a separator more often than gettext's _().
                 $text = ltrim(substr($token[1], 1, -1), '\\');
-                if (preg_match('/\A[A-Za-z_][A-Za-z0-9_]*\z/', $text) === 1) {
-                    if (function_exists($text)) {
+                if (preg_match('/\A[A-Za-z_][A-Za-z0-9_]+\z/', $text) === 1) {
+                    if (function_exists($text) && (new \ReflectionFunction($text))->getName() === $text) {
                         $references[] = ['function', $text];
-                    } elseif (class_exists($text, false) || interface_exists($text, false)) {
+                    } elseif ((class_exists($text, false) || interface_exists($text, false))
+                        && (new \ReflectionClass($text))->getName() === $text
+                    ) {
                         $references[] = ['class', $text];
                     }
                 }
