@@ -195,7 +195,8 @@ final class GoldenConversionTest extends BackendTestCase
 
     /**
      * The JPEG with EXIF orientation 6 comes out upright (12 x 16) when a backend applies the orientation, or as
-     * stored with a warning; either way it is close to the fixture turned the same way.
+     * stored with a warning; either way each quadrant has the colour of the fixture turned the same way, and a
+     * lossless output is close to it.
      */
     public function testAnOrientedJpegIsTurnedUprightOrReported(): void
     {
@@ -216,7 +217,12 @@ final class GoldenConversionTest extends BackendTestCase
             self::markTestSkipped('No enabled backend encodes WEBP or AVIF.');
         }
         $output = $this->workingDirectory()->pathOf('upright.out');
-        $result = $converter->convert($fixture[0], $output, (new ConversionRequest($target))->withLossless(true));
+        // Lossless where a backend encodes the target so, else at quality 100 (GD before PHP 8.1): a lossless request
+        // that none can serve falls back to the input format, with a warning of its own.
+        $lossless = self::encodesLosslessly($backends, $target);
+        $request = new ConversionRequest($target);
+        $request = $lossless ? $request->withLossless(true) : $request->withQuality(100);
+        $result = $converter->convert($fixture[0], $output, $request);
 
         $info = self::inspect($output);
         self::assertNotNull($info);
@@ -233,7 +239,17 @@ final class GoldenConversionTest extends BackendTestCase
         }
         $decoded = self::decode($output);
         if ($reference !== null && $decoded !== null) {
-            self::assertGreaterThanOrEqual(self::MIN_PSNR, self::psnr($reference, $decoded, false));
+            // The colour at the centre of each quadrant tells a turn from a mirror, even through a lossy encoder; the
+            // PSNR, whose edges a lossy 4:2:0 encoder blurs in an image this small, is checked for a lossless output.
+            foreach ([[1, 1], [3, 1], [1, 3], [3, 3]] as $quarter) {
+                $offset = 4 * (intdiv($quarter[1] * $reference['height'], 4) * $reference['width'] + intdiv($quarter[0] * $reference['width'], 4));
+                for ($channel = 0; $channel < 3; ++$channel) {
+                    self::assertEqualsWithDelta($reference['pixels'][$offset + $channel], $decoded['pixels'][$offset + $channel], 48, sprintf('quadrant %d,%d', $quarter[0], $quarter[1]));
+                }
+            }
+            if ($lossless) {
+                self::assertGreaterThanOrEqual(self::MIN_PSNR, self::psnr($reference, $decoded, false));
+            }
         }
     }
 
@@ -243,7 +259,9 @@ final class GoldenConversionTest extends BackendTestCase
      */
     public function testTheSmallerFileIsKept(): void
     {
-        $converter = $this->converter(self::availableBackends());
+        $backends = self::availableBackends();
+        $converter = $this->converter($backends);
+        $lossless = self::encodesLosslessly($backends, ImageFormat::WEBP);
         if (!in_array(ImageFormat::WEBP, $converter->getCapabilities()->getOutputFormats(), true)) {
             self::markTestSkipped('No enabled backend encodes WEBP.');
         }
@@ -255,8 +273,10 @@ final class GoldenConversionTest extends BackendTestCase
                 continue;
             }
             $output = $this->workingDirectory()->pathOf('smaller-' . $format);
-            // Lossless at the lowest effort, metadata kept: an output that is rarely smaller than these small stills.
-            $request = (new ConversionRequest())->withLossless(true)->withEffort(0)->withStripMetadata(false);
+            // Lossless at the lowest effort (quality 100 where no backend encodes WEBP losslessly), metadata kept: an
+            // output that is rarely smaller than these small stills.
+            $request = (new ConversionRequest())->withEffort(0)->withStripMetadata(false);
+            $request = $lossless ? $request->withLossless(true) : $request->withQuality(100);
             $result = $this->convertUnlessRefused($converter, $fixture, $output, $request);
             if ($result === null) {
                 continue;
@@ -273,9 +293,9 @@ final class GoldenConversionTest extends BackendTestCase
             }
         }
         if ($converted === 0) {
-            self::markTestSkipped('No enabled backend converts a still fixture to lossless WEBP.');
+            self::markTestSkipped('No enabled backend converts a still fixture to WEBP.');
         }
-        self::assertGreaterThan(0, $passedThrough, 'at least one lossless output is larger than its fixture');
+        self::assertGreaterThan(0, $passedThrough, 'at least one output is larger than its fixture');
     }
 
     /**
@@ -358,6 +378,27 @@ final class GoldenConversionTest extends BackendTestCase
             self::assertStringContainsString('instead of', $exception->getMessage());
         }
         self::assertFileDoesNotExist($output);
+    }
+
+    /**
+     * Whether one of the backends encodes $format losslessly. Only GD before PHP 8.1 (no IMG_WEBP_LOSSLESS) declares
+     * none among the backends that encode WEBP; any other backend that encodes WEBP must declare it.
+     *
+     * @param list<BackendInterface> $backends
+     */
+    private static function encodesLosslessly(array $backends, string $format): bool
+    {
+        $lossless = false;
+        foreach ($backends as $backend) {
+            $capabilities = $backend->getCapabilities();
+            $declared = in_array($format, $capabilities->getLosslessFormats(), true);
+            if ($format === ImageFormat::WEBP && in_array(ImageFormat::WEBP, $capabilities->getOutputFormats(), true) && !($backend->getName() === 'gd' && PHP_VERSION_ID < 80100)) {
+                self::assertTrue($declared, $backend->getName() . ' encodes WEBP losslessly.');
+            }
+            $lossless = $lossless || $declared;
+        }
+
+        return $lossless;
     }
 
     /**
@@ -497,9 +538,10 @@ final class GoldenConversionTest extends BackendTestCase
             $minimum = self::MIN_PSNR_RESIZED;
         } elseif ($result->getOutputFormat() === ImageFormat::GIF) {
             $minimum = self::MIN_PSNR_GIF;
-        } elseif ($result->isPassthrough() || ($request->isLossless() && $inputFormat !== ImageFormat::AVIF)) {
+        } elseif ($result->isPassthrough() || ($request->isLossless() && $result->getOutputFormat() === $request->getFormat() && $inputFormat !== ImageFormat::AVIF)) {
             // Decoders upsample the chroma of an AVIF input differently: a lossless copy of it is held to the lossy
-            // threshold.
+            // threshold. A lossless request that fell back to another format (no backend encodes it losslessly) is
+            // held to the lossy one too.
             $minimum = self::MIN_PSNR_LOSSLESS;
         }
         $alpha = in_array($result->getOutputFormat(), [ImageFormat::PNG, ImageFormat::WEBP, ImageFormat::AVIF, ImageFormat::TIFF], true);
