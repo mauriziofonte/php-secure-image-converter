@@ -10,6 +10,7 @@ use Mfonte\SecureImageConverter\Backend\BackendFactory;
 use Mfonte\SecureImageConverter\Backend\GdBackend;
 use Mfonte\SecureImageConverter\Backend\ImagickBackend;
 use Mfonte\SecureImageConverter\Backend\Internal\SandboxPaths;
+use Mfonte\SecureImageConverter\Backend\Worker\AbstractWorker;
 use Mfonte\SecureImageConverter\Contract\ImageFormat;
 use Mfonte\SecureImageConverter\Contract\IsolationLevel;
 use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
@@ -140,24 +141,38 @@ final class SandboxVisibilityTest extends BackendTestCase
                 $visible[] = $path;
             }
         }
+        // "php -n" may lack ext-json (PHP 7 builds it shared): the answer is written by the worker's own encoder.
         $code = sprintf(
-            '$seen = []; foreach (%s as $path) { if (file_exists($path) && !(is_dir($path) && count((array) scandir($path)) <= 2)) { $seen[] = $path; } }'
-            . ' $tmp = tmpfile(); echo json_encode(["seen" => $seen, "usr_bin" => array_values(array_diff((array) @scandir("/usr/bin"), [".", ".."])),'
+            'require %s; $seen = []; foreach (%s as $path) { if (file_exists($path) && !(is_dir($path) && count((array) scandir($path)) <= 2)) { $seen[] = $path; } }'
+            . ' $tmp = tmpfile(); echo ' . AbstractWorker::class . '::encodeAnswer(["seen" => $seen, "usr_bin" => array_values(array_diff((array) @scandir("/usr/bin"), [".", ".."])),'
             . ' "tmp" => array_values(array_diff((array) @scandir("/tmp"), [".", ".."])), "tmp_writable" => @file_put_contents("/tmp/probe", "x") !== false,'
             . ' "tmpdir" => getenv("TMPDIR"), "home" => getenv("HOME"), "cwd" => getcwd(), "tmpfile" => is_resource($tmp),'
             . ' "zoneinfo" => is_dir("/usr/share/zoneinfo"), "script" => is_file(%s), "policy" => is_file(%s)]);',
+            var_export((string) (new \ReflectionClass(AbstractWorker::class))->getFileName(), true),
             var_export($visible, true),
             var_export($script, true),
             var_export(ImagickBackend::policyDirectory() . '/policy.xml', true)
         );
         $directory = $this->workingDirectory();
 
-        $result = $backend->createJobRunner(268435456)->execute([(string) $command[0], '-n', '-r', $code], $directory, null, $backend->getSandboxResourcePaths());
+        $result = $backend->createJobRunner(268435456)->execute(
+            [(string) $command[0], '-n', '-d', 'display_errors=stderr', '-r', $code],
+            $directory,
+            null,
+            $backend->getSandboxResourcePaths()
+        );
 
-        self::assertTrue($result->isSuccessful(), $result->getStderr());
+        $outcome = sprintf(
+            'exit code %s, signal %s; stdout: %s; stderr: %s',
+            var_export($result->getExitCode(), true),
+            var_export($result->getSignal(), true),
+            substr($result->getStdout(), 0, 4000),
+            substr($result->getStderr(), 0, 4000)
+        );
+        self::assertTrue($result->isSuccessful(), 'The PHP CLI does not run in the sandbox: ' . $outcome);
         self::assertSame(IsolationLevel::SANDBOX, $result->getIsolationLevel());
         $seen = json_decode($result->getStdout(), true);
-        self::assertIsArray($seen, $result->getStdout());
+        self::assertIsArray($seen, $outcome);
         self::assertSame([], $seen['seen'], 'Host paths are visible in the sandbox.');
         self::assertIsArray($seen['usr_bin']);
         foreach ($seen['usr_bin'] as $entry) {
