@@ -1,0 +1,570 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  COMPOSER_NO_INTERACTION: '1'
+
+# Dependencies are resolved by each job for its own PHP version: no lock file
+# is committed. setup-php hands the job token to Composer, so VCS repositories
+# hosted on GitHub resolve without hitting the anonymous API rate limit.
+
+jobs:
+  validate:
+    name: Composer validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.4'
+          coverage: none
+          tools: composer:v2
+
+      # The manifests of the development tools are held to the same standard
+      # as the root one.
+      - name: Validate the Composer manifests
+        run: |
+          composer validate --strict
+          for tool in tools/*/; do
+            composer validate --strict "${tool}composer.json"
+          done
+
+  tests:
+    name: Tests (PHP ${{ matrix.php }}, ${{ matrix.deps }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['7.2', '7.3', '7.4', '8.0', '8.1', '8.2', '8.3', '8.4', '8.5']
+        deps: [lowest, highest]
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The development php.ini reports every error and enables assertions.
+      - name: Set up PHP
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+          ini-file: development
+          tools: composer:v2
+
+      # PHPStan's PHP 7.2 run does not report every construct that older PHP
+      # versions reject (typed properties, trailing commas in calls), so each
+      # job first lints the code with its own PHP.
+      - name: Lint PHP files
+        run: |
+          count=0
+          status=0
+          while IFS= read -r -d '' file; do
+            count=$((count + 1))
+            output="$(php -l "$file" 2>&1)" || { printf '%s\n' "$output"; status=1; }
+          done < <(find src resources tests tools/require-tool.php -type f -name '*.php' -print0 | sort -z)
+          echo "Linted $count PHP files with PHP $(php -r 'echo PHP_VERSION;')"
+          exit "$status"
+
+      # Lowest versions of the runtime dependencies; test tooling (PHPUnit and
+      # the polyfills) always takes the highest version for the running PHP.
+      # Composer 2.9+ would silently skip a floor that has an advisory and
+      # resolve the next release instead, so security blocking is turned off
+      # here (COMPOSER_NO_SECURITY_BLOCKING is its name before Composer 2.10)
+      # and the audit below fails when a floor needs raising.
+      - name: Install dependencies (lowest)
+        if: matrix.deps == 'lowest'
+        env:
+          COMPOSER_NO_BLOCKING: '1'
+          COMPOSER_NO_SECURITY_BLOCKING: '1'
+        run: |
+          composer update --prefer-lowest --prefer-stable --no-progress
+          composer update phpunit/phpunit yoast/phpunit-polyfills --with-all-dependencies --no-progress
+
+      - name: Audit dependencies (lowest)
+        if: matrix.deps == 'lowest'
+        run: composer audit
+
+      - name: Install dependencies (highest)
+        if: matrix.deps == 'highest'
+        run: composer update --no-progress
+
+      - name: Show installed packages
+        run: composer show
+
+      # The backend integration tests run in the Backends jobs below, with
+      # the conversion programs installed and SIC_EXPECTED_BACKENDS set.
+      # Here they would run only for the extensions setup-php happens to
+      # enable, slow group included, at whatever isolation level the runner
+      # gives. The security corpus converts with the real programs as well
+      # and runs in the reference image (Security job). PHPUnit 8 to 10
+      # keep only the last --exclude-group, and PHPUnit 11 warns about a
+      # comma-separated list (a warning fails the run).
+      - name: Run the test suite
+        run: |
+          case "$(php vendor/bin/phpunit --version)" in
+            'PHPUnit 8.'* | 'PHPUnit 9.'* | 'PHPUnit 10.'*)
+              composer test -- --exclude-group backends,security ;;
+            *)
+              composer test -- --exclude-group backends --exclude-group security ;;
+          esac
+
+      # Some ownership checks need a directory or a symbolic link owned by
+      # another user, which only root can create: those tests skip themselves
+      # above and run here again as root. cacheResult="false" in phpunit.xml.dist
+      # keeps root from writing to the checkout.
+      - name: Run the root-only tests
+        run: sudo "$(command -v php)" vendor/bin/phpunit --group root
+
+  static:
+    name: Static analysis
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.4'
+          coverage: none
+          tools: composer:v2
+
+      - name: Install dependencies (highest)
+        run: composer update --no-progress
+
+      # Any advisory on the resolved dependencies, or an abandoned package,
+      # fails the job. The runtime floors in composer.json are chosen so that
+      # a lowest install is advisory-free as well (see the tests job).
+      - name: Audit dependencies
+        run: composer audit
+
+      - name: Install development tools
+        run: |
+          for tool in tools/*/; do
+            composer install --working-dir="$tool" --no-progress
+          done
+
+      - name: Coding style (php-cs-fixer)
+        run: composer cs:check
+
+      - name: PHPStan (as PHP 7.2.5 and as PHP 8.5)
+        run: composer analyse
+
+  # The tests job runs the isolation tests too (composer test runs every
+  # group but backends), but without bubblewrap, so there the sandbox tests
+  # skip; the static job runs no tests. This job installs bubblewrap and
+  # lifts Ubuntu 24.04's AppArmor restriction on unprivileged user
+  # namespaces, so that every sandbox test really runs: with
+  # SIC_EXPECTED_ISOLATION_LEVEL set, a test that needs a level the host
+  # lacks fails instead of skipping. It then disables user namespaces and
+  # checks that detection falls back to the rlimit level.
+  isolation:
+    name: Isolation (PHP ${{ matrix.php }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # proc_open() takes a command string on PHP 7.2 and an argument list
+        # on PHP 7.4+: both paths run in the sandbox.
+        php: ['7.2', '8.5']
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+          ini-file: development
+          tools: composer:v2
+
+      # Bounded like the apt step of the backends job below.
+      - name: Install bubblewrap and allow unprivileged user namespaces
+        timeout-minutes: 10
+        run: |
+          apt_options=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+          sudo apt-get "${apt_options[@]}" update
+          sudo apt-get "${apt_options[@]}" install --yes --no-install-recommends bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          bwrap --version
+          prlimit --version
+
+      - name: Install dependencies (highest)
+        run: composer update --no-progress
+
+      # Prints what the detector finds, and the stderr of a sandboxed command,
+      # so that a failure below can be diagnosed from the log.
+      - name: Report the detected isolation level
+        run: |
+          php <<'PHP'
+          <?php
+          require 'vendor/autoload.php';
+          use Mfonte\SecureImageConverter\Isolation\IsolationDetector;
+          use Mfonte\SecureImageConverter\Isolation\ProcessRunner;
+          use Mfonte\SecureImageConverter\Isolation\WorkingDirectory;
+          $detection = (new IsolationDetector(null, null, 0))->detect();
+          echo json_encode($detection->toArray(), JSON_PRETTY_PRINT), PHP_EOL;
+          $directory = WorkingDirectory::create();
+          try {
+              $result = (new ProcessRunner('sandbox'))->execute(['true'], $directory);
+              printf("sandboxed true: exit %s, signal %s\n%s\n", var_export($result->getExitCode(), true), var_export($result->getSignal(), true), $result->getStderr());
+          } catch (Exception $exception) {
+              echo get_class($exception), ': ', $exception->getMessage(), PHP_EOL;
+          } finally {
+              $directory->remove();
+          }
+          PHP
+
+      - name: Run the isolation tests (sandbox expected)
+        env:
+          SIC_EXPECTED_ISOLATION_LEVEL: sandbox
+        run: vendor/bin/phpunit --group isolation
+
+      - name: Disable unprivileged user namespaces
+        run: sudo sysctl -w user.max_user_namespaces=0
+
+      - name: Run the isolation tests (rlimit expected without user namespaces)
+        env:
+          SIC_EXPECTED_ISOLATION_LEVEL: rlimit
+        run: vendor/bin/phpunit --group isolation
+
+  # Converts with the real programs, at the sandbox level: once with every
+  # backend and once with each backend alone (SIC_BACKENDS), on the lowest
+  # and the highest supported PHP. SIC_EXPECTED_BACKENDS makes a test of a
+  # backend that is missing or lacks its reference capabilities fail instead
+  # of skipping. The packages are those of tests/docker/Dockerfile; the page
+  # in /usr/share/nginx/html is one that no backend may see. The group
+  # "slow" (highest-effort AVIF of large screenshots and GIFs; avifenc
+  # takes minutes per megapixel) runs once, with every backend, on the
+  # highest PHP ("all-slow"); the other jobs exclude it.
+  backends:
+    name: Backends (PHP ${{ matrix.php }}, ${{ matrix.backends }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ matrix.backends == 'all-slow' && 240 || 45 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['7.2', '8.5']
+        backends: [all, vips, cwebp, gif2webp, avifenc, imagick, gd]
+        include:
+          - php: '8.5'
+            backends: all-slow
+    env:
+      SIC_BACKENDS: ${{ startsWith(matrix.backends, 'all') && 'vips,cwebp,gif2webp,avifenc,imagick,gd' || matrix.backends }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The PHP workers run this PHP CLI with php -n and load gd or imagick
+      # themselves.
+      - name: Set up PHP
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+          ini-file: development
+          extensions: gd, imagick
+          tools: composer:v2
+
+      # A stalled mirror once held this step for 45 minutes, until the job
+      # timed out: apt retries and gives up on a silent connection, and the
+      # step stops after ten minutes.
+      - name: Install the conversion programs and bubblewrap
+        timeout-minutes: 10
+        run: |
+          apt_options=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+          sudo apt-get "${apt_options[@]}" update
+          sudo apt-get "${apt_options[@]}" install --yes --no-install-recommends bubblewrap \
+            libvips-tools libheif-plugin-aomenc webp libavif-bin imagemagick
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo mkdir -p /usr/share/nginx/html
+          echo private | sudo tee /usr/share/nginx/html/index.html > /dev/null
+          vips --version
+          cwebp -version
+          avifenc --version
+          php -r 'printf("gd %s, imagick %s\n", phpversion("gd"), phpversion("imagick"));'
+
+      - name: Install dependencies (highest)
+        run: composer update --no-progress
+
+      # Prints what each enabled backend proved it can do, so that a failure
+      # below can be diagnosed from the log.
+      - name: Report the backend capabilities
+        run: |
+          php <<'PHP'
+          <?php
+          require 'vendor/autoload.php';
+          use Mfonte\SecureImageConverter\Backend\BackendFactory;
+          use Mfonte\SecureImageConverter\Backend\BackendOptions;
+          use Mfonte\SecureImageConverter\Isolation\IsolationDetector;
+          use Mfonte\SecureImageConverter\Isolation\ProcessRunner;
+          $level = (new IsolationDetector(null, null, 0))->detect()->getLevel();
+          echo "isolation level: $level", PHP_EOL;
+          $runner = new ProcessRunner($level);
+          $options = (new BackendOptions())->withCapabilityCache(false);
+          foreach (BackendFactory::createAll($runner, $options, BackendFactory::parseNames(getenv('SIC_BACKENDS'))) as $backend) {
+              echo json_encode($backend->getCapabilities()->toArray(), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES), PHP_EOL;
+          }
+          PHP
+
+      - name: Run the backend tests
+        env:
+          SIC_EXPECTED_BACKENDS: ${{ env.SIC_BACKENDS }}
+          SIC_EXPECTED_ISOLATION_LEVEL: sandbox
+          SIC_PHPUNIT_GROUPS: ${{ matrix.backends == 'all-slow' && '--group slow' || '--group backends --exclude-group slow' }}
+        run: vendor/bin/phpunit $SIC_PHPUNIT_GROUPS
+
+  # Builds the reference test image (tests/docker) for both platforms; arm64
+  # runs under QEMU. The build itself runs every program of the image (each
+  # prints its version), so on arm64 it proves the emulated binaries start.
+  # Nothing is pushed: the image is for CI and local runs only.
+  image:
+    name: Reference image (${{ matrix.platform }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up QEMU
+        if: matrix.platform != 'linux/amd64'
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          image: docker.io/tonistiigi/binfmt:qemu-v10.1.3@sha256:ec9aa508f3db5856e19fe91cbada91562da92681be589629215e76e7a45305d6
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build the reference image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: tests/docker
+          platforms: ${{ matrix.platform }}
+          load: true
+          push: false
+          provenance: false
+          tags: sic-reference:ci
+
+      - name: Show what the image holds
+        run: |
+          docker image inspect sic-reference:ci --format '{{.Os}}/{{.Architecture}} {{.Size}} bytes'
+          docker run --rm --platform ${{ matrix.platform }} sic-reference:ci \
+            sh -c 'uname -m && php -v && php -m && dpkg-query -W bubblewrap util-linux libvips-tools imagemagick webp libavif-bin php8.3-cli php-imagick'
+
+  # The backends group in the reference image, on amd64, with every backend
+  # expected at the sandbox level and as an unprivileged user. The Backends
+  # jobs above cover PHP 7.2 and 8.5 on the runner; this job covers the PHP
+  # of the image and proves that the image is complete. The Composer
+  # dependencies are resolved on the runner for that PHP, and the checkout is
+  # mounted read-only.
+  backends-image:
+    name: Backends (PHP 8.3, reference image)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.3'
+          coverage: none
+          tools: composer:v2
+
+      - name: Install dependencies (highest)
+        run: composer update --no-progress
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build the reference image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: tests/docker
+          platforms: linux/amd64
+          load: true
+          push: false
+          provenance: false
+          tags: sic-reference:ci
+
+      # Docker's default seccomp and AppArmor profiles, and Ubuntu 24.04's
+      # AppArmor restriction on the runner, forbid the user namespaces that
+      # bubblewrap needs.
+      - name: Run the backend tests in the image
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          docker run --rm --user 65534:65534 -e HOME=/tmp \
+            --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
+            --security-opt systempaths=unconfined \
+            -v "$PWD:/src:ro" -w /src \
+            -e SIC_EXPECTED_ISOLATION_LEVEL=sandbox \
+            -e SIC_EXPECTED_BACKENDS=vips,cwebp,gif2webp,avifenc,imagick,gd \
+            sic-reference:ci php vendor/bin/phpunit --group backends --exclude-group slow
+
+  # The security corpus (ImageCorpus) and the fuzz runs, in the reference
+  # image on amd64, as an unprivileged user at the sandbox level with every
+  # backend expected (see tests/Integration/Security/SecurityTestCase.php
+  # for the rules every hostile input is held to). The container gets 4 GiB
+  # of memory, so that a decoder that escaped its own ceiling would be
+  # killed here rather than pass. The seed is fixed: a failure reproduces
+  # locally with the same command, and each failing input is uploaded.
+  security:
+    name: Security corpus (PHP 8.3, reference image)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.3'
+          coverage: none
+          tools: composer:v2
+
+      - name: Install dependencies (highest)
+        run: composer update --no-progress
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build the reference image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: tests/docker
+          platforms: linux/amd64
+          load: true
+          push: false
+          provenance: false
+          tags: sic-reference:ci
+
+      - name: Run the security corpus and the fuzz runs in the image
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          out="$RUNNER_TEMP/security"
+          mkdir -p "$out/failures"
+          chmod -R 0777 "$out"
+          docker run --rm --user 65534:65534 -e HOME=/tmp --memory 4g \
+            --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
+            --security-opt systempaths=unconfined \
+            -v "$PWD:/src:ro" -w /src -v "$out:/out" \
+            -e SIC_EXPECTED_ISOLATION_LEVEL=sandbox \
+            -e SIC_EXPECTED_BACKENDS=vips,cwebp,gif2webp,avifenc,imagick,gd \
+            -e SIC_SECURITY_REPORT=/out/report.tsv \
+            -e SIC_FUZZ_FAILURES=/out/failures \
+            -e SIC_FUZZ_SEED=20261101 \
+            -e SIC_FUZZ_ITERATIONS=200000 \
+            -e SIC_FUZZ_CONVERSIONS=500 \
+            sic-reference:ci \
+            sh -c 'php vendor/bin/phpunit --group security && php vendor/bin/phpunit --group fuzz'
+
+      # Outcome and milliseconds of every corpus conversion, slowest first.
+      - name: Show the slowest conversions
+        if: always()
+        run: |
+          report="$RUNNER_TEMP/security/report.tsv"
+          if [ -f "$report" ]; then
+            printf 'path\trequest\toutcome\tms\n'
+            sort -t "$(printf '\t')" -k4,4nr "$report" | head -n 40
+          fi
+
+      - name: Upload the failing fuzz inputs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: security-failures
+          path: ${{ runner.temp }}/security/failures
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # Scans the reference image for vulnerabilities of its packages; nightly.yml
+  # runs the same scan every night, so that an advisory published after the
+  # last push is seen. Policy (see tests/docker/Dockerfile): the high and
+  # critical ones are reported; any critical one, with a fixed package or
+  # not, fails the job unless tests/docker/.trivyignore lists it with a
+  # reason and an expiry date.
+  trivy:
+    name: Trivy (reference image)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build the reference image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: tests/docker
+          platforms: linux/amd64
+          load: true
+          push: false
+          provenance: false
+          tags: sic-reference:ci
+
+      - name: Report high and critical vulnerabilities, fixed or not
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.70.0
+          image-ref: sic-reference:ci
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          format: table
+          exit-code: '0'
+
+      - name: Fail on a critical vulnerability, fixed or not
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.70.0
+          skip-setup-trivy: true
+          image-ref: sic-reference:ci
+          scanners: vuln
+          severity: CRITICAL
+          ignore-unfixed: false
+          trivyignores: tests/docker/.trivyignore
+          format: table
+          exit-code: '1'

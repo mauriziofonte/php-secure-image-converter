@@ -1,0 +1,229 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Mfonte\SecureImageConverter\Validation\Parser;
+
+use Mfonte\SecureImageConverter\Contract\Exception\InvalidImageException;
+use Mfonte\SecureImageConverter\Contract\ImageFormat;
+use Mfonte\SecureImageConverter\Validation\ImageInfo;
+use Mfonte\SecureImageConverter\Validation\Limits;
+
+/**
+ * GIF header parser: reads the logical screen, then walks every block up to the trailer, counting the images
+ * (frames) and skipping the LZW data sub-blocks without decoding them.
+ *
+ * - The logical screen must have a width and height from 1, checked against the limits at once. Every image must be
+ *   non-empty and lie inside the logical screen, and declare an LZW minimum code size from 1 to 11 (the range LZW
+ *   decoders accept).
+ * - The frame count is checked against the limits each time it exceeds Limits::maxFramesFor(), so a GIF with
+ *   thousands of tiny frames is refused as soon as the limit is passed, without reading the rest of the file.
+ * - Only extension, image and trailer blocks may appear; a missing trailer means a truncated file. The work is bounded
+ *   by MAX_BLOCKS units: each sub-block length byte consumed counts one unit, each block introducer BLOCK_COST units,
+ *   so that neither a file made of tiny sub-blocks nor one made of tiny blocks takes long to walk.
+ *
+ * Metadata: an ICCRGBG1 application extension is the colour profile; comments, XMP, unknown application extensions,
+ * plain text extensions (which decoders do not render) and extensions of unknown label are other metadata.
+ * NETSCAPE2.0 and ANIMEXTS1.0 loop extensions and graphic control extensions are not metadata, unless they hold more
+ * than their fields (one sub-block of 3 and 4 bytes), which decoders skip. Bytes after the trailer (the archive of a
+ * GIFAR) are trailing data. A graphic control extension whose fields sub-block is longer than 4 bytes is reported as
+ * a variant (ImageInfo::VARIANT_GIF_LONG_GRAPHIC_CONTROL): giflib, and so gif2webp, refuses it.
+ *
+ * @internal
+ */
+final class GifParser implements ParserInterface
+{
+    /**
+     * Largest number of units of work in an input file: blocks and sub-blocks walked. Encoders write image data in
+     * sub-blocks of 255 bytes, so a real file reaches this only beyond 64 MB. Outputs are walked with a limit that
+     * grows with their allowed size (ImageInspector::forOutput()).
+     */
+    public const MAX_BLOCKS = 262144;
+
+    /**
+     * Units of MAX_BLOCKS that a block introducer takes: reading a block costs about as much as skipping eight
+     * sub-blocks.
+     */
+    public const BLOCK_COST = 8;
+
+    /**
+     * Application identifiers (8 bytes) and authentication codes (3 bytes) of the extensions that are not metadata.
+     *
+     * @var list<string>
+     */
+    private const ANIMATION_APPLICATIONS = ['NETSCAPE2.0', 'ANIMEXTS1.0'];
+
+    private const ICC_APPLICATION = 'ICCRGBG1012';
+
+    /**
+     * Bytes of the fields in the first sub-block of a loop extension (sub-block ID and loop count) and of a graphic
+     * control extension (flags, delay and transparent colour index).
+     */
+    private const LOOP_FIELDS_LENGTH = 3;
+    private const GRAPHIC_CONTROL_FIELDS_LENGTH = 4;
+
+    private const INTRODUCER_EXTENSION = 0x21;
+    private const INTRODUCER_IMAGE = 0x2C;
+    private const TRAILER = 0x3B;
+
+    private const LABEL_GRAPHIC_CONTROL = 0xF9;
+    private const LABEL_APPLICATION = 0xFF;
+
+    /**
+     * @var int
+     */
+    private $maxBlocks;
+
+    /**
+     * @param int $maxBlocks largest number of units of work: MAX_BLOCKS for untrusted input; ImageInspector::forOutput()
+     *                       raises it with the size of the files a backend may write
+     */
+    public function __construct(int $maxBlocks = self::MAX_BLOCKS)
+    {
+        $this->maxBlocks = max(self::MAX_BLOCKS, $maxBlocks);
+    }
+
+    public function parse(ByteReader $reader, Limits $limits): ImageInfo
+    {
+        $reader->seek(6);
+        $width = $reader->readUint16Le();
+        $height = $reader->readUint16Le();
+        $flags = $reader->readUint8();
+        $reader->skip(2);
+        if ($width === 0 || $height === 0) {
+            throw self::invalid('the logical screen has a zero width or height');
+        }
+        $limits->assertImage($width, $height, 1);
+        $frameBudget = $limits->maxFramesFor($width, $height);
+        self::skipColourTable($reader, $flags);
+
+        $frames = 0;
+        $blocks = 0;
+        $iccProfile = false;
+        $otherMetadata = false;
+        $longGraphicControl = false;
+
+        while (true) {
+            $blocks += self::BLOCK_COST;
+            if ($blocks > $this->maxBlocks) {
+                throw self::tooManyBlocks();
+            }
+            $introducer = $reader->readUint8();
+            if ($introducer === self::TRAILER) {
+                break;
+            }
+
+            // Length of the fields of a loop or graphic control extension, which its first sub-block holds, or 0.
+            $fieldsLength = 0;
+            if ($introducer === self::INTRODUCER_EXTENSION) {
+                $label = $reader->readUint8();
+                if ($label === self::LABEL_APPLICATION) {
+                    $length = $reader->readUint8();
+                    ++$blocks;
+                    if ($length === 0) {
+                        continue;
+                    }
+                    $identifier = $reader->read($length);
+                    if ($identifier === self::ICC_APPLICATION) {
+                        $iccProfile = true;
+                    } elseif (in_array($identifier, self::ANIMATION_APPLICATIONS, true)) {
+                        $fieldsLength = self::LOOP_FIELDS_LENGTH;
+                    } else {
+                        $otherMetadata = true;
+                    }
+                } elseif ($label === self::LABEL_GRAPHIC_CONTROL) {
+                    $fieldsLength = self::GRAPHIC_CONTROL_FIELDS_LENGTH;
+                } else {
+                    // Comments, plain text and unknown extensions: decoders skip them.
+                    $otherMetadata = true;
+                }
+                if ($fieldsLength > 0) {
+                    // Decoders read the fields from the first sub-block and skip the rest of the extension.
+                    $length = $reader->readUint8();
+                    ++$blocks;
+                    if ($length === 0) {
+                        continue;
+                    }
+                    $reader->skip($length);
+                    $otherMetadata = $otherMetadata || $length > $fieldsLength;
+                    $longGraphicControl = $longGraphicControl || ($label === self::LABEL_GRAPHIC_CONTROL && $length > $fieldsLength);
+                }
+            } elseif ($introducer === self::INTRODUCER_IMAGE) {
+                self::readImageDescriptor($reader, $width, $height);
+                if (++$frames > $frameBudget) {
+                    $limits->assertImage($width, $height, $frames);
+                }
+            } else {
+                throw self::invalid('the file has an unknown block');
+            }
+
+            $consumed = $reader->skipSubBlocks($this->maxBlocks - $blocks);
+            if ($consumed < 0) {
+                throw self::tooManyBlocks();
+            }
+            $blocks += $consumed;
+            if ($fieldsLength > 0 && $consumed > 1) {
+                $otherMetadata = true;
+            }
+        }
+
+        if ($frames === 0) {
+            throw self::invalid('the file has no image');
+        }
+        $limits->assertImage($width, $height, $frames);
+
+        return (new ImageInfo(ImageFormat::GIF, $width, $height, $frames, $reader->getSize()))
+            ->withMetadata($iccProfile, false, $otherMetadata)
+            ->withVariants($longGraphicControl ? [ImageInfo::VARIANT_GIF_LONG_GRAPHIC_CONTROL] : [])
+            ->withTrailingData($reader->getRemaining() > 0);
+    }
+
+    /**
+     * Reads an image descriptor, its local colour table and its LZW minimum code size, leaving the reader on its
+     * first data sub-block.
+     *
+     * @throws InvalidImageException
+     */
+    private static function readImageDescriptor(ByteReader $reader, int $screenWidth, int $screenHeight): void
+    {
+        $left = $reader->readUint16Le();
+        $top = $reader->readUint16Le();
+        $width = $reader->readUint16Le();
+        $height = $reader->readUint16Le();
+        $flags = $reader->readUint8();
+        if ($width === 0 || $height === 0) {
+            throw self::invalid('an image has a zero width or height');
+        }
+        if ($left + $width > $screenWidth || $top + $height > $screenHeight) {
+            throw self::invalid('an image extends beyond the logical screen');
+        }
+        self::skipColourTable($reader, $flags);
+
+        $codeSize = $reader->readUint8();
+        if ($codeSize < 1 || $codeSize > 11) {
+            throw self::invalid('an image has an invalid LZW minimum code size');
+        }
+    }
+
+    /**
+     * Skips the colour table announced by the flags of a logical screen or image descriptor, if any.
+     *
+     * @throws InvalidImageException
+     */
+    private static function skipColourTable(ByteReader $reader, int $flags): void
+    {
+        if (($flags & 0x80) !== 0) {
+            $reader->skip(3 << (($flags & 0x07) + 1));
+        }
+    }
+
+    private static function tooManyBlocks(): InvalidImageException
+    {
+        return self::invalid('the file has too many blocks and sub-blocks');
+    }
+
+    private static function invalid(string $problem): InvalidImageException
+    {
+        return new InvalidImageException('Invalid GIF: ' . $problem . '.');
+    }
+}
