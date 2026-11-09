@@ -49,7 +49,7 @@
 #   date of at most 30 days, after which the scan fails again and the entry
 #   is reviewed.
 # The image only runs tests; the policy for deployments is the operator's.
-FROM mirror.gcr.io/library/ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852
+FROM mirror.gcr.io/library/ubuntu:26.04@sha256:6a06111c3b0a8600feadb270aec771dc239bf407b25625f93f44ab00e11f4d3c
 
 LABEL org.opencontainers.image.title="secure-image-converter reference test image" \
       org.opencontainers.image.description="PHP CLI, libvips, ImageMagick, webp, libavif, bubblewrap and util-linux for the tests of mfonte/secure-image-converter; not published" \
